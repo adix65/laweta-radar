@@ -112,10 +112,34 @@ BAZA_LAT = _float("BAZA_LAT", 0.0)
 BAZA_LON = _float("BAZA_LON", 0.0)
 MAX_DYSTANS_KM = _int("MAX_DYSTANS_KM", 80)
 
-# Posty starsze niż to okno pomijamy przy pobieraniu. Zlecenie na lawetę jest
-# ważne kilkadziesiąt minut — po dobie ktoś już przyjechał, a my płacimy Apify
-# za pobranie i model za klasyfikację czegoś, co jest nieaktualne.
-MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 12)
+# Po ilu godzinach post przestaje być zleceniem. Starszy trafia do bazy ze
+# znacznikiem `stale`, ale NIE budzi nikogo powiadomieniem i nie idzie do modelu.
+# Sześć godzin, nie doba: zlecenie na lawetę żyje kilkadziesiąt minut, więc post
+# sprzed sześciu godzin jest już cudzy. Zapisujemy go mimo to, bo jest materiałem
+# do statystyki grupy — ale alert o nim uczyłby operatora ignorować alerty,
+# a to psuje jedyny kanał, jaki ten system ma.
+MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 6)
+
+# ---------------------------------------------------------------------------
+# BUDŻET APIFY — TWARDY SUFIT POBRANYCH POSTÓW NA DOBĘ dla całego systemu.
+#
+# Liczony w POSTACH, nie w runach, bo tak rozlicza się ten actor (patrz
+# config/groups.py). Sufit jest wspólny dla wszystkich grup i pilnuje go fetcher
+# przez licznik w tabeli `harmonogram` — po jego wyczerpaniu NIE wykonuje
+# kolejnych wywołań i mówi to wyraźnie w logu.
+#
+# DLACZEGO TAK OSTRO: pula kont Apify jest WSPÓLNA z sales-core-engine. Cicho
+# przekroczony budżet to nie jest „trochę wyższy rachunek" — to spalona pula,
+# z której korzysta też drugi system, i awaria dwóch rzeczy naraz.
+#
+# 2000 postów/dobę przy cenie rzędu 2,60 USD/1000 to ok. 156 USD miesięcznie.
+# ---------------------------------------------------------------------------
+POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
+
+# Nadpisanie ścieżki z pomiaru actora ("A" albo "B"). Puste = fetcher czyta
+# werdykt z docs/POMIAR-ACTORA.md, a gdy pomiaru nie ma — schodzi na ścieżkę B,
+# czyli droższą w pobraniu, ale tańszą w pomyłce (patrz workers/fb_fetcher.py).
+SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 
 # ---------------------------------------------------------------------------
 # Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
@@ -179,6 +203,8 @@ def opis_srodowiska() -> str:
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
     ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+         f", budzet={POSTY_NA_DOBE} postow/dobe"
+         f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 
 

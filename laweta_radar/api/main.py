@@ -42,17 +42,24 @@ def _stan_bazy() -> dict:
     try:
         with psycopg2.connect(settings.DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT to_regclass('public.posty') IS NOT NULL")
+                cur.execute("SELECT to_regclass('public.zlecenia') IS NOT NULL")
                 (jest_tabela,) = cur.fetchone()
                 if not jest_tabela:
                     # Rozróżnienie jest ważne: "baza działa, ale nie ma tabel"
                     # znaczy, że ktoś pominął migrację — a to wygląda w logach
                     # workera identycznie jak zerwane połączenie.
-                    return {"ok": False, "powod": "brak tabeli `posty` — odpal migracje "
-                                                  "(scripts/migrate.sh)"}
-                cur.execute("SELECT count(*) FROM posty")
-                (ile,) = cur.fetchone()
-        return {"ok": True, "postow": ile}
+                    return {"ok": False, "powod": "brak tabeli `zlecenia` — odpal "
+                                                  "migracje (scripts/migrate.sh)"}
+                # Trzy liczby, nie jedna: "1200 postów" nie odróżnia systemu,
+                # który zbiera i nic nie znajduje, od systemu, który znajduje
+                # i nie dowozi. Pierwsze to problem z listą grup, drugie —
+                # z klasyfikatorem albo powiadomieniami.
+                cur.execute("SELECT count(*), "
+                            "count(*) FILTER (WHERE czy_zlecenie), "
+                            "count(*) FILTER (WHERE pobrano_at > NOW() - "
+                            "INTERVAL '24 hours') FROM zlecenia")
+                (ile, zlecen, doba) = cur.fetchone()
+        return {"ok": True, "postow": ile, "zlecen": zlecen, "postow_24h": doba}
     except Exception as e:  # noqa: BLE001 — diagnostyka ma oddać powód, nie 500
         return {"ok": False, "powod": f"{type(e).__name__}: {str(e)[:200]}"}
 

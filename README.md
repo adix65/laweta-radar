@@ -21,12 +21,14 @@ grupy FB ──> fb_fetcher ──> gate ──> classifier ──> geo ──> 
 
 Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 
-- **fb_fetcher** — pobiera najnowsze posty ze zweryfikowanych grup przez Apify.
-  Klucze rotują się po **wspólnej z sales-core-engine** puli kont, ruch wychodzi
-  przez proxy per konto. Budżet runów rozdziela między grupy bandyta
-  (`services/bandit.py`), bo kredyt jest wspólny z drugim systemem.
-- **gate** — tani filtr słowny **przed** modelem. Bez niego płacilibyśmy Claude'owi
-  za każdy post o sprzedaży felg.
+- **fb_fetcher** — pobiera najnowsze posty ze zweryfikowanych grup przez Apify,
+  24/7. Klucze rotują się po **wspólnej z sales-core-engine** puli kont, ruch
+  wychodzi przez proxy per konto. Budżet — liczony w **pobranych postach**, nie
+  w runach — rozdziela między grupy bandyta (`services/bandit.py`), bo kredyt jest
+  wspólny z drugim systemem.
+- **gate** — tani filtr słowny **przed** modelem, po polsku, niemiecku, czesku
+  i słowacku. Bez niego płacilibyśmy Claude'owi za każdy post o sprzedaży felg;
+  bez wielojęzyczności gubilibyśmy w całości zlecenia z grup DE/CZ/SK.
 - **classifier** — Claude decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie.
 - **geo** — odrzuca zdarzenia poza zasięgiem. Zlecenie z drugiego końca Polski jest
@@ -36,13 +38,21 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 
 ### Stan repo
 
-Ten commit to **szkielet + infrastruktura Apify + narzędzia rozpoznawcze**. Działa
-już: konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
-bandyta, transport Telegrama, API diagnostyczne, migracja tabeli `posty`, a także
-dwa narzędzia uruchamiane ręcznie: **pomiar actora** i **wyszukiwarka grup**. Kroki
-pipeline'u (`workers/gate.py`, `workers/fb_fetcher.py`, `workers/classifier.py`,
-`services/geo.py`) dochodzą w kolejnych krokach — dopóki ich nie ma, system nic
-nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego mu brakuje.
+Działa: konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
+bandyta, transport Telegrama, API diagnostyczne, migracje, dwa narzędzia
+rozpoznawcze (**pomiar actora**, **wyszukiwarka grup**) oraz dwa pierwsze kroki
+pipeline'u: **bramka słowna** (`workers/gate.py`) i **fetcher**
+(`workers/fb_fetcher.py`).
+
+Brakuje `workers/classifier.py` i `services/geo.py`. Do czasu, aż powstaną, fetcher
+pobiera i odsiewa normalnie, a posty przepuszczone przez bramkę czekają w tabeli
+`zlecenia` ze statusem `nowe` i `zrodlo_decyzji='gate'` — czyli nie giną, tylko nie
+są jeszcze oceniane ani wysyłane.
+
+> **Zanim włączysz fetchera na produkcji: wykonaj pomiar actora.** Bez niego fetcher
+> schodzi na ostrożniejszą **ścieżkę B** (patrz „Budżet liczy się w postach"), która
+> działa poprawnie, ale kosztuje wielokrotnie więcej niż musi. Fetcher czyta werdykt
+> wprost z `docs/POMIAR-ACTORA.md` — po pomiarze przełączy się sam, bez zmiany kodu.
 
 ## Zanim powstanie fetcher: dwa pomiary, nie dwie intuicje
 
@@ -89,11 +99,77 @@ Oba narzędzia liczą i pokazują przewidywany koszt **przed** serią i czekają
 potwierdzenie; oba mają twardy sufit i odstęp między wywołaniami, bez
 zrównoleglania.
 
+## Budżet liczy się w POSTACH, nie w runach
+
+Apify rozlicza actora grup FB **za pobrany post**. Run jest darmowy, jego zawartość
+nie — i to przewraca dwie intuicje naraz:
+
+- **batchowanie grup nie oszczędza kredytu**, tylko narzut uruchomienia;
+- **płacimy za post widziany po raz dwudziesty**. Dedup w bazie chroni model
+  i Telegram, ale nie rachunek: za pobranie zapłacono, zanim dedup cokolwiek
+  zobaczył.
+
+Główną dźwignią jest więc `onlyPostsNewerThan`, a nie częstotliwość — **o ile actor
+to pole honoruje**. Rozstrzyga to pomiar, a fetcher **czyta jego werdykt** z
+`docs/POMIAR-ACTORA.md` zamiast zgadywać:
+
+| ścieżka | okno | `resultsLimit` | odstęp | czym płacimy za gęstsze pytanie |
+|---|---|---|---|---|
+| **A** — actor tnie po wieku | odstęp × 2, min. 30 min | hojny (do 50) — i tak nie zostanie zużyty | od 5 min | niczym: koszt dobowy = tempo grupy |
+| **B** — actor przyjmuje tylko doby | `1 day` | ciasny (do 12) — **każdy punkt to pieniądze** | od 15 min | wprost proporcjonalnie |
+
+**Bez pomiaru fetcher schodzi na B.** Nie dlatego, że jest bardziej prawdopodobna —
+dlatego, że pomyłka w tę stronę kosztuje trochę nadmiarowego pobierania, a pomyłka
+w drugą (hojny limit 50 przy ignorowanym oknie) to pięćdziesiąt opłaconych postów
+z każdej grupy w każdym przebiegu, bez żadnego objawu poza rachunkiem.
+
+Sufit dobowy (`POSTY_NA_DOBE`, start: 2000) jest **twardy i wspólny dla całego
+systemu**; rozdziela go między grupy bandyta (`services/bandit.py`) proporcjonalnie
+do wydajności = zlecenia / pobrane posty w oknie 7 dni. Grupa bez historii dostaje
+pulę startową, żeby dało się ją w ogóle zmierzyć. Po wyczerpaniu sufitu fetcher
+**nie wykonuje kolejnych wywołań** i mówi to wyraźnie — cicho przekroczony budżet to
+spalona pula kont, z której korzysta też sales-core-engine.
+
+Zysk uboczny, który jest właściwie głównym: po dwóch tygodniach system sam pokaże,
+które grupy są warte pieniędzy, a które tylko paliły budżet.
+
+```bash
+export PYTHONPATH=$PWD
+python -m laweta_radar.workers.fb_fetcher --sucho          # plan i koszt, zero wywołań
+python -m laweta_radar.workers.fb_fetcher --budzet 300     # inny sufit dobowy
+python -m laweta_radar.workers.fb_fetcher --grupa <URL>    # jedna grupa, bez harmonogramu
+```
+
+## Wielojęzyczność: PL / DE / CS / SK
+
+Laweta na trasie do Niemiec wraca pusta, jeśli zleceń szuka tylko po polsku. Bramka
+ma więc **osobny słownik na język** (czeski i słowacki dzielą jeden, z wariantami)
+i własną, mikrosekundową detekcję języka — bez bibliotek i bez sieci. Przy niepewnej
+detekcji post jest liczony **wszystkimi** słownikami i wygrywa najwyższy wynik:
+cztery przebiegi regeksem to mikrosekundy, a zgubione zlecenie to kilkaset złotych.
+
+To nie jest kosmetyka. Bramka jednojęzyczna jest **cicha i śmiertelna**: niemieckie
+„Suche Autotransport von München nach Krakau, Fahrzeug fährt nicht" nie trafia ani
+jednego polskiego wzorca, dostaje zero punktów i wylatuje — w logach wyglądając
+identycznie jak odrzucona reklama felg.
+
+```bash
+python -m laweta_radar.workers.gate "Suche Abschleppdienst, Motor kaputt"
+```
+
+Kto co robi z językiem — kontrakt spisany jest w `docs/WIELOJEZYCZNOSC.md`:
+**bramka nie tłumaczy, tylko wpuszcza**; tłumaczy klasyfikator (i wypełnia wszystkie
+pola **po polsku**, zostawiając nazwy miejscowości w oryginale, żeby geokodowanie
+trafiało tam, gdzie trzeba); powiadomienie niesie dwuliterowy znacznik języka, bo od
+niego zależy, w jakim języku operator ma oddzwonić.
+
 ## Struktura
 
 ```
 laweta_radar/
   workers/
+    fb_fetcher.py      # CRON: Apify -> bramka -> baza; budżet w postach
+    gate.py            # tani filtr słowny PRZED modelem, PL/DE/CS/SK
     apify_keys.py      # rotacja puli kluczy APIFY_API_TOKEN1..N     [kopia 1:1]
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
     apify_run.py       # odpal actora, doczekaj, oddaj itemy + koszt + czas
@@ -109,6 +185,9 @@ laweta_radar/
   api/
     main.py            # FastAPI: /health
     migrations/        # SQL odpalany RĘCZNIE, nigdy z workera
+      0001_posty.sql       # ZASTĄPIONA przez 0002 — patrz nagłówek 0002
+      0002_zlecenia.sql    # posty + werdykt (bramka/model) + status obsługi
+      0003_harmonogram.sql # stan pobierania i licznik dobowy per grupa
   scripts/
     pomiar_actora.py   # RĘCZNIE, raz: zmierz actora  -> docs/POMIAR-ACTORA.md
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu      -> data/kandydaci_grupy.csv
@@ -118,7 +197,8 @@ laweta_radar/
   requirements.txt
 data/kandydaci_grupy.csv  # lista grup do ręcznego sprawdzenia (kolumna `publiczna`)
 docs/APIFY-PROXY.md       # po co proxy i jak je skonfigurować
-docs/POMIAR-ACTORA.md     # wynik pomiaru actora — czyta go prompt fetchera
+docs/POMIAR-ACTORA.md     # wynik pomiaru actora — czyta go WPROST fb_fetcher
+docs/WIELOJEZYCZNOSC.md   # kto co robi z językiem: bramka / klasyfikator / alert
 ```
 
 Podział `workers/` vs `scripts/` jest celowy: **worker odpala się sam**, z crona, co
@@ -287,13 +367,18 @@ server {
 }
 ```
 
-Fetcher chodzi z crona — gęsto, bo liczy się czas reakcji:
+Fetcher chodzi z crona — gęsto, bo liczy się czas reakcji, i **24/7, bez okna
+nocnego**: auto psuje się o trzeciej w nocy i wtedy jest najmniej konkurencji.
+Ciszę nocną robimy po stronie powiadomień, bo zebrać zlecenie i nie budzić nim
+człowieka to dwie różne decyzje.
 
 ```cron
 */5 * * * * cd /home/ubuntu/laweta-radar && ./venv/bin/python -m laweta_radar.workers.fb_fetcher >> /var/log/laweta/fetcher.log 2>&1
 ```
 
-(wpis dokładamy razem z fetcherem — dziś ten moduł jeszcze nie istnieje)
+Cron może chodzić **gęściej** niż odstęp grupy — harmonogram i tak przepuści tylko
+te grupy, którym wypada. Odwrotnie się nie da: cron rzadszy niż `MIN_INTERWAL_MIN`
+jest sufitem, którego harmonogram nie przeskoczy.
 
 ### Aktualizacja
 
@@ -316,6 +401,10 @@ pm2 restart laweta-api
 | ile kredytu zostało na koncie #N | `python -m laweta_radar.workers.apify_credits --klucz N` |
 | jakie pola przyjmuje actor wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --schema` |
 | ile kosztowałby pomiar / seria wyszukiwania | dowolny z dwóch skryptów z `--sucho` |
+| co i za ile pobierze najbliższy przebieg | `python -m laweta_radar.workers.fb_fetcher --sucho` |
+| na której ścieżce (A/B) stoi fetcher | pierwsza linia wyjścia `--sucho` |
+| czemu ten post nie przeszedł bramki | `python -m laweta_radar.workers.gate "treść posta"` |
+| ile budżetu zostało na dzisiaj | `--sucho` (linia „budżet dobowy") albo tabela `harmonogram` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |
 | stan API i bazy | `curl -s localhost:8002/health` |
 
