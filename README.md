@@ -50,6 +50,7 @@ laweta_radar/
   workers/
     apify_keys.py      # rotacja puli kluczy APIFY_API_TOKEN1..N     [kopia 1:1]
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
+    apify_credits.py   # saldo miesięcznego kredytu konta (do pomiaru kosztu)
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate)
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
@@ -61,10 +62,12 @@ laweta_radar/
     main.py            # FastAPI: /health
     migrations/        # SQL odpalany RĘCZNIE, nigdy z workera
   scripts/             # env-shell, migrate, start_api, check_setup
+    pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
   tests/               # testy offline (bez sieci i bez bazy)
   .env.example
   requirements.txt
 docs/APIFY-PROXY.md    # po co proxy i jak je skonfigurować
+docs/POMIAR-ACTORA.md  # co actor realnie robi i ile kosztuje (wynik pomiaru)
 ```
 
 Moduły oznaczone `[kopia 1:1]` pochodzą z repo, w którym chodzą produkcyjnie.
@@ -179,6 +182,15 @@ adresu i ze statusem `unverified`. Żeby ruszyło:
    (publiczna? żywa? zgłoszeniowa czy sama reklama lawet?) i dopiero wtedy przestaw
    `status` na `"ok"`.
 
+3. zmierz actora, zanim zbudujesz wokół niego fetcher:
+   `python laweta_radar/scripts/pomiar_actora.py --sucho` (plan i koszt, bez sieci),
+   potem bez `--sucho`. Odpowiada na trzy pytania, których dokumentacja actora nie
+   rozstrzyga: czy `onlyPostsNewerThan` w ogóle tnie i do jakiej jednostki, czy
+   `resultsLimit` przy wielu grupach jest per grupa czy globalny, i ile realnie
+   kosztuje jeden pobrany post. Wynik ląduje w `docs/POMIAR-ACTORA.md` i to jego
+   czyta się przed pisaniem `_build_actor_input` — bez działającego okna czasowego
+   płacimy za wielokrotne pobieranie tych samych postów.
+
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
 „BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
@@ -249,6 +261,7 @@ pm2 restart laweta-api
 | nic nie przychodzi na Telegram | `python -m laweta_radar.services.telegram_notify` |
 | „brak kluczy Apify", choć są w `.env` | `source laweta_radar/scripts/env-shell.sh` |
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
+| ile kredytu zostało na kontach | `python -m laweta_radar.workers.apify_credits` (wymaga sieci) |
 | rotator widzi 0 kluczy | zła ścieżka do wspólnego `.env` — `python -m laweta_radar.config.settings` |
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |
