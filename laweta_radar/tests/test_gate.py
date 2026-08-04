@@ -545,3 +545,244 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# WIELOJĘZYCZNOŚĆ — PL / DE / CS / SK
+#
+# Bramka jednojęzyczna nie wygląda na zepsutą: obcojęzyczne zlecenie dostaje
+# zero punktów i wylatuje tak samo cicho jak reklama felg. Jedynym miejscem,
+# w którym tę różnicę widać, jest test per język — stąd korpusy niżej.
+#
+# Wymóg minimalny: po dziesięć przypadków na język, w tym po jednym wygaszonym.
+# ===========================================================================
+PL_PRZEPUSZCZONE = [
+    "Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala",
+    "Potrzebna laweta pilnie, stoję na S19 pod Rzeszowem",
+    "Zepsuł mi się samochód pod Jasłem, kto podjedzie?",
+    "Szukam lawety, auto po szkodzie, trzeba zabrać z parkingu",
+    "Kto przywiezie auto z Niemiec? Kupiłem osobówkę pod Kolonią",
+    "Auto niejeżdżące, potrzebne odholowanie do warsztatu",
+    "Polecicie jakąś lawetę w okolicy? Skrzynia padła",
+    "Szukam miejsca na lawecie, doładunek z Belgii do Krosna",
+    "Nie odpala, akumulator zdechł, ktoś z okolic pomoże?",
+    # Regresja: post BEZ OGONKÓW ze słowem „kto" — identycznym ze słowackim.
+    # Detekcja pokazywała „sk", post szedł tylko przez słownik czesko-słowacki
+    # i wylatywał. Fałszywe odrzucenie, czyli błąd, którego bramka ma nie robić.
+    "kupilem auto w niemczech, kto przywiezie na lawecie",
+]
+
+PL_ODRZUCONE = [
+    "Laweta 24/7, konkurencyjne ceny, zapraszam do kontaktu",
+    "Sprzedam lawetę, stan idealny, więcej info na priv",
+    "Zatrudnię kierowcę na lawetę, praca dla kierowcy od zaraz",
+]
+
+PL_WYGASZONE = [
+    "Potrzebna laweta pod Sanokiem — TEMAT ZAMKNIĘTY",
+    "Nieaktualne, znalazłem już kogoś",
+]
+
+DE_PRZEPUSZCZONE = [
+    # Post z założenia zadania: przy samych polskich wzorcach dostawał zero.
+    "Suche Autotransport von München nach Krakau, Fahrzeug fährt nicht",
+    "Brauche Abschleppdienst, mein Auto springt nicht an",
+    "Wer kann mein Auto abschleppen? Motor kaputt, stehe auf der A4",
+    "Panne auf der Autobahn, bei Dresden liegengeblieben",
+    "Unfall, Fahrzeug nicht fahrbereit, wer hat Platz?",
+    "Auto transportieren von Berlin nach Poznań, wer kann helfen?",
+    "Mein Wagen bleibt stehen und startet nicht mehr",
+    "Fahrzeug überführen nach Polen, Auto gekauft vom Händler",
+    "Totalschaden nach Unfall, brauche einen Transport nach Polen",
+    # Bez umlautów i bez słów funkcyjnych — detekcja NIE rozstrzygnie.
+    "Suche Abschleppdienst, Motor kaputt",
+]
+
+DE_ODRZUCONE = [
+    "Wir bieten Abschleppdienst, günstige Preise",
+    "Verkaufe Anhänger, guter Zustand, Preis VB",
+    "Suche Fahrer für Abschleppwagen, Stellenangebot ab sofort",
+]
+
+DE_WYGASZONE = [
+    "Hat sich erledigt, danke euch",
+    "Suche Abschleppdienst von Wien nach Brünn — nicht mehr aktuell",
+]
+
+CS_PRZEPUSZCZONE = [
+    "Hledám odtahovku, auto nenastartuje, jsem u Brna",
+    "Potřebuji odtah auta z Prahy do Ostravy",
+    "Nepojízdné auto na D1, kdo pomůže?",
+    "Nehoda u Plzně, potřebuji odtahovku co nejdřív",
+    "Nejde nastartovat, zůstal jsem stát u Kolína",
+    "Převoz auta z autobazaru do servisu",
+    "Auto nestartuje, mám poruchu na dálnici, je to nutné dnes",
+    "Havárie u Liberce, auto je nepojízdné, prosím o odtah",
+    "Přeprava auta do servisu, kdo má volno zítra?",
+    "Koupil jsem auto z Německa, kdo přiveze?",
+]
+
+CS_ODRZUCONE = [
+    "Nabízíme odtahovou službu, výhodné ceny",
+    "Hledáme řidiče, nabídka práce v dopravě",
+    "Prodám odtahovku, dobrý stav",
+]
+
+CS_WYGASZONE = [
+    "Již vyřešeno, děkuji",
+    "Potřebuji odtah z Brna — neaktuální, našel jsem někoho",
+]
+
+SK_PRZEPUSZCZONE = [
+    "Hľadám odťahovku, auto neštartuje, som pri Žiline",
+    "Potrebujem odťah auta z Bratislavy do Košíc",
+    "Nepojazdné auto na D1, kto pomôže?",
+    "Nehoda pri Nitre, potrebujem odťahovku",
+    "Nejde naštartovať, zostal som stáť pri Trenčíne",
+    "Prevoz auta z autobazáru do servisu",
+    "Auto neštartuje, mám poruchu na diaľnici, súrne",
+    "Havária pri Prešove, auto je nepojazdné, prosím o odťah",
+    "Preprava auta do servisu, kto má voľno?",
+    "Kúpil som auto z Nemecka, kto privezie?",
+]
+
+SK_ODRZUCONE = [
+    "Ponúkame odťahovú službu, lacné ceny",
+    "Prijmeme vodiča, ponuka práce v doprave",
+    "Predám odťahovku, dobrý stav",
+]
+
+SK_WYGASZONE = [
+    "Už vyriešené, ďakujem",
+    "Potrebujem odťah z Košíc — neaktuálne, našiel som niekoho",
+]
+
+KORPUSY = {
+    "pl": (PL_PRZEPUSZCZONE, PL_ODRZUCONE, PL_WYGASZONE),
+    "de": (DE_PRZEPUSZCZONE, DE_ODRZUCONE, DE_WYGASZONE),
+    "cs": (CS_PRZEPUSZCZONE, CS_ODRZUCONE, CS_WYGASZONE),
+    "sk": (SK_PRZEPUSZCZONE, SK_ODRZUCONE, SK_WYGASZONE),
+}
+
+
+def test_jezyki_kazde_zlecenie_przechodzi():
+    """NAJWAŻNIEJSZY test w tym pliku — każdy z tych postów jest wart kurs."""
+    for jezyk, (przepuszczone, _, _) in KORPUSY.items():
+        for tresc in przepuszczone:
+            assert przepuszcza(tresc), f"[{jezyk}] miało przejść: {tresc!r}"
+
+
+def test_jezyki_smieci_odpadaja():
+    for jezyk, (_, odrzucone, _) in KORPUSY.items():
+        for tresc in odrzucone:
+            assert not przepuszcza(tresc), f"[{jezyk}] miało odpaść: {tresc!r}"
+
+
+def test_jezyki_wygaszone_odpadaja_z_powodem():
+    for jezyk, (_, _, wygaszone) in KORPUSY.items():
+        for tresc in wygaszone:
+            wynik = w(tresc)
+            assert not wynik.werdykt, f"[{jezyk}] miało być wygaszone: {tresc!r}"
+            assert wynik.powod == "wygaszone", f"[{jezyk}] zły powód: {tresc!r}"
+
+
+def test_minimum_dziesieciu_przypadkow_na_jezyk():
+    """Test o samych testach — wymóg najłatwiejszy do cichego złamania.
+
+    Dopisanie języka do SLOWNIKI bez dopisania korpusu daje zieloną suitę
+    i bramkę, która ten język przepuszcza albo kasuje na oślep.
+    """
+    assert set(KORPUSY) == set(g.SLOWNIKI), (
+        "doszedł język do SLOWNIKI, ale nie doszedł korpus testowy")
+    for jezyk, listy in KORPUSY.items():
+        assert sum(len(x) for x in listy) >= 10, f"za mało przypadków dla {jezyk}"
+        assert listy[2], f"brak przypadku wygaszonego dla {jezyk}"
+
+
+def test_detekcja_jezyka_po_znakach_i_slowach():
+    assert g.wykryj_jezyk("Szukam lawety, auto się nie odpala") == "pl"
+    assert g.wykryj_jezyk("Ich brauche einen Abschleppwagen, das Auto "
+                          "springt nicht an") == "de"
+    assert g.wykryj_jezyk("Auto nenastartuje, zůstal jsem stát") == "cs"
+    assert g.wykryj_jezyk("Auto neštartuje, zostal som stáť, veľmi súrne") == "sk"
+
+
+def test_detekcja_oddaje_pustke_gdy_nie_wiadomo():
+    """"" nie jest porażką detekcji, tylko jej poprawnym zachowaniem."""
+    assert g.wykryj_jezyk("") == ""
+    assert g.wykryj_jezyk("Auto 2015 diesel") == ""
+    assert g.wykryj_jezyk("Suche Abschleppdienst, Motor kaputt") == ""
+
+
+def test_czeski_i_slowacki_dziela_slownik_ale_nie_znacznik():
+    """Jeden słownik, dwa znaczniki — od znacznika zależy język oddzwonienia."""
+    assert g.SLOWNIKI["cs"] is g.SLOWNIKI["sk"]
+    assert w("Hledám odtahovku, auto nenastartuje, jsem u Brna").jezyk == "cs"
+    assert w("Hľadám odťahovku, auto neštartuje, som pri Žiline").jezyk == "sk"
+
+
+def test_znacznik_jezyka_wraca_z_bramki():
+    """Powiadomienie bierze znacznik stąd — bez niego operator nie wie, w jakim
+    języku oddzwonić, bo reszta alertu jest już po polsku."""
+    assert w("Potrzebuję lawety, golf nie odpala").jezyk == "pl"
+    assert w("Suche Autotransport von München nach Krakau").jezyk == "de"
+
+
+def test_wygaszenie_dziala_ponad_jezykami():
+    """Wygaszenie widziane przez JAKIKOLWIEK słownik wygasza post.
+
+    Samo „weź najlepszy wynik" tu nie wystarcza: słownik, który nie zna zwrotu
+    „hat sich erledigt", po prostu milczy — a milczenie wygląda lepiej niż
+    odrzucenie. Post załatwiony przestaje być zleceniem niezależnie od języka.
+    """
+    wynik = w("Suche Abschleppdienst — hat sich erledigt")
+    assert not wynik.werdykt
+    assert wynik.powod == "wygaszone"
+
+
+def test_wymuszony_jezyk_zawezanie_do_jednego_slownika():
+    """`jezyk=` jest dla grup, o których wiadomo z góry, czym są."""
+    tresc = "Suche Abschleppdienst, Motor kaputt"
+    assert g.gate(tresc, tryb=g.TRYB_AKTYWNY, jezyk="de").werdykt
+    assert not g.gate(tresc, tryb=g.TRYB_AKTYWNY, jezyk="pl").werdykt
+
+
+def test_bledna_detekcja_nie_kasuje_zlecenia():
+    """Nawet gdy detekcja wskaże ZŁY język, post nadal idzie przez wszystkie
+    słowniki — pomyłka detekcji nie może być cichym fałszywym odrzuceniem."""
+    tresc = "kupilem auto w niemczech, kto przywiezie na lawecie"
+    assert przepuszcza(tresc)
+
+
+def test_wszystkie_wzorce_obcojezyczne_sa_poprawnymi_regexami():
+    """Literówka w niemieckim czy czeskim słowniku ma paść tutaj, a nie przy
+    pierwszym poście o trzeciej w nocy."""
+    tabele = (g.WYGASZENIE_DE + g.PRZEPUSZCZENIE_DE + g.ODRZUCENIE_DE
+              + g.PUNKTACJA_DE + g.HAMULCE_DE
+              + g.WYGASZENIE_CS_SK + g.PRZEPUSZCZENIE_CS_SK
+              + g.ODRZUCENIE_CS_SK + g.PUNKTACJA_CS_SK + g.HAMULCE_CS_SK)
+    for wzorzec, _, _ in tabele:
+        assert g._skompiluj(wzorzec), wzorzec
+
+
+def test_wzorce_obcojezyczne_sa_znormalizowane():
+    """Wzorzec z umlautem albo haczkiem NIGDY nie trafi — normalizacja go zbija,
+    a wzorzec i tekst muszą być w tej samej formie."""
+    tabele = (g.WYGASZENIE_DE + g.PRZEPUSZCZENIE_DE + g.ODRZUCENIE_DE
+              + g.PUNKTACJA_DE + g.HAMULCE_DE
+              + g.WYGASZENIE_CS_SK + g.PRZEPUSZCZENIE_CS_SK
+              + g.ODRZUCENIE_CS_SK + g.PUNKTACJA_CS_SK + g.HAMULCE_CS_SK)
+    for wzorzec, _, _ in tabele:
+        assert wzorzec == g.normalizuj(wzorzec), (
+            f"wzorzec nie jest w formie znormalizowanej: {wzorzec!r}")
+
+
+def test_instrukcja_dla_klasyfikatora_niesie_kontrakt():
+    """Klasyfikator dostaje ten tekst przez import, nie przez przepisanie.
+
+    Bez wyjątku na nazwy miejscowości geokodowanie dostanie „Monachium"
+    i zlecenie wyląduje na mapie w złym miejscu.
+    """
+    tekst = g.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA.lower()
+    for fragment in ("niemieck", "czesk", "słowack", "po polsku", "oryginal"):
+        assert fragment in tekst, f"z instrukcji zniknęło: {fragment}"

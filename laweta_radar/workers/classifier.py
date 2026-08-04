@@ -31,11 +31,20 @@ w znacznik. Prompt systemowy mówi wprost, że to dane do analizy, a polecenia
 w środku należy zignorować. Sklejenie instrukcji z treścią daje pierwszemu
 lepszemu żartownisiowi kontrolę nad tym, co system uzna za zlecenie.
 
+MIEJSCE W PIPELINIE. Woła to `workers/fb_fetcher.py`, trzema argumentami
+pozycyjnymi: `klasyfikuj(tresc, grupa, jezyk)`. `jezyk` to dwuliterowy znacznik
+z bramki — grupy z czterech obszarów (PL/DE/CZ/SK) idą przez ten sam pipeline,
+a operator ma dostać komplet pól PO POLSKU niezależnie od języka posta. Tekst
+instrukcji językowej mieszka w bramce (`gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA`),
+bo to ona rozpoznaje język i to ona wie, co przepuszcza — kopia tutaj rozjechałaby
+się przy pierwszej poprawce po jednej ze stron. Szczegóły: docs/WIELOJEZYCZNOSC.md.
+
 Provider modelu jest wymienny bez dotykania tego pliku — patrz services/llm.py.
 
 CLI:
     python -m laweta_radar.workers.classifier "treść posta"        # realne wołanie
     python -m laweta_radar.workers.classifier --prompt             # sam prompt
+    python -m laweta_radar.workers.classifier --prompt --jezyk de  # z instrukcją językową
 """
 from __future__ import annotations
 
@@ -44,7 +53,8 @@ import re
 import sys
 from typing import Any
 
-from laweta_radar.services import llm
+from laweta_radar.services import geo, llm
+from laweta_radar.workers import gate
 
 KTO = "classifier"
 
@@ -99,12 +109,14 @@ _DOMYSLNA_KATEGORIA = "inne"
 _DOMYSLNA_PILNOSC = "elastycznie"
 _DOMYSLNY_KONTAKT = "brak"
 
-# Kod pocztowy PL: dwie cyfry, myślnik, trzy cyfry. Sprawdzamy TO, co oddał
-# model — nie wyłuskujemy z tekstu (od tego jest services/geo.znajdz_kody).
-_KOD_PL = re.compile(r"^[0-9]{2}-[0-9]{3}$")
-
-# Numer telefonu po normalizacji: 9 cyfr (PL) albo 11 z prefiksem 48.
-_TELEFON_CYFRY = re.compile(r"^(?:48)?[0-9]{9}$")
+# Numer telefonu po odsianiu wszystkiego poza cyframi. Dolna granica to polska
+# dziewiątka, górna — maksimum z E.164. Przedział jest szeroki ŚWIADOMIE, bo
+# post z grupy niemieckiej niesie numer niemiecki (10-11 cyfr, często z +49):
+# reguła „dokładnie dziewięć cyfr" kasowałaby kontakt przy każdym zagranicznym
+# zleceniu, czyli przy najlepszym typie zlecenia, jaki ten system znajduje.
+# Dolna granica odsiewa to, co realnie wpada w to pole przez pomyłkę — rok,
+# cenę, godzinę.
+_TELEFON_MIN, _TELEFON_MAX = 9, 15
 
 
 def _log(msg: str) -> None:
@@ -149,8 +161,12 @@ ZASADY EKSTRAKCJI:
 
   ODBIÓR i DOSTAWA. Post rzadko mówi wprost "z X do Y". Częściej: "spod Biedronki
   na Podkarpackiej do warsztatu w Rzeszowie". Wyciągnij co się da do `raw`, a `kod`
-  i `miasto` wypełnij TYLKO gdy są jednoznaczne. Kod pocztowy to wzorzec dwie
-  cyfry-myślnik-trzy cyfry. Zgadywanie miasta z kontekstu jest zabronione: null
+  i `miasto` wypełnij TYLKO gdy są jednoznaczne. Kod pocztowy przepisuj DOKŁADNIE
+  tak, jak stoi w poście — polski to dwie cyfry-myślnik-trzy cyfry ("38-400"),
+  ale post bywa obcojęzyczny i wtedy kod wygląda inaczej: niemiecki, francuski
+  i włoski to pięć cyfr ("50667"), czeski i słowacki trzy cyfry, spacja, dwie
+  ("110 00"), holenderski cztery cyfry i dwie litery ("1012 AB"), austriacki
+  i belgijski cztery cyfry ("1010"). Zgadywanie miasta z kontekstu jest zabronione: null
   jest lepszy niż zła współrzędna, bo zła współrzędna wyśle człowieka 80 km w złą
   stronę. Gdy jest tylko jedno miejsce (np. "zdechłem w Sanoku"), wypełnij `odbior`,
   a `dostawa` zostaw z samymi nullami.
@@ -191,18 +207,29 @@ i skrótami drogowymi ("dk28", "s19", "mop"). Traktuj je jak zwykły polski teks
 """
 
 
-def zbuduj_system(grupa: str = "") -> str:
-    """Prompt systemowy, opcjonalnie z nazwą grupy jako kontekstem.
+def zbuduj_system(grupa: str = "", jezyk: str = "") -> str:
+    """Prompt systemowy, z nazwą grupy jako kontekstem i instrukcją językową.
 
     Nazwa grupy pochodzi z NASZEGO config/groups.py, nie od autora posta —
     dlatego jako jedyna rzecz zależna od wejścia może stać w promptcie
     systemowym. "Pomoc drogowa Podkarpacie" mówi modelowi o postach w środku
     więcej niż identyfikator grupy.
+
+    INSTRUKCJA JĘZYKOWA jest doklejana ZAWSZE POZA POSTAMI ROZPOZNANYMI JAKO
+    POLSKIE — także wtedy, gdy bramka nie rozstrzygnęła języka i `jezyk` jest
+    pusty. Asymetria jest ta sama co wszędzie w tym repo: instrukcja kosztuje
+    ułamek grosza na wywołanie, a jej brak przy poście niemieckim daje operatorowi
+    pola po niemiecku w momencie, w którym ma podjąć decyzję w kilkanaście
+    sekund. Tekst instrukcji mieszka w bramce (to ona rozpoznaje język i to ona
+    wie, co przepuszcza), żeby nie istniał w repo w dwóch wersjach.
     """
+    prompt = SYSTEM
+    if (jezyk or "").strip().lower() != "pl":
+        prompt += "\n" + gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA + "\n"
     grupa = (grupa or "").strip()
-    if not grupa:
-        return SYSTEM
-    return SYSTEM + f'\nPost pochodzi z grupy: "{grupa}". To kontekst, nie treść posta.\n'
+    if grupa:
+        prompt += f'\nPost pochodzi z grupy: "{grupa}". To kontekst, nie treść posta.\n'
+    return prompt
 
 
 def zbuduj_user(tresc: str) -> str:
@@ -296,7 +323,13 @@ def _bool(wartosc: Any, domyslna: bool) -> bool:
 
 
 def _kod_pocztowy(wartosc: Any) -> str | None:
-    """Kod pocztowy PL albo None. Spacje i kropki tolerujemy, resztę odrzucamy.
+    """Kod pocztowy w jednym z obsługiwanych formatów albo None.
+
+    Zbiór formatów bierzemy z `geo.czy_kod_pocztowy`, a nie z własnej listy —
+    jedynym sensownym kryterium „czy to jest kod" jest „czy geokoder umie z tego
+    zrobić punkt". Własna lista tutaj zaczęłaby wyrzucać niemieckie „50667"
+    w dniu, w którym bramka wpuściła pierwszą grupę DE, i objawiłaby się jako
+    zlecenia bez trasy — bez żadnego błędu w logu poza tym jednym.
 
     Odrzucamy CICHO (z logiem), bo zły kod jest gorszy niż jego brak: geokoder
     trafi w losową miejscowość zamiast zapytać człowieka.
@@ -304,10 +337,10 @@ def _kod_pocztowy(wartosc: Any) -> str | None:
     s = _tekst_lub_none(wartosc, limit=16)
     if s is None:
         return None
-    kandydat = s.replace(" ", "").replace(".", "")
-    if _KOD_PL.match(kandydat):
+    kandydat = re.sub(r"\s+", " ", s).strip().upper().rstrip(".")
+    if geo.czy_kod_pocztowy(kandydat):
         return kandydat
-    _log(f"kod pocztowy {s!r} nie pasuje do wzorca PL (NN-NNN) -> null")
+    _log(f"kod pocztowy {s!r} nie pasuje do żadnego znanego formatu -> null")
     return None
 
 
@@ -332,11 +365,17 @@ def _numer_telefonu(wartosc: Any) -> str | None:
     s = _tekst_lub_none(wartosc, limit=32)
     if s is None:
         return None
-    cyfry = re.sub(r"[^0-9]", "", s.replace("+48", "48", 1))
-    if _TELEFON_CYFRY.match(cyfry):
+    cyfry = re.sub(r"[^0-9]", "", s)
+    if not _TELEFON_MIN <= len(cyfry) <= _TELEFON_MAX:
+        _log(f"kontakt.wartosc {s!r} nie wygląda na numer telefonu -> null")
+        return None
+    # Polski numer skracamy do dziewięciu cyfr, bo operator dzwoni z Polski
+    # i prefiks 48 jest tam szumem. Zagraniczny zostaje W CAŁOŚCI z prefiksem:
+    # bez +49 tego numeru po prostu nie da się wybrać, a to jedyna rzecz,
+    # do której to pole służy.
+    if len(cyfry) == 9 or (len(cyfry) == 11 and cyfry.startswith("48")):
         return cyfry[-9:]
-    _log(f"kontakt.wartosc {s!r} nie wygląda na numer telefonu -> null")
-    return None
+    return cyfry
 
 
 def _kontakt(wartosc: Any) -> dict[str, str | None]:
@@ -429,19 +468,28 @@ def rozbierz(surowa_odpowiedz: str) -> dict:
     return zwaliduj(_parse_json(surowa_odpowiedz))
 
 
-def klasyfikuj(tresc: str, grupa: str = "") -> dict:
+def klasyfikuj(tresc: str, grupa: str = "", jezyk: str = "") -> dict:
     """Treść posta -> słownik zgodny z kontraktem u góry pliku.
+
+    PODPIS JEST KONTRAKTEM Z FETCHEREM. `workers/fb_fetcher.py` woła to
+    trzema argumentami pozycyjnymi (`klasyfikuj(tresc, grupa, jezyk)`) i czyta
+    z wyniku `czy_zlecenie` oraz `powod`. `jezyk` to dwuliterowy znacznik
+    z bramki ('pl'|'de'|'cs'|'sk'|''): grupy z czterech obszarów idą przez ten
+    sam pipeline, a operator ma dostać komplet pól PO POLSKU niezależnie od
+    tego, w jakim języku napisano post.
 
     Rzuca ClassifierUnavailable, gdy modelu nie da się dopytać albo odpowiedź
     jest nieczytelna. NIE zwraca wtedy „to nie zlecenie" — to byłaby cicha
-    utrata kursu przy awarii, której nikt by nie zauważył.
+    utrata kursu przy awarii, której nikt by nie zauważył. Fetcher łapie ten
+    wyjątek, przestaje pytać model do końca przebiegu i zostawia post
+    w kolejce do ponowienia.
     """
     tresc = (tresc or "").strip()
     if not tresc:
         # Pusty post to nie awaria: nie ma czego wołać i nie ma za co płacić.
         return zwaliduj({"czy_zlecenie": False, "pewnosc": 0, "powod": "pusta treść posta"})
 
-    return rozbierz(llm.zapytaj(zbuduj_system(grupa), zbuduj_user(tresc), MAX_TOKENS))
+    return rozbierz(llm.zapytaj(zbuduj_system(grupa, jezyk), zbuduj_user(tresc), MAX_TOKENS))
 
 
 def warto_budzic(wynik: dict) -> bool:
@@ -536,12 +584,14 @@ def _main(argv: list[str]) -> int:
     )
     ap.add_argument("tresc", nargs="?", help="treść posta (bez niej czytam ze stdin)")
     ap.add_argument("--grupa", default="", help="nazwa grupy FB jako kontekst")
+    ap.add_argument("--jezyk", default="",
+                    help="znacznik języka z bramki (pl|de|cs|sk); pusty = doklej instrukcję językową")
     ap.add_argument("--prompt", action="store_true",
                     help="wypisz prompt systemowy i zakończ (bez sieci i bez kosztu)")
     args = ap.parse_args(argv[1:])
 
     if args.prompt:
-        print(zbuduj_system(args.grupa))
+        print(zbuduj_system(args.grupa, args.jezyk))
         return 0
 
     print(llm.opis(), file=sys.stderr)
@@ -558,7 +608,8 @@ def _main(argv: list[str]) -> int:
         return 0
 
     try:
-        odp = llm.zapytaj_ze_zuzyciem(zbuduj_system(args.grupa), zbuduj_user(tresc), MAX_TOKENS)
+        odp = llm.zapytaj_ze_zuzyciem(zbuduj_system(args.grupa, args.jezyk),
+                                      zbuduj_user(tresc), MAX_TOKENS)
         wynik = rozbierz(odp.tekst)
     except ClassifierUnavailable as e:
         _log(f"{e}")

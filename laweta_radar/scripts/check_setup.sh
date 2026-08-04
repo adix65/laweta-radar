@@ -51,13 +51,21 @@ echo "=== 5. Proxy dla Apify (bez sieci) ==="
 "$PY" -m laweta_radar.workers.apify_proxy
 
 echo
-echo "=== 6. Klasyfikator (provider modelu, bez sieci) ==="
-# Brak paczki providera to awaria CICHA: system wstaje, a modelu nie woła.
-# Ma się objawić tutaj, a nie tracebackiem w środku runu o trzeciej w nocy.
+echo "=== 6. Bramka słowna (PL/DE/CS/SK, bez sieci) ==="
+# Niemiecki post to test wielojęzyczności: przy bramce jednojęzycznej dostałby
+# zero punktów i wyleciał — i wyglądałoby to w logach jak odrzucona reklama.
+"$PY" -m laweta_radar.workers.gate "Suche Abschleppdienst, Motor kaputt" \
+    | sed 's/^/  /' || true
+
+echo
+echo "=== 7. Klasyfikator (provider modelu, bez sieci) ==="
+# Brak paczki providera to awaria CICHA: fetcher wstaje, posty przechodzą przez
+# bramkę i czekają w bazie, a nikt nie dostaje alertu. Ma się to objawić tutaj,
+# a nie tracebackiem w środku przebiegu o trzeciej w nocy.
 "$PY" -m laweta_radar.services.llm
 
 echo
-echo "=== 7. Baza kodów pocztowych (services/geo.py, bez sieci) ==="
+echo "=== 8. Baza kodów pocztowych (services/geo.py, bez sieci) ==="
 "$PY" -c "
 from laweta_radar.services import geo
 print(geo.stan_bazy())
@@ -66,11 +74,18 @@ print(f'  baza operatora: {p.nazwa} ({p.wspolrzedne()})')
 "
 
 echo
-echo "=== 8. Telegram (WYSYŁA wiadomość testową) ==="
+echo "=== 9. Fetcher — plan i koszt NAJBLIŻSZEGO przebiegu (nic nie wydaje) ==="
+# Pierwsza linia mówi, na której ścieżce (A/B) stoi fetcher. „domyślna,
+# ostrożna" znaczy, że pomiar actora NIE został wykonany — patrz
+# docs/POMIAR-ACTORA.md i README, sekcja „Budżet liczy się w POSTACH".
+"$PY" -m laweta_radar.workers.fb_fetcher --sucho 2>&1 | sed 's/^/  /'
+
+echo
+echo "=== 10. Telegram (WYSYŁA wiadomość testową) ==="
 "$PY" -m laweta_radar.services.telegram_notify
 
 echo
-echo "=== 9. Baza danych (wymaga wstającego API albo psql) ==="
+echo "=== 11. Baza danych (wymaga wstającego API albo psql) ==="
 echo "Migracje:  bash laweta_radar/scripts/migrate.sh"
 echo "Stan:      curl -s localhost:8002/health"
 echo

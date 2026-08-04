@@ -212,14 +212,20 @@ PRZYPADKI: list[tuple[str, str, str, dict]] = [
          "pojazd.kategoria": "dostawczy", "stan.toczy_sie": False},
     ),
     (
-        "kod w złym formacie — lepiej null niż zła współrzędna",
-        "auto stoi w Debicy, kod chyba 39200, motocykl nie odpala, termin dowolny",
-        _odpowiedz(czy_zlecenie=True, typ="transport", pewnosc=60,
-                   odbior={"raw": "Debica", "kod": "39200", "miasto": "Debica"},
-                   pojazd={"opis": "motocykl", "kategoria": "motocykl"}),
-        # Kod bez myślnika odrzucamy: geokoder trafiłby w losową miejscowość
-        # zamiast zapytać człowieka. Miasto zostaje, więc trasa i tak powstanie.
-        {"odbior.kod": None, "odbior.miasto": "Debica", "pojazd.kategoria": "motocykl"},
+        "post niemiecki — wynik ma być po polsku, kod niemiecki zostaje",
+        "Suche Abschleppdienst von Koln 50667 nach Krosno, Motor kaputt. Tel +49 221 5551234",
+        _odpowiedz(
+            czy_zlecenie=True, typ="transport", pilnosc="elastycznie", pewnosc=85,
+            odbior={"raw": "Koln 50667", "kod": "50667", "miasto": "Koln"},
+            dostawa={"raw": "Krosno", "kod": None, "miasto": "Krosno"},
+            pojazd={"opis": "auto osobowe", "kategoria": "osobowy"},
+            stan={"toczy_sie": True, "ma_kola": True, "po_wypadku": False,
+                  "uwagi": "silnik uszkodzony"},
+            kontakt={"typ": "telefon", "wartosc": "+49 221 5551234"}),
+        # Kod niemiecki NIE jest wyrzucany — geokoder go rozwiąże. Numer
+        # zagraniczny zostaje z prefiksem, bo bez +49 nie da się go wybrać.
+        {"odbior.kod": "50667", "odbior.miasto": "Koln", "dostawa.miasto": "Krosno",
+         "kontakt.wartosc": "492215551234"},
     ),
     (
         "post wygaszony przez autora",
@@ -373,6 +379,29 @@ def test_numer_telefonu_normalizuje_sie_do_cyfr():
         assert wynik["kontakt"]["wartosc"] == "555111222", zapis
 
 
+def test_numer_zagraniczny_zostaje_z_prefiksem():
+    """Bez +49 tego numeru nie da się wybrać — a to jedyne, do czego to pole służy.
+
+    Reguła „dokładnie dziewięć cyfr" kasowałaby kontakt przy każdym zleceniu
+    z grupy niemieckiej, czyli przy najlepszym typie zlecenia, jaki ten system
+    znajduje (transport auta z zagranicy zestawem B+E).
+    """
+    for zapis, oczekiwany in [
+        ("+49 221 5551234", "492215551234"),
+        ("+420 601 123 456", "420601123456"),
+        ("0049 30 12345678", "00493012345678"),
+    ]:
+        wynik = c.zwaliduj({"kontakt": {"typ": "telefon", "wartosc": zapis}})
+        assert wynik["kontakt"]["wartosc"] == oczekiwany, zapis
+
+
+def test_liczba_ktora_nie_jest_numerem_wypada():
+    """Rok, cena i godzina wpadają w to pole przez pomyłkę modelu."""
+    for nie_numer in ["2015", "2500 zl", "18:30", "12"]:
+        wynik = c.zwaliduj({"kontakt": {"typ": "telefon", "wartosc": nie_numer}})
+        assert wynik["kontakt"] == {"typ": "brak", "wartosc": None}, nie_numer
+
+
 def test_telefon_bez_numeru_nie_daje_przycisku_donikad():
     """Typ "telefon" z niczym w wartości to sprzeczność — domykamy ją tutaj."""
     wynik = c.zwaliduj({"kontakt": {"typ": "telefon", "wartosc": "dzwonic po 18"}})
@@ -387,11 +416,44 @@ def test_brak_danych_ma_jedna_reprezentacje():
         assert wynik["odbior"]["miasto"] is None
 
 
-def test_kod_pocztowy_tylko_w_formacie_pl():
-    assert c.zwaliduj({"odbior": {"kod": "38-400"}})["odbior"]["kod"] == "38-400"
-    assert c.zwaliduj({"odbior": {"kod": " 38-400 "}})["odbior"]["kod"] == "38-400"
-    for zly in ["38400", "38-40", "384-00", "50667", "abc", "38-400a"]:
+def test_kod_pocztowy_w_formatach_obslugiwanych_krajow():
+    """Przyjmujemy dokładnie to, co geokoder umie rozwiązać — ani mniej, ani więcej.
+
+    Węższa lista tutaj (np. sam format polski) wyrzucałaby niemieckie „50667"
+    w dniu, w którym bramka wpuściła pierwszą grupę DE — i objawiłaby się jako
+    zlecenia bez trasy, bez żadnego błędu w logu.
+    """
+    for dobry, oczekiwany in [
+        ("38-400", "38-400"),      # PL
+        (" 38-400 ", "38-400"),
+        ("50667", "50667"),        # DE / FR / IT
+        ("110 00", "110 00"),      # CZ / SK
+        ("1012 AB", "1012 AB"),    # NL
+        ("1012ab", "1012AB"),
+        ("1010", "1010"),          # AT / BE
+    ]:
+        assert c.zwaliduj({"odbior": {"kod": dobry}})["odbior"]["kod"] == oczekiwany, dobry
+
+
+def test_kod_pocztowy_w_zlym_formacie_daje_null():
+    """Zły kod jest gorszy niż jego brak: geokoder trafi w losową miejscowość."""
+    for zly in ["38-40", "384-00", "abc", "38-400a", "1", "1234567", "38 400 12"]:
         assert c.zwaliduj({"odbior": {"kod": zly}})["odbior"]["kod"] is None, zly
+
+
+def test_polski_kod_bez_myslnika_przechodzi_i_trafia_w_polske():
+    """„38400" ma kształt kodu niemieckiego, a jest polskim bez myślnika.
+
+    Nie da się tego rozstrzygnąć na poziomie formatu i nie próbujemy — kod
+    przechodzi, a kraj rozstrzyga geokoder, który dostaje razem z nim nazwę
+    miasta. Odrzucenie takiego zapisu kosztowałoby trasę przy każdym poście,
+    w którym ktoś zgubił myślnik.
+    """
+    from laweta_radar.services import geo
+
+    assert c.zwaliduj({"odbior": {"kod": "38400"}})["odbior"]["kod"] == "38400"
+    punkt = geo.geokoduj("38400", "Krosno")
+    assert punkt is not None and "Krosno" in punkt.nazwa
 
 
 def test_pewnosc_jest_przycinana_do_zakresu():
@@ -483,7 +545,67 @@ def test_rozbierz_to_ta_sama_sciezka_co_klasyfikuj():
 def test_nazwa_grupy_wchodzi_jako_kontekst():
     """Nazwa grupy pochodzi z naszego config/groups.py, więc może iść do systemu."""
     assert "Pomoc drogowa Podkarpacie" in c.zbuduj_system("Pomoc drogowa Podkarpacie")
-    assert c.zbuduj_system("") == c.SYSTEM
+    assert "Pomoc drogowa" not in c.zbuduj_system("", jezyk="pl")
+
+
+# ===========================================================================
+# KONTRAKT Z FETCHEREM
+#
+# `workers/fb_fetcher.py` woła `klasyfikuj(tresc, grupa, jezyk)` trzema
+# argumentami POZYCYJNYMI i czyta z wyniku `czy_zlecenie` oraz `powod`.
+# Rozjazd na tym styku jest cichy w najgorszy możliwy sposób: fetcher łapie
+# `TypeError` razem z innymi awariami klasyfikatora, przestaje pytać model do
+# końca przebiegu i zapisuje posty jako „czeka na klasyfikator" — czyli system
+# wygląda na działający i nie klasyfikuje NICZEGO.
+# ===========================================================================
+def test_podpis_zgodny_z_wywolaniem_fetchera():
+    import inspect
+
+    parametry = list(inspect.signature(c.klasyfikuj).parameters)
+    assert parametry[:3] == ["tresc", "grupa", "jezyk"]
+    # Trzy pozycyjne muszą przejść — dokładnie tak woła fetcher.
+    surowa = _odpowiedz(czy_zlecenie=True, powod="test kontraktu")
+    zapamietane = llm.zapytaj
+    llm.zapytaj = lambda s, u, m: surowa
+    try:
+        wynik = c.klasyfikuj("stanalem na dk28", "Pomoc drogowa Podkarpacie", "pl")
+    finally:
+        llm.zapytaj = zapamietane
+    # Fetcher czyta dokładnie te dwa pola.
+    assert isinstance(wynik["czy_zlecenie"], bool)
+    assert wynik["powod"] == "test kontraktu"
+
+
+def test_instrukcja_jezykowa_przy_poscie_obcojezycznym():
+    """Post z grupy DE/CZ/SK ma dać wynik PO POLSKU — instrukcja jest w bramce.
+
+    Tekst mieszka w `gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA`, bo to bramka
+    rozpoznaje język i to ona wie, co przepuszcza. Kopia w tym pliku rozjechałaby
+    się przy pierwszej poprawce po jednej ze stron.
+    """
+    from laweta_radar.workers import gate
+
+    for jezyk in ["de", "cs", "sk"]:
+        assert gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA in c.zbuduj_system("", jezyk)
+
+
+def test_polski_post_nie_placi_za_instrukcje_jezykowa():
+    from laweta_radar.workers import gate
+
+    assert gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA not in c.zbuduj_system("", "pl")
+
+
+def test_nierozpoznany_jezyk_dostaje_instrukcje():
+    """Bramka nie zawsze rozstrzyga język — wtedy dokładamy instrukcję.
+
+    Asymetria jak wszędzie w tym repo: instrukcja kosztuje ułamek grosza,
+    a jej brak przy niemieckim poście daje operatorowi pola po niemiecku
+    w momencie, w którym ma zdecydować w kilkanaście sekund.
+    """
+    from laweta_radar.workers import gate
+
+    for nierozpoznany in ["", None, "  "]:
+        assert gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA in c.zbuduj_system("", nierozpoznany)
 
 
 def test_max_tokens_zgodne_z_zadaniem():

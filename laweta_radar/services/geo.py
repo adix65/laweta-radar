@@ -115,6 +115,12 @@ def normalizuj_nazwe(nazwa: str) -> str:
 # najlepszy typ zlecenia, jaki ten system ma znajdować (transport z zagranicy
 # zestawem B+E), nie geokoduje się w ogóle. Tabela jest krótka celowo: tylko
 # kierunki, które realnie pojawiają się w tych grupach.
+#
+# TO NIE JEST DUBLOWANIE INSTRUKCJI DLA MODELU, tylko siatka pod nią. Prompt
+# klasyfikatora (przez `gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA`) każe
+# zostawiać nazwy miejscowości W ORYGINALE właśnie dlatego, że idą wprost tutaj.
+# Ale post polski pisze „Kolonia" i model, który wiernie przepisze to z treści,
+# ma rację — a wtedy dopasowanie zależy już tylko od tej tabeli.
 # ---------------------------------------------------------------------------
 EGZONIMY: dict[str, str] = {
     "kolonia": "koln",
@@ -163,6 +169,36 @@ SCIEZKI_BAZY = (
 _indeks_kodow: dict[str, list[dict]] | None = None
 _indeks_miast: dict[str, list[dict]] | None = None
 _zaladowana_sciezka: Path | None = None
+
+
+# Formaty kodu w postaci SAMODZIELNEJ — do sprawdzenia wartości, którą ktoś już
+# wyodrębnił (np. model w klasyfikatorze). To NIE są wzorce do skanowania tekstu
+# — tamte (`_WZORCE`) mają lookaroundy i wymagają kontekstu, bo w zdaniu „moge
+# dac 2500 zl" cztery cyfry kodem nie są. Tutaj kontekstu nie ma i nie może być.
+#
+# Lista pokrywa dokładnie te kraje, które umie rozwiązać ta baza — bo jedynym
+# sensownym kryterium „czy to jest kod" jest „czy da się z tego zrobić punkt".
+FORMATY_KODU: dict[str, re.Pattern[str]] = {
+    "PL": re.compile(r"^[0-9]{2}-[0-9]{3}$"),
+    "DE_FR_IT": re.compile(r"^[0-9]{5}$"),
+    "CZ_SK": re.compile(r"^[0-9]{3} ?[0-9]{2}$"),
+    "NL": re.compile(r"^[0-9]{4} ?[A-Z]{2}$"),
+    "AT_BE": re.compile(r"^[0-9]{4}$"),
+}
+
+
+def czy_kod_pocztowy(kod: str | None) -> bool:
+    """Czy ten ciąg ma kształt kodu pocztowego w którymś z obsługiwanych krajów.
+
+    Używa tego klasyfikator do walidacji pola, które oddał model. Format
+    mieszka TUTAJ, bo to ten moduł musi z kodu zrobić współrzędne — druga lista
+    wzorców w klasyfikatorze rozjechałaby się przy dołożeniu kolejnego kraju
+    i objawiła jako cicho wyrzucane kody, których geokoder by nie zobaczył.
+    """
+    s = (kod or "").strip().upper()
+    if not s:
+        return False
+    return any(w.match(s) for w in FORMATY_KODU.values())
 
 
 def _normalizuj_kod(kod: str) -> str:
@@ -266,10 +302,23 @@ def geokoduj(kod: str | None, miasto: str | None) -> Punkt | None:
     klucz = _normalizuj_kod(kod or "")
     if klucz and klucz in po_kodzie:
         trafienia = po_kodzie[klucz]
-        # Ten sam ciąg cyfr bywa kodem w kilku krajach (pięciocyfrowe DE
-        # i czterocyfrowe AT/BE nie są rozłączne). Przy kolizji wygrywa PL —
-        # tu jesteśmy — a kraj i tak wchodzi do nazwy, więc widać, co wybrano.
-        rekord = next((r for r in trafienia if r["kraj"] == "PL"), trafienia[0])
+        # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne: "39200" to polska
+        # Dębica zapisana bez myślnika ORAZ niemiecki kod spod Magdeburga,
+        # a różnica to 700 km. Rozstrzygamy w trzech krokach, od najpewniejszego:
+        #
+        #   1. nazwą miasta, jeśli przyszła razem z kodem — to jedyna informacja,
+        #      która naprawdę wie, o który kraj chodzi;
+        #   2. PL, bo tu jesteśmy i taka jest większość postów;
+        #   3. pierwszym trafieniem.
+        #
+        # Krok 2 bywa zły i nie da się tego uniknąć bez wiedzy, której nie mamy
+        # — dlatego kraj ZAWSZE wchodzi do `nazwa` i widzi go operator, zanim
+        # wsiądzie do auta.
+        szukana = normalizuj_nazwe(miasto or "")
+        rekord = (next((r for r in trafienia
+                        if szukana and normalizuj_nazwe(r["miejscowosc"]) == szukana), None)
+                  or next((r for r in trafienia if r["kraj"] == "PL"), None)
+                  or trafienia[0])
         return Punkt(
             lat=rekord["lat"],
             lng=rekord["lng"],

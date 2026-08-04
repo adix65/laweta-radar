@@ -141,6 +141,37 @@ def test_kod_ma_pierwszenstwo_przed_miastem(tmp_path):
     assert p is not None and p.zrodlo == "kod" and "Sanok" in p.nazwa
 
 
+def test_kolizja_kodow_miedzy_krajami_rozstrzyga_miasto(tmp_path):
+    """„50667" bez kontekstu to Köln; ten sam ciąg z polskim miastem — nie.
+
+    Kolizje są realne, bo indeks zna kod bez separatorów: polska „39-200"
+    zapisana jako „39200" ma kształt niemieckiego kodu, a różnica to 700 km.
+    Nazwa miasta jest jedyną informacją, która naprawdę wie, o który kraj chodzi.
+    """
+    plik = tmp_path / "kolizja.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "PL,39-200,Debica,podkarpackie,50.0516,21.4111\n"
+        "DE,39200,Magdeburg,Sachsen-Anhalt,52.1205,11.6276\n",
+        encoding="utf-8")
+    geo.zaladuj(plik)
+
+    assert "Debica" in geo.geokoduj("39200", "Debica").nazwa
+    assert "Magdeburg" in geo.geokoduj("39200", "Magdeburg").nazwa
+    # Bez miasta wygrywa PL — tu jesteśmy i taka jest większość postów. Wybór
+    # bywa zły i dlatego kraj ZAWSZE stoi w nazwie, którą widzi operator.
+    bez_kontekstu = geo.geokoduj("39200", None)
+    assert "Debica" in bez_kontekstu.nazwa and "(PL)" in bez_kontekstu.nazwa
+
+
+def test_format_kodu_pokrywa_obslugiwane_kraje():
+    """Kontrakt z klasyfikatorem: on pyta stąd, czy przyjąć kod od modelu."""
+    for dobry in ["38-400", "50667", "110 00", "11000", "1012 AB", "1010"]:
+        assert geo.czy_kod_pocztowy(dobry), dobry
+    for zly in ["", None, "abc", "38-40", "1", "1234567", "38-400a"]:
+        assert not geo.czy_kod_pocztowy(zly), zly
+
+
 # ===========================================================================
 # DYSTANS
 # ===========================================================================
