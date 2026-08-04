@@ -118,6 +118,26 @@ MAX_DYSTANS_KM = _int("MAX_DYSTANS_KM", 80)
 MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 12)
 
 # ---------------------------------------------------------------------------
+# BRAMKA (workers/gate.py) — darmowy prefiltr słownikowy przed modelem.
+#
+# GATE_PROG: suma wag, od której post idzie do AI. Piątka jest CELOWO niska.
+# Asymetria kosztów jest brutalna: śmieć przepuszczony do AI to ~0,002 zł, a
+# zlecenie odrzucone przez bramkę to ~300 zł straconego kursu, o którym nigdy
+# się nie dowiemy — post nie trafi nigdzie. Jeden przegapiony kurs miesięcznie
+# kasuje CAŁĄ oszczędność na tokenach. Właściwą wartość odczytuje się
+# z rozkładu punktów w scripts/raport_gate.py, a nie zgaduje.
+#
+# GATE_TRYB: "cien" albo "aktywny". W cieniu bramka liczy i zapisuje swoją
+# decyzję, ale NICZEGO nie blokuje — wszystkie posty idą do AI. Dopiero to daje
+# pary (decyzja bramki, werdykt AI), z których widać jedyną liczbę, która ma
+# znaczenie: ile zleceń bramka by skasowała. Przełączenie na "aktywny" ma sens
+# wyłącznie wtedy, gdy ta liczba wynosi zero. Nieznana wartość degraduje do
+# "cien" — literówka w .env nie może po cichu włączyć blokowania.
+# ---------------------------------------------------------------------------
+GATE_PROG = _int("GATE_PROG", 5)
+GATE_TRYB = _txt("GATE_TRYB", "cien")
+
+# ---------------------------------------------------------------------------
 # Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
 # `if not X` w workerach — dzięki temu komunikat o brakach jest wszędzie taki sam
 # i da się go wypisać CAŁY naraz, zamiast wychodzić po pierwszym brakującym
@@ -179,6 +199,7 @@ def opis_srodowiska() -> str:
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
     ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+         f", gate={GATE_TRYB}(prog {GATE_PROG})"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 
 

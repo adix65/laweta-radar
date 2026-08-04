@@ -4,11 +4,34 @@ Monitoruje grupy na Facebooku pod kątem zleceń dla lawety (pomoc drogowa,
 transport aut) i wysyła je operatorowi na telefon w kilka minut od publikacji
 posta.
 
-**Cała wartość tego systemu to czas reakcji.** Zlecenie na lawetę wygrywa ten, kto
-odpisze pierwszy — post sprzed dwóch godzin jest wart tyle, co żaden. Dlatego
-pipeline jest zbudowany wokół jednej liczby (minuty od publikacji do alertu), a nie
-wokół kompletności: lepiej przegapić jedno zlecenie niż dowieźć wszystkie z
-półgodzinnym opóźnieniem.
+> ## SYSTEM POKAZUJE ZLECENIA. DECYDUJE KIEROWCA.
+>
+> To jest zasada naczelna całego repo i bije każdą inną regułę, jaką znajdziesz
+> niżej. Kod **nie ma prawa** odrzucić zlecenia dlatego, że mu się wydaje, że nie
+> pasuje: za ciężkie, za daleko, za tanio, zły kierunek, nie ta data. Kierowca zna
+> swój sprzęt, swój kalendarz i swoją cenę lepiej niż model językowy szacujący masę
+> Golfa z literówki w poście. Może przełożyć, wziąć dwa auta zamiast trzech,
+> podnająć albo pojechać po jedno, bo stawka dobra.
+>
+> System odrzuca **wyłącznie** posty, które w ogóle nie są zleceniami: reklamę
+> konkurencji, sprzedaż sprzętu, ogłoszenia o pracę i posty wygaszone przez autora.
+> Ta lista jest zamknięta i nie wolno jej rozszerzać o oceny biznesowe. Wszystko
+> poza tym — wagi, kilometry, sugestie kompletów — jest **informacją na ekranie,
+> nigdy filtrem**. Etykieta „ok. 3,8 t" pomaga. Ukrycie zlecenia, bo kod policzył
+> 4,1 t, jest błędem.
+
+Operator robi trasy międzynarodowe zestawem B+E, do trzech aut naraz. Stąd trzy
+konsekwencje dla całego kodu:
+
+1. **To nie jest wyścig na minuty.** Zlecenie „kupiłem auto w Niemczech, kto
+   przywiezie" żyje dniami, nie kwadransem. Dlatego runy co godzinę, nie co pięć
+   minut — a stąd dziesięciokrotnie niższy rachunek Apify.
+2. **Trzy kliknięcia i koniec.** Z każdego zlecenia operator dostaje jednym
+   dotknięciem: TRASĘ w mapach, POST na Facebooku i TELEFON, jeśli był w treści.
+   To jest cała funkcja tej aplikacji; reszta jest dodatkiem.
+3. **Limity sprzętu są etykietą, nie bramką.** Wartości w `.env` służą do
+   WYŚWIETLENIA podsumowania przy komplecie. Żaden kod nie używa ich do ukrywania
+   rekordów.
 
 ## Jak to działa
 
@@ -25,23 +48,31 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
   Klucze rotują się po **wspólnej z sales-core-engine** puli kont, ruch wychodzi
   przez proxy per konto. Budżet runów rozdziela między grupy bandyta
   (`services/bandit.py`), bo kredyt jest wspólny z drugim systemem.
-- **gate** — tani filtr słowny **przed** modelem. Bez niego płacilibyśmy Claude'owi
-  za każdy post o sprzedaży felg.
+- **gate** — darmowy filtr słowny **przed** modelem. Bez niego płacilibyśmy
+  Claude'owi za każdy post o sprzedaży felg. Odrzuca wyłącznie cztery kategorie
+  wymienione wyżej i nic poza nimi.
 - **classifier** — Claude decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie.
-- **geo** — odrzuca zdarzenia poza zasięgiem. Zlecenie z drugiego końca Polski jest
-  gorsze niż brak zlecenia: zjada uwagę operatora, który i tak po nie nie pojedzie.
+- **geo** — liczy dystans i trasę, żeby **pokazać** je przy zleceniu. Nie ukrywa
+  rekordów: o tym, czy kurs pod Kolonię się opłaca, decyduje kierowca.
 - **Telegram** — jedyny kanał dowozu. Alert niesie link do posta; odpowiada
   **człowiek**, z własnego konta.
 
 ### Stan repo
 
-Ten commit to **szkielet + przeniesiona infrastruktura Apify**. Działa już:
-konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
-bandyta, transport Telegrama, API diagnostyczne, migracja tabeli `posty`. Kroki
-pipeline'u (`workers/gate.py`, `workers/fb_fetcher.py`, `workers/classifier.py`,
-`services/geo.py`) dochodzą w kolejnych krokach — dopóki ich nie ma, system nic
-nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego mu brakuje.
+Działa już: konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy,
+proxy, bandyta, transport Telegrama, API diagnostyczne, migracje tabeli `posty`,
+diagnostyka actora oraz **bramka** (`workers/gate.py`). Brakuje
+`workers/fb_fetcher.py`, `workers/classifier.py` i `services/geo.py` — dopóki ich
+nie ma, system nic nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego
+mu brakuje.
+
+Bramka jest na razie w **trybie cienia** (`GATE_TRYB=cien`): liczy i zapisuje swoją
+decyzję, ale niczego nie blokuje. Inaczej się nie da — bramka odrzuca posty, zanim
+zobaczy je model, więc jej pomyłki są niewidoczne z definicji: odrzucone zlecenie
+nie trafia nigdzie i nikt się o nim nie dowie. Bramka kasująca co dziesiąty kurs
+wygląda w produkcji dokładnie tak samo jak bramka idealna. Włączamy ją dopiero,
+gdy raport pokaże ZERO fałszywych odrzuceń na sensownej próbce.
 
 ## Struktura
 
@@ -51,6 +82,7 @@ laweta_radar/
     apify_keys.py      # rotacja puli kluczy APIFY_API_TOKEN1..N     [kopia 1:1]
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
     apify_credits.py   # saldo miesięcznego kredytu konta (do pomiaru kosztu)
+    gate.py            # darmowy prefiltr słownikowy PRZED modelem
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate)
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
@@ -63,6 +95,7 @@ laweta_radar/
     migrations/        # SQL odpalany RĘCZNIE, nigdy z workera
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
+    raport_gate.py     # rozliczenie trybu cienia bramki
   tests/               # testy offline (bez sieci i bez bazy)
   .env.example
   requirements.txt
@@ -112,8 +145,11 @@ Szczegóły: `docs/APIFY-PROXY.md`.
 
 ## Zasady obowiązujące w całym repo
 
-Cztery, i są nienegocjowalne — reszta kodu na nich stoi:
+Pięć, i są nienegocjowalne — reszta kodu na nich stoi:
 
+0. **System pokazuje zlecenia, decyduje kierowca.** Patrz ramka na górze. Ta bije
+   pozostałe cztery; jeśli któraś z nich każe coś ukryć przed operatorem, to ta
+   wygrywa.
 1. **Komentarze i docstringi po polsku, wyjaśniają DLACZEGO, nie CO.** Kod pokazuje,
    co się dzieje; komentarz ma powiedzieć, czemu akurat tak, żeby następna osoba nie
    „uprościła" czegoś, co jest takie z powodu.
@@ -191,6 +227,39 @@ adresu i ze statusem `unverified`. Żeby ruszyło:
    czyta się przed pisaniem `_build_actor_input` — bez działającego okna czasowego
    płacimy za wielokrotne pobieranie tych samych postów.
 
+### Bramka i jej kalibracja
+
+Bramka jest darmowa i chodzi offline, więc możesz ją oglądać, zanim cokolwiek
+zostanie pobrane:
+
+```bash
+python -m laweta_radar.workers.gate "kupiłem auto w Kolonii, kto przywiezie?"
+python -m laweta_radar.workers.gate "Laweta 24/7, konkurencyjne ceny"
+```
+
+CLI pokazuje werdykt, punktację i **które wzorce zadziałały, z wagami** — czyli
+odpowiada na jedyne sensowne pytanie przy strojeniu słownika: dlaczego akurat tak.
+
+Kalibracja idzie tak, i kolejność jest istotna:
+
+1. zbieraj tydzień z `GATE_TRYB=cien` (domyślnie). Bramka liczy i zapisuje, ale nie
+   blokuje — wszystkie posty idą do modelu,
+2. `python laweta_radar/scripts/raport_gate.py` — raport pokazuje macierz pomyłek,
+   pełną listę **fałszywych odrzuceń** (z treścią i punktacją), rozkłady punktów
+   osobno dla zleceń i śmieci oraz to, co by się stało przy innym progu,
+3. każde fałszywe odrzucenie napraw w `workers/gate.py` i sprawdź poprawkę przez
+   `raport_gate.py --przelicz` — to przepuszcza ZAPISANE treści przez AKTUALNY
+   słownik, więc masz odpowiedź w sekundę, bez czekania na kolejny tydzień
+   i bez płacenia Apify po raz drugi,
+4. dopiero gdy fałszywych odrzuceń jest **zero** na sensownej próbce, ustaw
+   `GATE_TRYB=aktywny`.
+
+Nie celuj w wysoki odsetek odsianych. Realistycznie wychodzi 20-35% i to jest
+w porządku: śmieć przepuszczony do modelu kosztuje ~0,002 zł, a zlecenie odrzucone
+przez bramkę ~300 zł straconego kursu — i nigdy się o nim nie dowiesz, bo post nie
+trafi nigdzie. Jeden przegapiony kurs miesięcznie kasuje całą oszczędność
+na tokenach.
+
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
 „BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
@@ -262,6 +331,8 @@ pm2 restart laweta-api
 | „brak kluczy Apify", choć są w `.env` | `source laweta_radar/scripts/env-shell.sh` |
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
 | ile kredytu zostało na kontach | `python -m laweta_radar.workers.apify_credits` (wymaga sieci) |
+| dlaczego bramka przepuściła/odrzuciła post | `python -m laweta_radar.workers.gate "treść"` |
+| czy bramkę można już włączyć | `python laweta_radar/scripts/raport_gate.py` |
 | rotator widzi 0 kluczy | zła ścieżka do wspólnego `.env` — `python -m laweta_radar.config.settings` |
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |
