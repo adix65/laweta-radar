@@ -77,6 +77,15 @@ są sprawdzone produkcyjnie i nie ma powodu ich ulepszać:
    cała oszczędność tego systemu — nie skrót, tylko powód, dla którego stać nas
    na klasyfikator.
 
+   UWAGA — DOPÓKI BRAMKA JEST W TRYBIE CIENIA (`GATE_TRYB=cien`, domyślnie),
+   ŻADNEJ OSZCZĘDNOŚCI NIE MA. W cieniu bramka liczy i zapisuje swoją opinię,
+   ale niczego nie blokuje: wszystkie posty idą do modelu. Fetcher decyduje po
+   `przepusc` (decyzja operacyjna, uwzględnia tryb), a do bazy zapisuje
+   `werdykt` (opinia, niezależna od trybu) — i to z tych par raport
+   `scripts/raport_gate.py` liczy jedyną liczbę, która pozwala bramkę włączyć:
+   ile ZLECEŃ by skasowała. Podsumowanie przebiegu wypisuje ją wprost, bo bez
+   tego tryb cienia wygląda w logach identycznie jak brak bramki.
+
 5. LIMIT ADAPTACYJNY (`_adaptive_group_params`) zostaje, ale okna przeliczone
    z dni na godziny. Zostaje też korekta na krótką historię grupy: bez niej
    `recent_count` dzielony przez pełne okno zaniża tempo kilkunastokrotnie,
@@ -121,11 +130,19 @@ API = "https://api.apify.com/v2"
 # `scripts/pomiar_actora.py`, uruchamiany ręcznie.
 RAPORT_POMIARU = Path(__file__).resolve().parent.parent.parent / "docs" / "POMIAR-ACTORA.md"
 
-# Werdykt pomiaru stoi w raporcie w linii „### ROZSTRZYGNIĘCIE: **ŚCIEŻKA A**".
-# Czytamy go regeksem, a nie ręcznym przepisaniem do .env, bo przepisanie jest
-# krokiem, który da się pominąć — i wtedy fetcher pracuje na cudzej intuicji
-# zamiast na pomiarze, nie mówiąc o tym ani słowem.
-_WZORZEC_SCIEZKI = re.compile(r"ROZSTRZYGNI[ĘE]CIE:\s*\*\*ŚCIEŻKA\s+([AB])\*\*")
+# Werdykt pomiaru czytamy z raportu regeksem, a nie z ręcznie przepisanej
+# zmiennej: przepisanie jest krokiem, który da się pominąć — i wtedy fetcher
+# pracuje na cudzej intuicji zamiast na pomiarze, nie mówiąc o tym ani słowem.
+#
+# DWA WARUNKI, i drugi jest ważniejszy od pierwszego. Zaślepka raportu OPISUJE
+# obie ścieżki prozą („**ŚCIEŻKA A** — okno działa: ..."), więc sam regeks na
+# nazwę ścieżki trafiłby w wyjaśnienie i odczytał je jako werdykt — akurat ten
+# hojniejszy, czyli najdroższy z możliwych błędów. Dlatego:
+#   1. obecność ramki „POMIAR NIE ZOSTAŁ" unieważnia cokolwiek innego w pliku,
+#   2. werdykt bierzemy WYŁĄCZNIE z formy, którą generuje skrypt pomiarowy
+#      (`**ŚCIEŻKA A.**` — z kropką w środku pogrubienia), a nie z prozy.
+_WZORZEC_SCIEZKI = re.compile(r"\*\*ŚCIEŻKA\s+([AB])\.\*\*")
+_WZORZEC_ZASLEPKI = re.compile(r"POMIAR NIE ZOSTA[ŁL]")
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +168,14 @@ def wykryj_sciezke(raport: Path | None = None, nadpisanie: str | None = None
     except OSError:
         return "B", f"brak raportu {plik.name} — domyślna, ostrożna"
 
+    if _WZORZEC_ZASLEPKI.search(tresc):
+        return "B", f"{plik.name} to zaślepka (pomiar NIE wykonany) — domyślna, ostrożna"
+
     trafienie = _WZORZEC_SCIEZKI.search(tresc)
     if trafienie:
         return trafienie.group(1), f"z pomiaru ({plik.name})"
-    return "B", (f"{plik.name} nie zawiera rozstrzygnięcia (pomiar nie został "
-                 f"wykonany) — domyślna, ostrożna")
+    return "B", (f"{plik.name} nie zawiera rozstrzygnięcia pomiaru "
+                 f"— domyślna, ostrożna")
 
 
 def _parametry_sciezki(sciezka: str) -> tuple[int, int]:
@@ -336,6 +356,14 @@ def _tabela_istnieje(conn, nazwa: str) -> bool:
         return bool(cur.fetchone()[0])
 
 
+def _kolumny_fetchera_istnieja(conn) -> bool:
+    """Czy wjechała migracja 0003_fetcher.sql (sprawdzamy `zrodlo_decyzji`)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'posty' AND column_name = 'zrodlo_decyzji'")
+        return cur.fetchone() is not None
+
+
 def _istniejace_id(conn) -> set[str]:
     """Wszystkie znane fb_id — dedup w pamięci na czas przebiegu.
 
@@ -344,7 +372,7 @@ def _istniejace_id(conn) -> set[str]:
     identyfikatorów mieści się w pamięci bez dyskusji.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT fb_id FROM zlecenia")
+        cur.execute("SELECT fb_id FROM posty")
         return {r[0] for r in cur.fetchall()}
 
 
@@ -356,28 +384,28 @@ def _statystyki_grup(conn, okno_dni: int, okno_tempa_h: int) -> dict[str, dict]:
       ostatnie / pierwszy_pobrany_at — tempo postowania w oknie `okno_tempa_h`
                             (wejście limitu adaptacyjnego i odstępu).
 
-    Jedno zapytanie, nie N — korzysta z indeksu (group_url, post_date DESC)
-    z migracji 0002. Bez niego to pełny skan tabeli, która rośnie o KAŻDY
+    Jedno zapytanie, nie N — korzysta z indeksu (grupa_url, pobrany_at DESC)
+    z migracji 0001. Bez niego to pełny skan tabeli, która rośnie o KAŻDY
     pobrany post, także odrzucony przez bramkę.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT group_url,
+            SELECT grupa_url,
                    COUNT(*) FILTER (
-                       WHERE pobrano_at > NOW() - (%s || ' days')::interval
+                       WHERE pobrany_at > NOW() - (%s || ' days')::interval
                    ) AS pobrane,
                    COUNT(*) FILTER (
-                       WHERE pobrano_at > NOW() - (%s || ' days')::interval
+                       WHERE pobrany_at > NOW() - (%s || ' days')::interval
                          AND czy_zlecenie
                    ) AS zlecenia,
                    COUNT(*) FILTER (
-                       WHERE pobrano_at > NOW() - (%s || ' hours')::interval
+                       WHERE pobrany_at > NOW() - (%s || ' hours')::interval
                    ) AS ostatnie,
-                   MIN(pobrano_at) AS pierwszy_pobrany_at
-            FROM zlecenia
-            WHERE group_url IS NOT NULL
-            GROUP BY group_url
+                   MIN(pobrany_at) AS pierwszy_pobrany_at
+            FROM posty
+            WHERE grupa_url IS NOT NULL
+            GROUP BY grupa_url
             """,
             (okno_dni, okno_dni, okno_tempa_h),
         )
@@ -440,9 +468,18 @@ def _zapisz_harmonogram(conn, url: str, doba: str, *, pobrane_doba: int,
     conn.commit()
 
 
-def _zapisz_post(conn, identyfikator: str, post: dict, *, zrodlo: str,
-                 czy_zlecenie: bool, jezyk: str, status: str, stale: bool) -> None:
+def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja") -> None:
     """Zapis jednego posta. ON CONFLICT (fb_id) DO NOTHING — dedup jest darmowy.
+
+    Kolumny bramki (`gate_*`) wypełniamy TU, przy wstawianiu, a nie osobnym
+    UPDATE-em przez `gate.SQL_ZAPIS`: fetcher zna werdykt bramki w momencie,
+    w którym tworzy wiersz, więc drugie zapytanie byłoby tylko drugą okazją do
+    rozjazdu. `SQL_ZAPIS` zostaje dla przeliczania postów HISTORYCZNYCH przy
+    innym progu (scripts/raport_gate.py), gdzie wiersz już istnieje.
+
+    Do bazy idzie `werdykt`, a NIE `przepusc` — to jest sedno trybu cienia:
+    w cieniu `przepusc` jest zawsze prawdziwe, więc zapisanie go dawałoby same
+    jedynki i po tygodniu nie dałoby się policzyć niczego.
 
     Commit per post, jak w repo źródłowym: przebieg trwa minutami i przeplata
     zapisy z długimi wywołaniami sieciowymi, więc jedna wielka transakcja
@@ -451,16 +488,23 @@ def _zapisz_post(conn, identyfikator: str, post: dict, *, zrodlo: str,
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO zlecenia (fb_id, tresc, post_url, group_url, group_name,
-                                  author_name, post_date, zrodlo_decyzji,
-                                  czy_zlecenie, jezyk, status, stale)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO posty (fb_id, tresc, post_url, grupa_url, grupa_nazwa,
+                               autor, opublikowany_at,
+                               zrodlo_decyzji, czy_zlecenie, status, stale,
+                               gate_werdykt, gate_punkty, gate_powod,
+                               gate_trafienia, gate_tryb, gate_jezyk, gate_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (fb_id) DO NOTHING
             """,
             (identyfikator, post["tresc"], post.get("post_url") or None,
              post.get("group_url") or None, post.get("group_name") or None,
              post.get("author_name") or None, post.get("post_date"),
-             zrodlo, czy_zlecenie, jezyk or None, status, stale),
+             decyzja.zrodlo, decyzja.czy_zlecenie, decyzja.status, decyzja.stale,
+             decyzja.gate_werdykt, decyzja.gate_punkty, decyzja.gate_powod,
+             list(decyzja.gate_trafienia), decyzja.gate_tryb,
+             decyzja.jezyk or None),
         )
     conn.commit()
 
@@ -780,6 +824,15 @@ class Decyzja:
     stale: bool
     powod: str
     pytano_model: bool     # czy zapłaciliśmy za tokeny
+    # OPINIA bramki, niezależna od trybu pracy — to ją zapisujemy do bazy.
+    # W trybie cienia `gate_werdykt` bywa False przy `pytano_model=True`:
+    # bramka mówi „odrzuciłabym", ale niczego nie blokuje. Właśnie z tych par
+    # (opinia bramki, werdykt modelu) raport liczy fałszywe odrzucenia.
+    gate_werdykt: bool = True
+    gate_punkty: int = 0
+    gate_powod: str = ""
+    gate_trafienia: tuple = ()
+    gate_tryb: str = ""
 
 
 def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
@@ -804,28 +857,41 @@ def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
     data = post.get("post_date")
     stale = data is not None and data < prog_swiezosci
 
-    werdykt = gate.gate(post.get("tresc") or "")
-    if not werdykt.przepuszczony:
-        return Decyzja(zrodlo="gate", czy_zlecenie=False, jezyk=werdykt.jezyk,
-                       status="smiec", stale=stale, powod=werdykt.powod,
-                       pytano_model=False)
-    if stale:
-        return Decyzja(zrodlo="gate", czy_zlecenie=False, jezyk=werdykt.jezyk,
-                       status="smiec", stale=True,
-                       powod=f"za stary ({data.isoformat()}) — bez modelu i bez alertu",
-                       pytano_model=False)
+    b = gate.gate(post.get("tresc") or "")
+    wspolne = {
+        "jezyk": b.jezyk,
+        "gate_werdykt": b.werdykt,
+        "gate_punkty": b.punkty,
+        "gate_powod": b.powod,
+        "gate_trafienia": tuple(b.trafienia),
+        "gate_tryb": b.tryb,
+    }
 
-    wynik = klasyfikuj(post.get("tresc") or "", grupa, werdykt.jezyk)
+    # `przepusc`, nie `werdykt` — to jest DECYZJA OPERACYJNA i uwzględnia tryb
+    # pracy. W cieniu bramka niczego nie blokuje, więc post idzie do modelu mimo
+    # negatywnej opinii; jej opinia i tak ląduje w bazie i to z niej raport
+    # policzy, ile zleceń bramka by skasowała, gdyby ją włączyć.
+    if not b.przepusc:
+        return Decyzja(zrodlo="gate", czy_zlecenie=False, status="smiec",
+                       stale=stale, powod=b.powod, pytano_model=False, **wspolne)
+    if stale:
+        return Decyzja(zrodlo="gate", czy_zlecenie=False, status="smiec",
+                       stale=True, pytano_model=False,
+                       powod=f"za stary ({data.isoformat()}) — bez modelu i bez alertu",
+                       **wspolne)
+
+    wynik = klasyfikuj(post.get("tresc") or "", grupa, b.jezyk)
     if wynik is None:
-        return Decyzja(zrodlo="gate", czy_zlecenie=False, jezyk=werdykt.jezyk,
-                       status="nowe", stale=False,
-                       powod=f"przez bramkę ({werdykt.powod}) — czeka na klasyfikator",
-                       pytano_model=False)
+        return Decyzja(zrodlo="gate", czy_zlecenie=False, status="nowe",
+                       stale=False, pytano_model=False,
+                       powod=f"przez bramkę ({b.powod}) — czeka na klasyfikator",
+                       **wspolne)
 
     czy = bool(wynik.get("czy_zlecenie"))
-    return Decyzja(zrodlo="ai", czy_zlecenie=czy, jezyk=werdykt.jezyk,
+    return Decyzja(zrodlo="ai", czy_zlecenie=czy,
                    status="nowe" if czy else "smiec", stale=False,
-                   powod=str(wynik.get("powod") or ""), pytano_model=True)
+                   powod=str(wynik.get("powod") or ""), pytano_model=True,
+                   **wspolne)
 
 
 # ---------------------------------------------------------------------------
@@ -919,8 +985,10 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
             log(f"[{KTO}] --sucho: liczę plan bez historii grup (będzie zgrubny).")
         else:
             try:
-                braki = [t for t in ("zlecenia", "harmonogram")
+                braki = [t for t in ("posty", "harmonogram")
                          if not _tabela_istnieje(conn, t)]
+                if not braki and not _kolumny_fetchera_istnieja(conn):
+                    braki = ["kolumny fetchera w `posty` (0003_fetcher.sql)"]
                 if braki:
                     log(f"[{KTO}] Brak tabel: {', '.join(braki)}. Odpal migracje "
                         f"jako postgres:\n    bash laweta_radar/scripts/migrate.sh")
@@ -967,6 +1035,10 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         tokeny, transient_key_switches=2 if apify_proxy.is_enabled() else 0)
     prog_swiezosci = teraz - timedelta(hours=settings.MAX_WIEK_POSTA_H)
     nowe = zlecenia = duplikaty = odsiane = stare = bez_linku = 0
+    # Ile postów bramka ODRZUCIŁABY, gdyby była aktywna. W trybie cienia to
+    # jedyna liczba, z której widać, ile by kosztowało jej włączenie — sama
+    # `odsiane` jest tam zawsze zerem, bo cień niczego nie blokuje.
+    bramka_by_odrzucila = 0
     niezapisane = 0
     pobrane_lacznie = plan.zuzyte_doba
     klasyfikator_padl = ""
@@ -1038,9 +1110,7 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                                            klasyfikuj=_bez_klasyfikatora)
 
             try:
-                _zapis(identyfikator, post, zrodlo=decyzja.zrodlo,
-                       czy_zlecenie=decyzja.czy_zlecenie, jezyk=decyzja.jezyk,
-                       status=decyzja.status, stale=decyzja.stale)
+                _zapis(identyfikator, post, decyzja)
             except Exception as e:  # noqa: BLE001 — jeden zły post nie wywala reszty
                 # Post pobrany i opłacony, ale niezapisany — zniknie bez śladu,
                 # jeśli tego nie policzymy. Pełny komunikat tylko przy pierwszym
@@ -1051,6 +1121,8 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 continue
             istniejace.add(identyfikator)
             nowe += 1
+            if not decyzja.gate_werdykt:
+                bramka_by_odrzucila += 1
             if decyzja.stale:
                 stare += 1
             elif decyzja.zrodlo == "gate" and decyzja.status == "smiec":
@@ -1086,9 +1158,18 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 f"({type(e).__name__}) — grupa wypadnie ponownie w następnym "
                 f"przebiegu.")
 
+    tryb_bramki = gate.normalizuj_tryb(settings.GATE_TRYB)
     log(f"[{KTO}] gotowe: {nowe} nowych postów ({zlecenia} zleceń, {odsiane} "
         f"odsianych przez bramkę, {stare} za starych), {duplikaty} duplikatów; "
         f"pobrane w tej dobie: {pobrane_lacznie}/{plan.budzet}")
+    if tryb_bramki == gate.TRYB_CIEN:
+        # Bez tej linii tryb cienia wygląda jak brak bramki. Liczba po prawej to
+        # dokładnie to, co system zacznie oszczędzać po przełączeniu na
+        # `aktywny` — i dokładnie to, czym ryzykuje, jeśli raport pokaże
+        # fałszywe odrzucenia.
+        log(f"[{KTO}] bramka w TRYBIE CIENIA — nic nie zablokowała, ale "
+            f"odrzuciłaby {bramka_by_odrzucila} z {nowe} postów. "
+            f"Rozliczenie: python laweta_radar/scripts/raport_gate.py")
     if bez_linku:
         log(f"[{KTO}] UWAGA: {bez_linku} postów bez post_url — sprawdź _first_str.")
     if niezapisane:
@@ -1105,13 +1186,13 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     return 0
 
 
-def _zapis(identyfikator: str, post: dict, **kwargi) -> None:
+def _zapis(identyfikator: str, post: dict, decyzja: Decyzja) -> None:
     """Zapis jednego posta na ŚWIEŻYM połączeniu (patrz komentarz w `run`)."""
     import psycopg2  # noqa: PLC0415 — leniwie, jak wszędzie w tym repo
 
     conn = psycopg2.connect(settings.DATABASE_URL)
     try:
-        _zapisz_post(conn, identyfikator, post, **kwargi)
+        _zapisz_post(conn, identyfikator, post, decyzja)
     finally:
         conn.close()
 
@@ -1122,7 +1203,7 @@ def _zapis(identyfikator: str, post: dict, **kwargi) -> None:
 def _main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description="Pobranie postów z grup FB przez Apify + bramka słowna + zapis "
-                    "do tabeli `zlecenia`. Bez kluczy / bez grup / bez migracji "
+                    "do tabeli `posty`. Bez kluczy / bez grup / bez migracji "
                     "kończy czysto, nic nie robiąc.")
     ap.add_argument("--budzet", type=int, default=None, metavar="N",
                     help="nadpisz dobowy sufit pobranych postów dla całego systemu "

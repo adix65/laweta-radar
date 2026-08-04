@@ -1,4 +1,4 @@
-"""Offline testy `apify_run` i `apify_credits` — bez sieci i bez klucza.
+"""Offline testy `apify_run` — bez sieci i bez klucza.
 
 Testujemy tylko to, co da się sprawdzić bez Apify: rozpoznawanie kształtu
 odpowiedzi i ostrzeganie o polach, których actor nie zna. Ta druga rzecz jest
@@ -7,14 +7,13 @@ wejściowego nie zwraca błędu — zwraca run BEZ filtra, za pełną cenę.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
-from laweta_radar.workers import apify_credits, apify_run  # noqa: E402
+from laweta_radar.workers import apify_run  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -67,48 +66,3 @@ def test_brak_schematu_to_brak_wiedzy_a_nie_brak_problemu():
     assert apify_run.nieznane_pola({"cokolwiek": 1}, {}) == []
     assert apify_run.nieznane_pola({"cokolwiek": 1}, {"properties": {}}) == []
     assert apify_run.nieznane_pola({"cokolwiek": 1}, {"properties": "śmieć"}) == []
-
-
-# ---------------------------------------------------------------------------
-# apify_credits — kształt odpowiedzi /users/me/limits
-# ---------------------------------------------------------------------------
-ODPOWIEDZ = json.loads("""
-{"data": {
-  "monthlyUsageCycle": {"startAt": "2026-08-01T00:00:00.000Z",
-                        "endAt": "2026-08-31T23:59:59.999Z"},
-  "limits": {"maxMonthlyUsageUsd": 5},
-  "current": {"monthlyUsageUsd": 1.25}
-}}
-""")
-
-
-def test_odczyt_zuzycia_konta():
-    z = apify_credits.z_odpowiedzi(ODPOWIEDZ)
-    assert z.zuzyte_usd == 1.25
-    assert z.limit_usd == 5.0
-    assert z.zostalo_usd == 3.75
-    assert "1.2500" in z.opis() and "5.00" in z.opis()
-
-
-def test_nieznany_ksztalt_odpowiedzi_to_None_a_nie_wyjatek():
-    """Apify może przemianować pole. Pomiar ma wtedy powiedzieć „nie umiem
-    odczytać salda" i policzyć koszt z runów — a nie wywalić się w połowie serii,
-    za którą już zapłaciliśmy."""
-    assert apify_credits.z_odpowiedzi({}) is None
-    assert apify_credits.z_odpowiedzi({"data": {}}) is None
-    assert apify_credits.z_odpowiedzi({"data": {"current": {"cos": 1}}}) is None
-
-
-def test_brak_limitu_nie_psuje_odczytu_zuzycia():
-    """Na płatnym planie limitu może nie być. Zużycie nadal jest tą liczbą,
-    o którą chodzi."""
-    z = apify_credits.z_odpowiedzi(
-        {"data": {"current": {"monthlyUsageUsd": 2.0}}})
-    assert z.zuzyte_usd == 2.0 and z.limit_usd is None and z.zostalo_usd is None
-    assert "limit nieznany" in z.opis()
-
-
-def test_koszt_runu_z_usageTotalUsd():
-    assert apify_credits.koszt_runu({"usageTotalUsd": 0.0123}) == 0.0123
-    assert apify_credits.koszt_runu({}) is None
-    assert apify_credits.koszt_runu({"usageTotalUsd": "brak"}) is None

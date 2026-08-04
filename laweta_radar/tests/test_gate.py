@@ -1,104 +1,607 @@
-"""Offline testy workers/gate.py — bramka słowna PL / DE / CS / SK.
+"""Offline testy workers/gate.py.
 
-Bez sieci, bez bazy, bez modelu. Bramka z założenia nie dotyka żadnego z nich
-i ten plik jest tego dowodem: gdyby ktoś wstawił do niej wywołanie detektora
-języka albo modelu, testy zaczęłyby wisieć albo wymagać kluczy.
+Bramka jest jedynym miejscem w systemie, które cokolwiek odrzuca, więc jej błąd
+NIE MA jak się ujawnić: odrzucony post nie trafia nigdzie, nie ma alertu, nie ma
+wiersza w logu. Bramka kasująca co dziesiąte zlecenie wygląda w produkcji tak
+samo jak bramka idealna. Te testy są jedynym miejscem, w którym różnicę widać
+przed wdrożeniem.
 
-CZEGO TU PILNUJEMY — po jednym powodzie na sekcję:
+Każdy przypadek "ma przejść" jest wart ~300 zł kursu. Każdy "ma odpaść" jest
+wart ~0,002 zł tokenów. Ta asymetria decyduje, które testy są tu naprawdę ważne.
 
-  1. KOMPLET JĘZYKÓW. Po dziesięć-kilkanaście przypadków na język, w tym po
-     jednym wygaszonym. Bramka jednojęzyczna nie wygląda na zepsutą: obcy post
-     dostaje zero punktów i wylatuje tak samo cicho jak reklama felg. Jedynym
-     sposobem, żeby to zauważyć, jest test per język.
-  2. ASYMETRIA KOSZTÓW. Zgłoszenie ze słowem reklamowym („szukam lawety,
-     oferuję zapłatę") MA przechodzić. Odwrotna pomyłka kosztuje ułamek grosza,
-     ta kosztuje zlecenie.
-  3. ZWROTY GRZECZNOŚCIOWE NIE WYGASZAJĄ. „Z góry dziękuję za pomoc" stoi
-     w co drugim polskim zgłoszeniu. Gdyby trafiło do warstwy wygaszenia,
-     bramka kasowałaby zlecenia hurtowo — i nikt by się nie dowiedział.
-  4. ODMIANA. Wzorce dopasowują się z wolnym końcem, bo w trzech z czterech
-     języków mianownik jest formą, w której ludzie nie piszą.
-  5. NIEPEWNA DETEKCJA. Post bez znaków charakterystycznych ma iść przez
-     WSZYSTKIE słowniki, a nie przez domyślny.
+Bez sieci i bez bazy — moduł jest czysty z założenia.
 """
 from __future__ import annotations
 
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
-from laweta_radar.workers import gate  # noqa: E402
+from laweta_radar.workers import gate as g  # noqa: E402
 
 
-def _p(tresc: str) -> gate.GateResult:
-    """Skrót — bramka bez wymuszania języka (tak, jak woła ją fetcher)."""
-    return gate.gate(tresc)
+def w(tresc: str, prog: int | None = None):
+    """Werdykt bramki niezależny od trybu — w cieniu `przepusc` jest zawsze True."""
+    return g.gate(tresc, prog=prog, tryb=g.TRYB_AKTYWNY)
 
 
-# ---------------------------------------------------------------------------
-# POLSKI
-# ---------------------------------------------------------------------------
+def przepuszcza(tresc: str, prog: int | None = None) -> bool:
+    return w(tresc, prog).werdykt
+
+
+# ===========================================================================
+# PRZYPADKI OBOWIĄZKOWE z zadania — jeśli któryś pada, bramka jest zepsuta
+# ===========================================================================
+def test_obowiazkowy_prosba_wprost_z_trasa():
+    assert przepuszcza("Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala")
+
+
+def test_obowiazkowy_reklama_konkurencji():
+    assert not przepuszcza("Laweta 24/7 Podkarpacie, konkurencyjne ceny, zapraszam")
+
+
+def test_obowiazkowy_prosba_o_polecenie():
+    assert przepuszcza("Polecicie kogoś kto przewiezie auto do warsztatu?")
+
+
+def test_obowiazkowy_sprzedaz_sprzetu():
+    assert not przepuszcza("Sprzedam lawetę Iveco Daily, stan bdb")
+
+
+def test_obowiazkowy_ogloszenie_o_pracy():
+    assert not przepuszcza("Zatrudnię kierowcę kat. C na lawetę")
+
+
+def test_obowiazkowy_bez_ogonkow():
+    """Ludzie piszą bez ogonków — normalizacja musi to wyrównać."""
+    assert przepuszcza("stanalem na dk28 auto nie pali")
+
+
+def test_obowiazkowy_ostrzezenie_o_korku_to_nie_zlecenie():
+    assert not przepuszcza("Uwaga korek na obwodnicy, wypadek")
+
+
+def test_obowiazkowy_przepuszczenie_bije_odrzucenie():
+    """Jeśli ten test pada, warstwy są w złej kolejności — i to jest cały test.
+
+    "Sprzedam" jest w warstwie 3, "odholować" w warstwie 2. Filtr sprawdzający
+    odrzucenia jako pierwsze wyrzuciłby prawdziwe zlecenie.
+    """
+    assert przepuszcza("Sprzedam golfa po stłuczce, ale trzeba go odholować z parkingu")
+
+
+def test_obowiazkowy_faktura_to_klient_b2b_nie_spam():
+    assert przepuszcza("Potrzebna laweta, firma, proszę o fakturę VAT")
+
+
+def test_obowiazkowy_kategoria_prawa_jazdy_to_nie_rekrutacja():
+    assert przepuszcza("Mam ciężarówkę kat. C, zepsuła się skrzynia, kto przewiezie")
+
+
+def test_obowiazkowy_wygaszenie_wersalikami():
+    assert not przepuszcza("NIEAKTUALNE - dziękuję wszystkim, znalazłem kogoś")
+
+
+def test_obowiazkowy_wygaszenie_dopisane_edytem():
+    """Post ma komplet słów zlecenia — ratuje nas TYLKO to, że warstwa 1 jest pierwsza."""
+    assert not przepuszcza("Potrzebuję lawety pilnie!! EDIT: załatwione, dzięki")
+
+
+def test_obowiazkowy_transport_planowany_zza_granicy():
+    assert przepuszcza("kupilem auto w niemczech, kto przywiezie na lawecie")
+
+
+def test_obowiazkowy_zdarzenie_bez_slowa_laweta():
+    assert przepuszcza("wjechalem w rowie pod Sanokiem, potrzebuje wyciagniecia")
+
+
+def test_obowiazkowy_sondaz_cenowy_z_ciekawosci():
+    assert not przepuszcza("Ile bierzecie za holowanie do 50 km? Pytam z ciekawości")
+
+
+def test_obowiazkowy_awaria_w_trasie():
+    assert przepuszcza("flak na s19, nie mam zapasowego, ktos w okolicy?")
+
+
+# ===========================================================================
+# WARSTWA 1 — WYGASZENIE
+# ===========================================================================
+def test_wygaszenie_ma_powod_wygaszone():
+    assert w("Potrzebna laweta. NIEAKTUALNE").powod == "wygaszone"
+
+
+def test_wygaszenie_temat_zamkniety():
+    assert not przepuszcza("Potrzebna laweta pilnie. Temat zamknięty, dziękuję")
+
+
+def test_wygaszenie_ktos_juz_jedzie():
+    assert not przepuszcza("Potrzebna laweta na dk19, ktoś już jedzie")
+
+
+def test_wygaszenie_juz_nie_potrzebuje():
+    assert not przepuszcza("Szukam lawety do Rzeszowa — już nie potrzebuję, dzięki")
+
+
+def test_wygaszenie_odwolane():
+    assert not przepuszcza("Transport auta z Niemiec — odwołane, kupujący się rozmyślił")
+
+
+def test_znalazlem_AUTO_to_poczatek_zlecenia_a_nie_koniec():
+    """Zawężenie wzorca "znalazlem" — bez niego kasujemy prawdziwy lead.
+
+    "Znalazłem auto w Niemczech, kto przywiezie" to POCZĄTEK zlecenia.
+    Wygaszeniem jest "znalazłem KOGOŚ", nie "znalazłem cokolwiek".
+    """
+    assert przepuszcza("Znalazłem auto w Niemczech, kto przywiezie na lawecie?")
+    assert not przepuszcza("Dzięki za odzew, znalazłem kogoś do przewiezienia auta")
+
+
+def test_mam_juz_kupione_auto_to_nie_wygaszenie():
+    assert przepuszcza("Mam już kupione auto w Belgii, potrzebuję transportu")
+    assert not przepuszcza("Mam już lawetę, dzięki za pomoc wszystkim zainteresowanym")
+
+
+def test_juz_po_naprawie_to_nie_wygaszenie():
+    """"Już po" wygasza tylko w połączeniu ze sprawą/tematem — nie z naprawą."""
+    assert przepuszcza("Auto już po naprawie, kto przewiezie je z warsztatu do domu?")
+    assert not przepuszcza("Potrzebna laweta na dk28. Już po sprawie, dzięki")
+
+
+def test_z_gory_dziekuje_wszystkim_to_OTWARTA_prosba():
+    """Polska formuła grzecznościowa nie może kasować zlecenia."""
+    assert przepuszcza("Auto stoi na parkingu i nie rusza. Z góry dziękuję wszystkim")
+    assert not przepuszcza("Dziękuję wszystkim, sprawa rozwiązana, laweta była na miejscu")
+
+
+# ===========================================================================
+# WARSTWA 2 — TWARDE PRZEPUSZCZENIE
+# ===========================================================================
+def test_prosba_o_polecenie_to_pelnoprawny_lead():
+    """Autor szuka WYKONAWCY — najczystszy możliwy sygnał zakupowy."""
+    assert przepuszcza("Polecicie jakąś lawetę w okolicy Krosna?")
+    assert przepuszcza("Znacie kogoś z lawetą, kto pojedzie do Kolonii?")
+    assert przepuszcza("Kogo polecacie do transportu auta z aukcji?")
+
+
+def test_transport_planowany_jest_glownym_produktem():
+    assert przepuszcza("Kupiłem auto z komisu pod Hanowerem, szukam kogoś na powrót")
+    assert przepuszcza("Sprowadzam auto z Holandii w przyszłym tygodniu")
+    assert przepuszcza("Mam wolne miejsce na lawecie, doładunek z Włoch")
+    assert przepuszcza("Zlecę transport, dwa auta z Austrii do Podkarpacia")
+
+
+def test_frazy_awaryjne_zostaja_w_slowniku():
+    """Auto, które nie jeździ, trzeba przewieźć — czy spod Krosna, czy spod Kolonii.
+
+    O tym, czy kurs się opłaca, decyduje KIEROWCA po obejrzeniu trasy, a nie
+    bramka po słowie kluczowym.
+    """
+    assert przepuszcza("Passat nie odpala pod domem, akumulator chyba zdechł")
+    assert przepuszcza("Auto po szkodzie stoi na parkingu strzeżonym w Gdańsku")
+    assert przepuszcza("Ciągnik niejezdzący, trzeba go zabrać z pola")
+
+
+def test_krotki_post_przechodzi_bo_warstwa_2_jest_wczesniej():
+    """"szukam lawety" ma 13 znaków, a limit długości to 15.
+
+    Gdyby limit był sprawdzany przed przepuszczeniem, ten post by zniknął.
+    """
+    assert len("szukam lawety") < g.MIN_DLUGOSC
+    assert przepuszcza("szukam lawety")
+
+
+def test_szukam_kierowcy_ktory_przywiezie_auto_to_klient():
+    """Rekrutacja jest w warstwie 3, ale warstwa 2 łapie ten post wcześniej."""
+    assert przepuszcza("Szukam kierowcy, który przywiezie auto z Niemiec, płacę od ręki")
+    assert not przepuszcza("Szukam kierowcy z doświadczeniem, praca od zaraz, CV na maila")
+
+
+def test_pytanie_o_cene_z_czynnoscia_to_klient():
+    """Hamulec cenowy nie może zabijać postów, w których ktoś już wie, czego chce."""
+    assert przepuszcza("Ile kosztuje żeby zabrać auto z parkingu w Jaśle do warsztatu?")
+
+
+# ===========================================================================
+# WARSTWA 3 — TWARDE ODRZUCENIE
+# ===========================================================================
+def test_autopromocja_wymaga_sygnalu_oferty():
+    assert not przepuszcza("Pomoc drogowa całodobowo, w mojej ofercie także transport")
+    assert not przepuszcza("Usługi lawetowe, wystawiam fakturę, zapraszam do kontaktu")
+
+
+def test_oferuje_pieniadze_to_KLIENT_a_nie_konkurencja():
+    """Zawężenie wzorca "oferuje" — bez niego kasujemy klienta z gotówką."""
+    assert przepuszcza("Oferuję 500 zł za przewiezienie auta z Kolonii do Krosna")
+    assert not przepuszcza("Oferuję usługi lawetowe na terenie całego Podkarpacia")
+
+
+def test_sprzedaz_wymaga_przedmiotu_z_branzy():
+    assert not przepuszcza("Sprzedam najazd aluminiowy 3m, stan idealny, mało używany")
+    # Sprzedaż AUTA to nie sprzedaż sprzętu — takie posty często kończą się kursem.
+    assert przepuszcza("Sprzedam golfa, kupujący z Gdańska pyta o transport auta")
+
+
+def test_rekrutacja_wymaga_sygnalu_pracy():
+    assert not przepuszcza("Przyjmę do pracy kierowcę, laweta nowa, stawka do ustalenia")
+    assert not przepuszcza("Oferta pracy: kierowca kat. B+E, wyjazdy zagraniczne")
+
+
+def test_za_krotkie_odpada():
+    assert not przepuszcza("hej")
+    assert w("hej").powod == "za krotkie"
+
+
+def test_pusta_tresc_nie_wywala_sie():
+    """Worker chodzi z crona — pusty post nie może rzucić wyjątkiem."""
+    assert not przepuszcza("")
+    assert not przepuszcza("   ")
+    assert w(None).werdykt is False  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# WARSTWA 4 — PUNKTACJA
+# ===========================================================================
+def test_sam_pojazd_nie_wystarcza():
+    wynik = w("Ładny ten passat na zdjęciu, gratuluję zakupu kolego")
+    assert wynik.punkty < 5 and not wynik.werdykt
+
+
+def test_pojazd_plus_akcja_wystarcza():
+    """POJAZD (+2) + AKCJA (+3) = 5, czyli dokładnie próg."""
+    wynik = w("Trzeba zabrać ten samochód z podwórka, stoi od miesiąca")
+    assert wynik.punkty >= 5 and wynik.werdykt
+
+
+def test_problem_plus_miejsce_wystarcza():
+    """PROBLEM (+3) + MIEJSCE (+2) = 5."""
+    wynik = w("Rozrząd poszedł, stoję na poboczu przy wjeździe na obwodnicę")
+    assert wynik.punkty >= 5 and wynik.werdykt
+
+
+def test_prog_jest_konfigurowalny_jedna_liczba():
+    tresc = "Trzeba zabrać ten samochód z podwórka, stoi od miesiąca"
+    assert przepuszcza(tresc, prog=5)
+    assert not przepuszcza(tresc, prog=99)
+
+
+def test_hamulec_ciekawosci_dziala_bezwarunkowo():
+    assert not przepuszcza("Tak z ciekawości, ile bierzecie za taki kurs w tę stronę?")
+
+
+def test_ciekawosc_NIE_bije_nazwanej_uslugi():
+    """Granica hamulca "z ciekawości": nazwanie usługi wprost wygrywa.
+
+    "Przewóz auta" to warstwa 2, więc post przechodzi mimo "z ciekawości" — i tak
+    ma być. Ktoś, kto pyta o cenę KONKRETNEJ usługi, jest klientem niezależnie od
+    tego, jak grzecznie zmiękczył pytanie; koszt pomyłki to 0,002 zł. Hamulec ma
+    gasić sondaż rynku ("ile bierzecie za kurs"), a nie zapytanie ofertowe.
+    """
+    assert przepuszcza("Tak z ciekawości, ile kosztuje przewóz auta do Niemiec?")
+
+
+def test_hamulec_cenowy_nie_dziala_gdy_jest_akcja():
+    """Warunkowość hamulca: pytanie o cenę + czynność = klient, nie sondaż."""
+    bez_akcji = w("Jaka cena? Pytam o rynek, nic konkretnego na razie")
+    z_akcja = w("Jaka cena za przetransportować passata z Wrocławia do Krosna?")
+    assert bez_akcji.punkty < z_akcja.punkty
+
+
+def test_hamulec_czasowy_nie_dziala_przy_pilnosci():
+    """"wczoraj" osłabia relację ze zdarzenia, ale nie post krzyczący "pilne"."""
+    relacja = w("Wczoraj widziałem tam rozbitą osobówkę na poboczu drogi")
+    pilne = w("Wczoraj się zepsuł, ale PILNE — auto blokuje wjazd do warsztatu")
+    assert pilne.punkty > relacja.punkty
+
+
+def test_numer_telefonu_daje_punkt():
+    bez = w("Osobówka do zabrania z podwórka, szczegóły w komentarzach")
+    z_nr = w("Osobówka do zabrania z podwórka, dzwońcie 601 234 567")
+    assert z_nr.punkty == bez.punkty + 1 + 1  # telefon (+1) i słowo "dzwonic" (+1)
+
+
+def test_trafienia_niosa_wagi_do_kalibracji():
+    wynik = w("Rozrząd poszedł, stoję na poboczu przy wjeździe na obwodnicę")
+    assert any("PROBLEM:" in t and "+3" in t for t in wynik.trafienia)
+    assert any("MIEJSCE:" in t and "+2" in t for t in wynik.trafienia)
+
+
+def test_powod_mowi_o_ile_zabraklo():
+    wynik = w("Ładny ten passat na zdjęciu, gratuluję zakupu kolego", prog=5)
+    assert "punktacja" in wynik.powod and "prog 5" in wynik.powod
+
+
+# ===========================================================================
+# NORMALIZACJA I GRANICE SŁÓW
+# ===========================================================================
+def test_normalizacja_zbija_ogonki_wersaliki_i_interpunkcje():
+    assert g.normalizuj("POTRZEBUJĘ   ŁAWETY!!!  ") == "potrzebuje lawety!"
+
+
+def test_normalizacja_radzi_sobie_z_obcymi_diakrytykami():
+    """"Autohaus München" trafia w te posty regularnie."""
+    assert "munchen" in g.normalizuj("Odbiór z Autohaus München")
+
+
+def test_granica_slowa_hol_nie_lapie_alkoholu():
+    assert not przepuszcza("Kolega był po alkoholu i teraz ma problem z prawkiem")
+
+
+def test_granica_slowa_kolo_nie_lapie_okolo():
+    """Sprawdzamy mechanizm granic, nie konkretny wzorzec."""
+    assert g._skompiluj("kolo").search("kolo zamachowe")
+    assert not g._skompiluj("kolo").search("okolo stu kilometrow")
+
+
+def test_granica_slowa_tel_nie_lapie_telewizora():
+    assert g._skompiluj("tel").search("tel. 601234567")
+    assert not g._skompiluj("tel").search("telewizor do przewiezienia")
+
+
+def test_wzorzec_z_kwantyfikatorem_dopuszcza_ciag_dalszy():
+    """"na dk" musi trafić "na dk28", "na dk 19" i samo "na dk"."""
+    wz = g._skompiluj("na dk ?[0-9]*")
+    assert wz.search("stoje na dk28") and wz.search("na dk 19") and wz.search("na dk")
+
+
+# ===========================================================================
+# TRYB CIENIA — bez niego nie da się stwierdzić, czy bramka jest dobra
+# ===========================================================================
+def test_w_cieniu_nic_nie_jest_blokowane():
+    wynik = g.gate("Laweta 24/7, konkurencyjne ceny", tryb=g.TRYB_CIEN)
+    assert wynik.przepusc is True, "w cieniu WSZYSTKO idzie do AI"
+    assert wynik.werdykt is False, "ale werdykt bramki ma być zapisany"
+
+
+def test_w_trybie_aktywnym_werdykt_jest_wiazacy():
+    wynik = g.gate("Laweta 24/7, konkurencyjne ceny", tryb=g.TRYB_AKTYWNY)
+    assert wynik.przepusc is False and wynik.werdykt is False
+
+
+def test_nieznany_tryb_degraduje_do_cienia():
+    """Literówka w .env nie może po cichu WŁĄCZYĆ blokowania."""
+    assert g.normalizuj_tryb("aktywne") == g.TRYB_CIEN
+    assert g.normalizuj_tryb("") == g.TRYB_CIEN
+    assert g.normalizuj_tryb(None) == g.TRYB_CIEN
+    assert g.normalizuj_tryb("AKTYWNY") == g.TRYB_AKTYWNY
+
+
+def test_do_bazy_idzie_werdykt_a_nie_decyzja_operacyjna():
+    """Sedno trybu cienia: gdyby zapisywać `przepusc`, byłyby same jedynki."""
+    wynik = g.gate("Zatrudnię kierowcę kat. C", tryb=g.TRYB_CIEN)
+    wiersz = g.wiersz_do_zapisu(wynik, "fb123")
+    assert wiersz["gate_werdykt"] is False
+    assert wiersz["gate_tryb"] == g.TRYB_CIEN
+    assert wiersz["fb_id"] == "fb123"
+
+
+def test_kontrakt_zapisu_pokrywa_sie_z_migracja():
+    """Nazwy parametrów muszą zgadzać się z SQL_ZAPIS — inaczej worker padnie w nocy."""
+    wiersz = g.wiersz_do_zapisu(g.gate("cokolwiek dluzszego niz limit"), "x")
+    for klucz in wiersz:
+        assert f"%({klucz})s" in g.SQL_ZAPIS
+
+
+# ===========================================================================
+# WŁASNOŚCI CAŁEGO MODUŁU
+# ===========================================================================
+def test_wszystkie_wzorce_sa_poprawnymi_regexami():
+    """Literówka w słowniku ma paść tutaj, a nie przy pierwszym poście o 3 w nocy."""
+    for nazwa, tabela in (("WYGASZENIE", g.WYGASZENIE), ("PRZEPUSZCZENIE", g.PRZEPUSZCZENIE),
+                          ("ODRZUCENIE", g.ODRZUCENIE), ("PUNKTACJA", g.PUNKTACJA),
+                          ("HAMULCE", g.HAMULCE)):
+        for wzorzec, _, _ in tabela:
+            assert g._skompiluj(wzorzec), f"{nazwa}: {wzorzec}"
+
+
+def test_wzorce_sa_zapisane_w_formie_znormalizowanej():
+    """Wzorzec z ogonkiem albo wielką literą NIGDY nie trafi — normalizacja go zbija."""
+    tabele = (g.WYGASZENIE + g.PRZEPUSZCZENIE + g.ODRZUCENIE + g.PUNKTACJA + g.HAMULCE)
+    for wzorzec, _, _ in tabele:
+        litery = [c for c in wzorzec if c.isalpha()]
+        assert all(c.islower() and c.isascii() for c in litery), wzorzec
+
+
+def test_wagi_punktacji_sa_dodatnie_a_hamulcow_ujemne():
+    assert all(waga > 0 for _, waga, _ in g.PUNKTACJA)
+    assert all(waga < 0 for _, waga, _ in g.HAMULCE)
+    assert all(waga < 0 for _, waga, _, _ in g.HAMULCE_WARUNKOWE)
+
+
+def test_modul_nie_dotyka_sieci_ani_dysku():
+    """"Zero wywołań sieciowych" — sprawdzamy to na imporcie, nie na obietnicy."""
+    import laweta_radar.workers.gate as modul
+
+    zrodlo = open(modul.__file__, encoding="utf-8").read()
+    for zakazane in ("import httpx", "import requests", "import psycopg2", "urlopen"):
+        assert zakazane not in zrodlo, f"bramka ma zostać offline, a widzę {zakazane}"
+
+
+def test_bramka_jest_szybka():
+    """Bramka chodzi po każdym poście z każdego runu — musi być darmowa w czasie."""
+    import time
+
+    tresc = "Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala, tel 601234567"
+    start = time.perf_counter()
+    for _ in range(200):
+        w(tresc)
+    assert (time.perf_counter() - start) / 200 < 0.01
+
+
+# ===========================================================================
+# KORPUS — najważniejszy test w tym pliku
+#
+# Pojedyncze przypadki wyżej pilnują konkretnych mechanizmów. Ten pilnuje
+# WŁASNOŚCI CAŁEJ BRAMKI: na próbce postów napisanych tak, jak ludzie piszą
+# w tych grupach, liczba fałszywych odrzuceń ma wynosić ZERO.
+#
+# Trzy błędy znalazły się dopiero tutaj i żaden nie miał jak wyjść w testach
+# jednostkowych: "ktoś jedzie w tamtą stronę?" gaszone przez wzorzec na "ktoś
+# już jedzie", "ciągnik do ZABRANIA" nietrafiony przez wzorzec w bezokoliczniku
+# i "koparka do PRZETRANSPORTOWANIA" — ta sama odmiana. Wszystkie trzy kasowały
+# realne kursy i wszystkie trzy wyglądały w kodzie na poprawne.
+#
+# Dopisując słowo do słownika, dopisz tu post, który je uzasadnia.
+# ===========================================================================
+KORPUS_ZLECENIA = [
+    # transport planowany — główny produkt operatora
+    "Kupiłem BMW w Duesseldorfie, potrzebuję transportu do Rzeszowa na przyszły tydzień",
+    "Odbiór auta spod komisu w Hanowerze, ktoś jedzie w tamtą stronę?",
+    "Zlecę przewóz dwóch aut z Belgii, płatne przelewem, faktura VAT",
+    "Kto jedzie do Holandii w okolicach 20-go? Mam osobówkę do zabrania",
+    "Szukam miejsca na lawecie dla Golfa IV, trasa Kolonia - Krosno",
+    "Mam wolne miejsce na lawecie, wracam pusty z Włoch w sobotę",
+    "Sprowadzam auto z aukcji w Niemczech, ile za transport do Jasła?",
+    "Trzy auta z Austrii do Podkarpacia, termin elastyczny, proszę o wycenę na PW",
+    "Znalazłem ładnego passata w Belgii, kto go przywiezie?",
+    "Potrzebny transport busa dostawczego z Czech, waga ok 2,8t",
+    # awaria i zdarzenie drogowe
+    "Golf nie odpala pod domem w Korczynie, akumulator chyba padł. Ktoś w okolicy?",
+    "Stanąłem na DK28 za Duklą, sprzęgło poszło. Potrzebna laweta",
+    "Wjechałem do rowu pod Sanokiem, auto całe ale trzeba wyciągnąć",
+    "Skrzynia się zepsuła, auto stoi na parkingu przy Biedronce, trzeba zabrać do warsztatu",
+    "Flak na S19, brak zapasowego, ktoś obok?",
+    "Auto powypadkowe do przewiezienia z parkingu policyjnego w Krośnie",
+    "Ciężarówka kat. C stoi na MOP przy A4, turbina padła, kto pomoże?",
+    "Mam ciągnik niejezdzący do zabrania z pola, jakieś 12 km od Krosna",
+    "Silnik zgasł na obwodnicy i nie chce ruszyć, blokuję pas",
+    "Motocykl po stłuczce, trzeba przewieźć do serwisu w Rzeszowie",
+    # prośba o polecenie
+    "Polecicie kogoś sprawdzonego do transportu auta z Niemiec?",
+    "Znacie jakąś lawetę w okolicy Brzozowa? Potrzebna na jutro",
+    "Kogo polecacie do przewiezienia kampera? Dość duży",
+    "Szukam firmy, która przywiezie auto z Autohaus w Monachium",
+    # sformułowania nietypowe — tu bramka najłatwiej się myli
+    "Trzeba zabrać osobówkę z podwórka, stoi od pół roku i nie odpala",
+    "Ile kosztuje żeby ściągnąć auto z parkingu strzeżonego do domu?",
+    "Oferuję 800 zł za przewiezienie auta z Kolonii do Krosna, termin dowolny",
+    "Sprzedam golfa po stłuczce, kupujący prosi o transport do Gdańska",
+    "Potrzebna pomoc drogowa, auto nie na chodzie, ul. Spacerowa",
+    "Koparka do przetransportowania, 4 km, mam własne najazdy",
+]
+
+KORPUS_SMIECI = [
+    "Laweta 24/7 Podkarpacie, konkurencyjne ceny, zapraszam do kontaktu",
+    "Usługi lawetowe, wystawiam fakturę, tanio i solidnie",
+    "Oferuję usługi lawetowe na terenie całego województwa, atrakcyjne ceny",
+    "Sprzedam lawetę Iveco Daily 2015, stan bardzo dobry, zadbana",
+    "Sprzedam najazdy aluminiowe 3m, nośność 2t, mało używane",
+    "Sprzedam wciągarkę elektryczną 12V, 4500 lbs, do lawety",
+    "Sprzedam przyczepkę lekką, hamowana, stan idealny",
+    "Zatrudnię kierowcę kat. C na lawetę, wyjazdy zagraniczne",
+    "Praca dla kierowcy B+E, stała trasa Niemcy-Polska, CV na maila",
+    "Przyjmę do pracy mechanika i kierowcę, dobre warunki",
+    "Oferta pracy: kierowca lawety, umowa o pracę, Krosno",
+    "NIEAKTUALNE - dziękuję wszystkim, znalazłem kogoś",
+    "Potrzebuję lawety pilnie!! EDIT: załatwione, dzięki",
+    "Szukam lawety do Rzeszowa. Temat zamknięty, ktoś już jedzie",
+    "Transport auta z Niemiec - odwołane, sprzedający się rozmyślił",
+    "Potrzebna laweta na DK19. Już po sprawie, dzięki wszystkim",
+    "Uwaga korek na obwodnicy, wypadek przy zjeździe",
+    "Ile bierzecie za holowanie do 50 km? Pytam z ciekawości",
+    "Ładny ten passat, gratuluję zakupu kolego",
+    "Uwaga patrol na krajówce za Miejscem Piastowym",
+    "Kto zna dobrego blacharza w Krośnie?",
+    "Wczoraj widziałem tam rozbitą osobówkę na poboczu",
+    "Sprzedam opony zimowe 205/55 R16, komplet, stan dobry",
+    "Dzień dobry wszystkim, nowy na grupie",
+]
+
+
+def test_korpus_zero_falszywych_odrzucen():
+    """Jedyna liczba, która ma znaczenie. Nie ma tu miejsca na "prawie zero"."""
+    zabite = [(t, w(t)) for t in KORPUS_ZLECENIA if not przepuszcza(t)]
+    assert not zabite, "\n" + "\n".join(
+        f"  ZABITE ZLECENIE [{r.powod}] {t}\n    {r.trafienia}" for t, r in zabite
+    )
+
+
+def test_korpus_bramka_realnie_cokolwiek_odsiewa():
+    """Druga strona: bramka, która przepuszcza wszystko, jest tylko kosztem.
+
+    Próg jest niski (25%), bo celem NIE jest wysoki odsetek — realistycznie
+    wychodzi 20-35% i to jest w porządku. Ten test pilnuje tylko, żeby po
+    kolejnym rozluźnieniu słownika bramka nie zamieniła się w atrapę.
+    """
+    korpus = KORPUS_ZLECENIA + KORPUS_SMIECI
+    odsiane = sum(1 for t in korpus if not przepuszcza(t))
+    assert odsiane >= len(korpus) * 0.25, f"odsiane tylko {odsiane}/{len(korpus)}"
+
+
+def test_korpus_smieci_ida_w_wiekszosci_do_kosza():
+    """Reklamy, sprzedaż sprzętu, rekrutacja i wygaszenia mają odpadać.
+
+    Nie żądamy kompletu: "transport aut" w reklamie konkurencji trafia
+    w warstwę 2 i przechodzi, bo sygnał potrzeby BIJE sygnał odrzucenia.
+    To jest świadomy koszt tej kolejności — 0,002 zł za post, który AI
+    i tak odrzuci. Odwrotna kolejność kosztowałaby kursy.
+    """
+    odsiane = sum(1 for t in KORPUS_SMIECI if not przepuszcza(t))
+    assert odsiane >= len(KORPUS_SMIECI) * 0.8, f"odsiane tylko {odsiane}/{len(KORPUS_SMIECI)}"
+
+
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# WIELOJĘZYCZNOŚĆ — PL / DE / CS / SK
+#
+# Bramka jednojęzyczna nie wygląda na zepsutą: obcojęzyczne zlecenie dostaje
+# zero punktów i wylatuje tak samo cicho jak reklama felg. Jedynym miejscem,
+# w którym tę różnicę widać, jest test per język — stąd korpusy niżej.
+#
+# Wymóg minimalny: po dziesięć przypadków na język, w tym po jednym wygaszonym.
+# ===========================================================================
 PL_PRZEPUSZCZONE = [
-    "Szukam lawety z Krakowa do Wrocławia, auto nie odpala",
+    "Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala",
     "Potrzebna laweta pilnie, stoję na S19 pod Rzeszowem",
     "Zepsuł mi się samochód pod Jasłem, kto podjedzie?",
-    "Awaria na trasie, auto nie chce odpalić, potrzebuję pomocy drogowej",
-    "Kto pomoże? Wypadek na obwodnicy, auto do odholowania",
-    "Nie da się jechać, urwało półoś, transport auta do warsztatu",
-    "Kto ma wolną lawetę na jutro? Przewóz auta z komisu do domu",
-    "Stłuczka na rondzie, potrzebna laweta, auto nie ruszy",
-    "Zgasło mi auto na obwodnicy i nie zapala, ktoś pomoże?",
-    # Zgłoszenie ze słowem reklamowym w środku — MA przejść (punkt 2 z docstringu).
-    "Szukam lawety, auto nie odpala, oferuję dobrą zapłatę",
-    # Zwrot grzecznościowy NIE wygasza (punkt 3 z docstringu).
-    "Potrzebna laweta pod Sanokiem, auto nie odpala, z góry dziękuję za pomoc",
-    # Odmiana: wzorzec „odholowanie" ma trafić w „odholowania" (punkt 4).
-    "Auto po wypadku, potrzebuję odholowania do warsztatu",
+    "Szukam lawety, auto po szkodzie, trzeba zabrać z parkingu",
+    "Kto przywiezie auto z Niemiec? Kupiłem osobówkę pod Kolonią",
+    "Auto niejeżdżące, potrzebne odholowanie do warsztatu",
+    "Polecicie jakąś lawetę w okolicy? Skrzynia padła",
+    "Szukam miejsca na lawecie, doładunek z Belgii do Krosna",
+    "Nie odpala, akumulator zdechł, ktoś z okolic pomoże?",
+    # Regresja: post BEZ OGONKÓW ze słowem „kto" — identycznym ze słowackim.
+    # Detekcja pokazywała „sk", post szedł tylko przez słownik czesko-słowacki
+    # i wylatywał. Fałszywe odrzucenie, czyli błąd, którego bramka ma nie robić.
+    "kupilem auto w niemczech, kto przywiezie na lawecie",
 ]
 
 PL_ODRZUCONE = [
-    "Oferujemy holowanie 24h, atrakcyjne ceny, faktura VAT",
+    "Laweta 24/7, konkurencyjne ceny, zapraszam do kontaktu",
     "Sprzedam lawetę, stan idealny, więcej info na priv",
     "Zatrudnię kierowcę na lawetę, praca dla kierowcy od zaraz",
-    "Sprzedam felgi 17 cali do golfa, komplet z oponami",
-    "Świadczymy usługi transportu, zapraszamy do współpracy",
-    "Dzień dobry, czy ktoś zna dobrego mechanika w okolicy?",
 ]
 
 PL_WYGASZONE = [
-    "Nieaktualne, znalazłem już pomoc",
-    "Potrzebna laweta pod Sanokiem — TEMAT ZAMKNIĘTY, dziękuję wszystkim",
+    "Potrzebna laweta pod Sanokiem — TEMAT ZAMKNIĘTY",
+    "Nieaktualne, znalazłem już kogoś",
 ]
 
-
-# ---------------------------------------------------------------------------
-# NIEMIECKI — przypadek, dla którego cała ta wielojęzyczność powstała.
-# ---------------------------------------------------------------------------
 DE_PRZEPUSZCZONE = [
-    # Post z założeń: przy polskich wzorcach dostawał zero punktów i wylatywał.
+    # Post z założenia zadania: przy samych polskich wzorcach dostawał zero.
     "Suche Autotransport von München nach Krakau, Fahrzeug fährt nicht",
     "Brauche Abschleppdienst, mein Auto springt nicht an",
-    "Wer kann abschleppen? Motor kaputt, stehe auf der A4",
+    "Wer kann mein Auto abschleppen? Motor kaputt, stehe auf der A4",
     "Panne auf der Autobahn, bei Dresden liegengeblieben",
     "Unfall, Fahrzeug nicht fahrbereit, wer hat Platz?",
-    "Auto transportieren von Berlin nach Poznań, Überführung möglich?",
-    "Getriebe kaputt, das Auto startet nicht mehr, kann jemand helfen?",
-    "Mein Wagen bleibt stehen und springt nicht an, brauche einen Abschleppwagen",
-    "Totalschaden nach Unfall, Fahrzeug transportieren nach Polen",
-    # Bez ani jednego umlautu i bez słów funkcyjnych — detekcja NIE rozstrzygnie,
-    # więc post musi przejść ścieżką „sprawdź wszystkimi słownikami" (punkt 5).
-    "Suche Autotransport, Motor kaputt",
+    "Auto transportieren von Berlin nach Poznań, wer kann helfen?",
+    "Mein Wagen bleibt stehen und startet nicht mehr",
+    "Fahrzeug überführen nach Polen, Auto gekauft vom Händler",
+    "Totalschaden nach Unfall, brauche einen Transport nach Polen",
+    # Bez umlautów i bez słów funkcyjnych — detekcja NIE rozstrzygnie.
+    "Suche Abschleppdienst, Motor kaputt",
 ]
 
 DE_ODRZUCONE = [
     "Wir bieten Abschleppdienst, günstige Preise",
     "Verkaufe Anhänger, guter Zustand, Preis VB",
     "Suche Fahrer für Abschleppwagen, Stellenangebot ab sofort",
-    "Biete Winterreifen, günstige Preise",
-    "Guten Tag, kennt jemand eine gute Werkstatt in der Nähe?",
 ]
 
 DE_WYGASZONE = [
@@ -106,325 +609,180 @@ DE_WYGASZONE = [
     "Suche Abschleppdienst von Wien nach Brünn — nicht mehr aktuell",
 ]
 
-
-# ---------------------------------------------------------------------------
-# CZESKI
-# ---------------------------------------------------------------------------
 CS_PRZEPUSZCZONE = [
     "Hledám odtahovku, auto nenastartuje, jsem u Brna",
     "Potřebuji odtah auta z Prahy do Ostravy",
-    "Porucha na D1, nepojízdné auto, kdo pomůže?",
+    "Nepojízdné auto na D1, kdo pomůže?",
     "Nehoda u Plzně, potřebuji odtahovku co nejdřív",
     "Nejde nastartovat, zůstal jsem stát u Kolína",
-    "Převoz auta z autobazaru, sháním odtahovku",
-    "Auto nestartuje, mám poruchu na dálnici",
-    "Havárie u Liberce, auto je nepojízdné",
-    "Prosím o odtah, rozbité auto stojí na krajnici",
+    "Převoz auta z autobazaru do servisu",
+    "Auto nestartuje, mám poruchu na dálnici, je to nutné dnes",
+    "Havárie u Liberce, auto je nepojízdné, prosím o odtah",
     "Přeprava auta do servisu, kdo má volno zítra?",
+    "Koupil jsem auto z Německa, kdo přiveze?",
 ]
 
 CS_ODRZUCONE = [
     "Nabízíme odtahovou službu, výhodné ceny",
-    "Prodám auto, nepojízdné, cena dohodou",
     "Hledáme řidiče, nabídka práce v dopravě",
-    "Prodám zimní pneumatiky, málo jeté",
-    "Dobrý den, zná někdo dobrého mechanika?",
+    "Prodám odtahovku, dobrý stav",
 ]
 
 CS_WYGASZONE = [
     "Již vyřešeno, děkuji",
-    "Potřebuji odtah z Brna — neaktuální, našel jsem pomoc",
+    "Potřebuji odtah z Brna — neaktuální, našel jsem někoho",
 ]
 
-
-# ---------------------------------------------------------------------------
-# SŁOWACKI — ten sam słownik co czeski, inny znacznik języka.
-# ---------------------------------------------------------------------------
 SK_PRZEPUSZCZONE = [
     "Hľadám odťahovku, auto neštartuje, som pri Žiline",
     "Potrebujem odťah auta z Bratislavy do Košíc",
-    "Porucha na D1, nepojazdné auto, kto pomôže?",
+    "Nepojazdné auto na D1, kto pomôže?",
     "Nehoda pri Nitre, potrebujem odťahovku",
     "Nejde naštartovať, zostal som stáť pri Trenčíne",
-    "Prevoz auta z autobazáru, hľadám odťahovku",
-    "Auto neštartuje, mám poruchu na diaľnici",
-    "Havária pri Prešove, auto je nepojazdné",
-    "Prosím o odťah, auto stojí na krajnici",
+    "Prevoz auta z autobazáru do servisu",
+    "Auto neštartuje, mám poruchu na diaľnici, súrne",
+    "Havária pri Prešove, auto je nepojazdné, prosím o odťah",
     "Preprava auta do servisu, kto má voľno?",
+    "Kúpil som auto z Nemecka, kto privezie?",
 ]
 
 SK_ODRZUCONE = [
     "Ponúkame odťahovú službu, lacné ceny",
-    "Predám auto, nepojazdné, cena dohodou",
     "Prijmeme vodiča, ponuka práce v doprave",
-    "Predám zimné pneumatiky, málo jazdené",
-    "Dobrý deň, pozná niekto dobrého mechanika?",
+    "Predám odťahovku, dobrý stav",
 ]
 
 SK_WYGASZONE = [
     "Už vyriešené, ďakujem",
-    "Potrebujem odťah z Košíc — neaktuálne, našiel som pomoc",
+    "Potrebujem odťah z Košíc — neaktuálne, našiel som niekoho",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Testy właściwe. Pętla po listach zamiast osobnej funkcji na przypadek —
-# przypadek dopisuje się wtedy jedną linijką, a nie kopią funkcji, i widać
-# w jednym miejscu, ile ich jest na język.
-# ---------------------------------------------------------------------------
-def test_pl_przepuszczone():
-    for tresc in PL_PRZEPUSZCZONE:
-        wynik = _p(tresc)
-        assert wynik.przepuszczony, f"PL miało przejść: {tresc!r} -> {wynik.powod}"
-        assert not wynik.wygaszony, f"PL nie miało być wygaszone: {tresc!r}"
+KORPUSY = {
+    "pl": (PL_PRZEPUSZCZONE, PL_ODRZUCONE, PL_WYGASZONE),
+    "de": (DE_PRZEPUSZCZONE, DE_ODRZUCONE, DE_WYGASZONE),
+    "cs": (CS_PRZEPUSZCZONE, CS_ODRZUCONE, CS_WYGASZONE),
+    "sk": (SK_PRZEPUSZCZONE, SK_ODRZUCONE, SK_WYGASZONE),
+}
 
 
-def test_pl_odrzucone():
-    for tresc in PL_ODRZUCONE:
-        wynik = _p(tresc)
-        assert not wynik.przepuszczony, f"PL miało wylecieć: {tresc!r} -> {wynik.powod}"
+def test_jezyki_kazde_zlecenie_przechodzi():
+    """NAJWAŻNIEJSZY test w tym pliku — każdy z tych postów jest wart kurs."""
+    for jezyk, (przepuszczone, _, _) in KORPUSY.items():
+        for tresc in przepuszczone:
+            assert przepuszcza(tresc), f"[{jezyk}] miało przejść: {tresc!r}"
 
 
-def test_pl_wygaszone():
-    for tresc in PL_WYGASZONE:
-        wynik = _p(tresc)
-        assert wynik.wygaszony, f"PL miało być wygaszone: {tresc!r} -> {wynik.powod}"
-        assert not wynik.przepuszczony
+def test_jezyki_smieci_odpadaja():
+    for jezyk, (_, odrzucone, _) in KORPUSY.items():
+        for tresc in odrzucone:
+            assert not przepuszcza(tresc), f"[{jezyk}] miało odpaść: {tresc!r}"
 
 
-def test_de_przepuszczone():
-    for tresc in DE_PRZEPUSZCZONE:
-        wynik = _p(tresc)
-        assert wynik.przepuszczony, f"DE miało przejść: {tresc!r} -> {wynik.powod}"
-        assert not wynik.wygaszony
+def test_jezyki_wygaszone_odpadaja_z_powodem():
+    for jezyk, (_, _, wygaszone) in KORPUSY.items():
+        for tresc in wygaszone:
+            wynik = w(tresc)
+            assert not wynik.werdykt, f"[{jezyk}] miało być wygaszone: {tresc!r}"
+            assert wynik.powod == "wygaszone", f"[{jezyk}] zły powód: {tresc!r}"
 
 
-def test_de_odrzucone():
-    for tresc in DE_ODRZUCONE:
-        wynik = _p(tresc)
-        assert not wynik.przepuszczony, f"DE miało wylecieć: {tresc!r} -> {wynik.powod}"
+def test_minimum_dziesieciu_przypadkow_na_jezyk():
+    """Test o samych testach — wymóg najłatwiejszy do cichego złamania.
 
-
-def test_de_wygaszone():
-    for tresc in DE_WYGASZONE:
-        wynik = _p(tresc)
-        assert wynik.wygaszony, f"DE miało być wygaszone: {tresc!r} -> {wynik.powod}"
-        assert not wynik.przepuszczony
-
-
-def test_cs_przepuszczone():
-    for tresc in CS_PRZEPUSZCZONE:
-        wynik = _p(tresc)
-        assert wynik.przepuszczony, f"CS miało przejść: {tresc!r} -> {wynik.powod}"
-        assert not wynik.wygaszony
-
-
-def test_cs_odrzucone():
-    for tresc in CS_ODRZUCONE:
-        wynik = _p(tresc)
-        assert not wynik.przepuszczony, f"CS miało wylecieć: {tresc!r} -> {wynik.powod}"
-
-
-def test_cs_wygaszone():
-    for tresc in CS_WYGASZONE:
-        wynik = _p(tresc)
-        assert wynik.wygaszony, f"CS miało być wygaszone: {tresc!r} -> {wynik.powod}"
-        assert not wynik.przepuszczony
-
-
-def test_sk_przepuszczone():
-    for tresc in SK_PRZEPUSZCZONE:
-        wynik = _p(tresc)
-        assert wynik.przepuszczony, f"SK miało przejść: {tresc!r} -> {wynik.powod}"
-        assert not wynik.wygaszony
-
-
-def test_sk_odrzucone():
-    for tresc in SK_ODRZUCONE:
-        wynik = _p(tresc)
-        assert not wynik.przepuszczony, f"SK miało wylecieć: {tresc!r} -> {wynik.powod}"
-
-
-def test_sk_wygaszone():
-    for tresc in SK_WYGASZONE:
-        wynik = _p(tresc)
-        assert wynik.wygaszony, f"SK miało być wygaszone: {tresc!r} -> {wynik.powod}"
-        assert not wynik.przepuszczony
-
-
-def test_minimum_przypadkow_na_jezyk():
-    """Minimum dziesięć przypadków na język, w tym co najmniej jeden wygaszony.
-
-    Test o samych testach, bo to jest wymóg, który najłatwiej cicho złamać:
-    dopisując język i zapominając o przypadkach, dostajemy zieloną suitę
-    i bramkę, która ten język przepuszcza na oślep.
+    Dopisanie języka do SLOWNIKI bez dopisania korpusu daje zieloną suitę
+    i bramkę, która ten język przepuszcza albo kasuje na oślep.
     """
-    komplety = {
-        "pl": (PL_PRZEPUSZCZONE, PL_ODRZUCONE, PL_WYGASZONE),
-        "de": (DE_PRZEPUSZCZONE, DE_ODRZUCONE, DE_WYGASZONE),
-        "cs": (CS_PRZEPUSZCZONE, CS_ODRZUCONE, CS_WYGASZONE),
-        "sk": (SK_PRZEPUSZCZONE, SK_ODRZUCONE, SK_WYGASZONE),
-    }
-    assert set(komplety) == set(gate.SLOWNIKI), (
-        "Doszedł język do SLOWNIKI, ale nie doszły przypadki testowe.")
-    for jezyk, listy in komplety.items():
+    assert set(KORPUSY) == set(g.SLOWNIKI), (
+        "doszedł język do SLOWNIKI, ale nie doszedł korpus testowy")
+    for jezyk, listy in KORPUSY.items():
         assert sum(len(x) for x in listy) >= 10, f"za mało przypadków dla {jezyk}"
         assert listy[2], f"brak przypadku wygaszonego dla {jezyk}"
 
 
-# ---------------------------------------------------------------------------
-# Detekcja języka
-# ---------------------------------------------------------------------------
-def test_wykryj_jezyk_po_znakach_i_slowach():
-    assert gate.wykryj_jezyk("Szukam lawety, auto się nie odpala") == "pl"
-    assert gate.wykryj_jezyk("Ich brauche einen Abschleppwagen, das Auto "
-                             "springt nicht an") == "de"
-    assert gate.wykryj_jezyk("Auto nenastartuje, zůstal jsem stát") == "cs"
-    assert gate.wykryj_jezyk("Auto neštartuje, zostal som stáť, veľmi súrne") == "sk"
+def test_detekcja_jezyka_po_znakach_i_slowach():
+    assert g.wykryj_jezyk("Szukam lawety, auto się nie odpala") == "pl"
+    assert g.wykryj_jezyk("Ich brauche einen Abschleppwagen, das Auto "
+                          "springt nicht an") == "de"
+    assert g.wykryj_jezyk("Auto nenastartuje, zůstal jsem stát") == "cs"
+    assert g.wykryj_jezyk("Auto neštartuje, zostal som stáť, veľmi súrne") == "sk"
 
 
-def test_wykryj_jezyk_oddaje_pustkę_gdy_nie_wiadomo():
-    """Krótki post bez znaków charakterystycznych: "" zamiast zgadywania.
-
-    To nie jest porażka detekcji, tylko jej poprawne zachowanie — a od niego
-    zależy, czy post pójdzie przez wszystkie słowniki, czy przez jeden losowy.
-    """
-    assert gate.wykryj_jezyk("") == ""
-    assert gate.wykryj_jezyk("Auto 2015 diesel") == ""
-    assert gate.wykryj_jezyk("Suche Autotransport, Motor kaputt") == ""
+def test_detekcja_oddaje_pustke_gdy_nie_wiadomo():
+    """"" nie jest porażką detekcji, tylko jej poprawnym zachowaniem."""
+    assert g.wykryj_jezyk("") == ""
+    assert g.wykryj_jezyk("Auto 2015 diesel") == ""
+    assert g.wykryj_jezyk("Suche Abschleppdienst, Motor kaputt") == ""
 
 
-def test_czeski_i_slowacki_maja_wspolny_slownik_ale_osobny_znacznik():
+def test_czeski_i_slowacki_dziela_slownik_ale_nie_znacznik():
     """Jeden słownik, dwa znaczniki — od znacznika zależy język oddzwonienia."""
-    assert gate.SLOWNIKI["cs"] is gate.SLOWNIKI["sk"]
-    assert _p("Hledám odtahovku, auto nenastartuje, jsem u Brna").jezyk == "cs"
-    assert _p("Hľadám odťahovku, auto neštartuje, som pri Žiline").jezyk == "sk"
+    assert g.SLOWNIKI["cs"] is g.SLOWNIKI["sk"]
+    assert w("Hledám odtahovku, auto nenastartuje, jsem u Brna").jezyk == "cs"
+    assert w("Hľadám odťahovku, auto neštartuje, som pri Žiline").jezyk == "sk"
 
 
-def test_niepewna_detekcja_liczy_wszystkimi_slownikami():
-    """Post bez przesłanek językowych ma być policzony każdym słownikiem.
-
-    Bez tego niemieckie zgłoszenie napisane bez umlautów trafiałoby na słownik
-    polski, dostawało zero punktów i wylatywało — czyli dokładnie ten błąd,
-    dla którego powstała wielojęzyczność.
-    """
-    tresc = "Suche Autotransport, Motor kaputt"
-    assert gate.wykryj_jezyk(tresc) == "", "warunek testu: detekcja ma być niepewna"
-    wynik = _p(tresc)
-    assert wynik.przepuszczony
-    assert wynik.jezyk == "de", "znacznik ma pochodzić ze słownika, który wygrał"
+def test_znacznik_jezyka_wraca_z_bramki():
+    """Powiadomienie bierze znacznik stąd — bez niego operator nie wie, w jakim
+    języku oddzwonić, bo reszta alertu jest już po polsku."""
+    assert w("Potrzebuję lawety, golf nie odpala").jezyk == "pl"
+    assert w("Suche Autotransport von München nach Krakau").jezyk == "de"
 
 
 def test_wygaszenie_dziala_ponad_jezykami():
     """Wygaszenie widziane przez JAKIKOLWIEK słownik wygasza post.
 
-    Samo „weź najwyższy wynik" tu nie wystarcza: słownik polski nie zna zwrotu
-    „erledigt", więc daje 0 punktów — a zero jest wyższe niż minus sto. Post
-    załatwiony przestaje być zleceniem niezależnie od języka.
+    Samo „weź najlepszy wynik" tu nie wystarcza: słownik, który nie zna zwrotu
+    „hat sich erledigt", po prostu milczy — a milczenie wygląda lepiej niż
+    odrzucenie. Post załatwiony przestaje być zleceniem niezależnie od języka.
     """
-    tresc = "Abschleppdienst erledigt"
-    assert gate.wykryj_jezyk(tresc) == "", "warunek testu: detekcja ma być niepewna"
-    wynik = _p(tresc)
-    assert wynik.wygaszony
-    assert not wynik.przepuszczony
+    wynik = w("Suche Abschleppdienst — hat sich erledigt")
+    assert not wynik.werdykt
+    assert wynik.powod == "wygaszone"
 
 
-def test_wymuszony_jezyk_omija_detekcje():
-    """`jezyk=` wymusza słownik — dla grup, o których wiadomo z góry, czym są."""
-    tresc = "Suche Autotransport, Motor kaputt"
-    assert gate.gate(tresc, jezyk="de").przepuszczony
-    assert not gate.gate(tresc, jezyk="pl").przepuszczony
+def test_wymuszony_jezyk_zawezanie_do_jednego_slownika():
+    """`jezyk=` jest dla grup, o których wiadomo z góry, czym są."""
+    tresc = "Suche Abschleppdienst, Motor kaputt"
+    assert g.gate(tresc, tryb=g.TRYB_AKTYWNY, jezyk="de").werdykt
+    assert not g.gate(tresc, tryb=g.TRYB_AKTYWNY, jezyk="pl").werdykt
 
 
-# ---------------------------------------------------------------------------
-# Punktacja i warstwy
-# ---------------------------------------------------------------------------
-def test_wagi_warstw():
-    """Arytmetyka warstw, bez detekcji i bez wyboru słownika."""
-    punkty, trafienia, wygaszony = gate.punktacja("szukam lawety", gate.SLOWNIKI["pl"])
-    assert punkty == gate.WAGA_PRZEPUSZCZENIE
-    # W trafieniach jest RDZEŃ wzorca, nie forma z posta — po nim szuka się
-    # wpisu w słowniku, gdy trzeba zrozumieć, czemu post przeszedł.
-    assert trafienia == ("szukam lawet",)
-    assert not wygaszony
-
-    punkty, _, _ = gate.punktacja("sprzedam felgi", gate.SLOWNIKI["pl"])
-    assert punkty == gate.WAGA_ODRZUCENIE
-
-    punkty, _, wygaszony = gate.punktacja("nieaktualne", gate.SLOWNIKI["pl"])
-    assert punkty == gate.WAGA_WYGASZENIE
-    assert wygaszony
+def test_bledna_detekcja_nie_kasuje_zlecenia():
+    """Nawet gdy detekcja wskaże ZŁY język, post nadal idzie przez wszystkie
+    słowniki — pomyłka detekcji nie może być cichym fałszywym odrzuceniem."""
+    tresc = "kupilem auto w niemczech, kto przywiezie na lawecie"
+    assert przepuszcza(tresc)
 
 
-def test_ten_sam_wzorzec_liczy_sie_raz():
-    """Powtórzenie nie podbija wyniku — inaczej wygrywałby spam, nie zgłoszenie."""
-    jeden, _, _ = gate.punktacja("szukam lawety", gate.SLOWNIKI["pl"])
-    trzy, _, _ = gate.punktacja("szukam lawety szukam lawety szukam lawety",
-                                gate.SLOWNIKI["pl"])
-    assert jeden == trzy == gate.WAGA_PRZEPUSZCZENIE
+def test_wszystkie_wzorce_obcojezyczne_sa_poprawnymi_regexami():
+    """Literówka w niemieckim czy czeskim słowniku ma paść tutaj, a nie przy
+    pierwszym poście o trzeciej w nocy."""
+    tabele = (g.WYGASZENIE_DE + g.PRZEPUSZCZENIE_DE + g.ODRZUCENIE_DE
+              + g.PUNKTACJA_DE + g.HAMULCE_DE
+              + g.WYGASZENIE_CS_SK + g.PRZEPUSZCZENIE_CS_SK
+              + g.ODRZUCENIE_CS_SK + g.PUNKTACJA_CS_SK + g.HAMULCE_CS_SK)
+    for wzorzec, _, _ in tabele:
+        assert g._skompiluj(wzorzec), wzorzec
 
 
-def test_prog_jest_rowny_jednemu_trafieniu():
-    """JEDNO trafienie w warstwie zgłoszeń wystarczy, żeby zapytać model."""
-    assert gate.PROG == gate.WAGA_PRZEPUSZCZENIE
-    assert _p("Awaria pod Duklą").przepuszczony
-
-
-def test_brak_diakrytykow_nie_gubi_postu():
-    """Ludzie piszą z telefonu, przy zepsutym aucie. Ogonki wtedy znikają."""
-    assert _p("Szukam lawety, auto nie odpala").przepuszczony
-    assert _p("Szukam lawety, auto nie odpala".replace("ł", "l")).przepuszczony
-    assert _p("Potrzebuje lawety pilnie").przepuszczony
-    assert _p("Hladam odtahovku, auto nestartuje").przepuszczony
-
-
-def test_odmiana_nie_gubi_wzorca():
-    """Wzorzec ma trafiać w formy odmienione — mianownik to nie jest to, czym
-    ludzie piszą w trzech z czterech obsługiwanych języków."""
-    assert "odholowa" in _p("auto do odholowania").trafienia
-    assert "awari" in _p("mam awarię na S19, kto podjedzie").trafienia
-    assert "poruch" in _p("mám poruchu na dálnici").trafienia
-    assert "odtah aut" in _p("kolik stojí odtah auta do servisu?").trafienia
-    # Rdzeń „wypadek" nie łapie „wypadku" — dlatego w słowniku stoją obie formy.
-    assert "wypadk" in _p("auto po wypadku, potrzebuję odholowania").trafienia
-
-
-def test_pusta_tresc_nie_wybucha():
-    """Worker karmi bramkę tym, co przyszło z Apify — także pustką."""
-    for tresc in ("", "   ", "\n"):
-        wynik = gate.gate(tresc)
-        assert not wynik.przepuszczony
-        assert wynik.jezyk == ""
-        assert wynik.punkty == 0
-
-
-def test_bramka_jest_szybka():
-    """Sufit czasowy — luźny celowo, bo mierzy JEDNĄ rzecz: czy ktoś nie wstawił
-    na ścieżkę bramki wywołania sieciowego albo biblioteki do detekcji języka.
-
-    Realny czas to jednostki mikrosekund na post; próg ustawiony sto razy wyżej,
-    żeby test nie migotał na obciążonym CI, ale nadal wywalał się natychmiast
-    przy pierwszym `import langdetect` czy `requests.post`.
-    """
-    prubki = PL_PRZEPUSZCZONE + DE_PRZEPUSZCZONE + CS_PRZEPUSZCZONE + SK_PRZEPUSZCZONE
-    start = time.perf_counter()
-    for _ in range(50):
-        for tresc in prubki:
-            gate.gate(tresc)
-    trwanie = time.perf_counter() - start
-    ile = 50 * len(prubki)
-    assert trwanie / ile < 0.001, (
-        f"bramka zwolniła do {trwanie / ile * 1000:.3f} ms/post — sprawdź, czy nie "
-        f"doszło wywołanie sieciowe albo biblioteka detekcji języka")
+def test_wzorce_obcojezyczne_sa_znormalizowane():
+    """Wzorzec z umlautem albo haczkiem NIGDY nie trafi — normalizacja go zbija,
+    a wzorzec i tekst muszą być w tej samej formie."""
+    tabele = (g.WYGASZENIE_DE + g.PRZEPUSZCZENIE_DE + g.ODRZUCENIE_DE
+              + g.PUNKTACJA_DE + g.HAMULCE_DE
+              + g.WYGASZENIE_CS_SK + g.PRZEPUSZCZENIE_CS_SK
+              + g.ODRZUCENIE_CS_SK + g.PUNKTACJA_CS_SK + g.HAMULCE_CS_SK)
+    for wzorzec, _, _ in tabele:
+        assert wzorzec == g.normalizuj(wzorzec), (
+            f"wzorzec nie jest w formie znormalizowanej: {wzorzec!r}")
 
 
 def test_instrukcja_dla_klasyfikatora_niesie_kontrakt():
-    """Klasyfikator ma dostać ten tekst przez import, nie przez przepisanie.
+    """Klasyfikator dostaje ten tekst przez import, nie przez przepisanie.
 
-    Test pilnuje trzech rzeczy, które w tym tekście MUSZĄ zostać: lista języków,
-    „po polsku" i wyjątek na nazwy miejscowości. Bez ostatniego geokodowanie
-    dostanie „Monachium" i zlecenie wyląduje na mapie w złym miejscu.
+    Bez wyjątku na nazwy miejscowości geokodowanie dostanie „Monachium"
+    i zlecenie wyląduje na mapie w złym miejscu.
     """
-    tekst = gate.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA.lower()
+    tekst = g.INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA.lower()
     for fragment in ("niemieck", "czesk", "słowack", "po polsku", "oryginal"):
-        assert fragment in tekst, f"z instrukcji dla klasyfikatora zniknęło: {fragment}"
+        assert fragment in tekst, f"z instrukcji zniknęło: {fragment}"

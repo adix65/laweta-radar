@@ -26,11 +26,24 @@ dzielą jeden, z wariantami obu języków w środku. Detekcja mimo to **rozróż
 dwa języki, bo znacznik nie służy filtrowaniu, tylko człowiekowi.
 
 Detekcja jest heurystyką na znakach diakrytycznych i słowach funkcyjnych: żadnej
-biblioteki, żadnej sieci. Gdy nie rozstrzyga (krótki post bez znaków
-charakterystycznych — sytuacja zupełnie normalna), post liczony jest **wszystkimi**
-słownikami i wygrywa najwyższy wynik. Wyjątek: **wygaszenie widziane przez
-którykolwiek słownik wygasza post**, bo „już załatwione" przestaje być zleceniem
-niezależnie od tego, w jakim języku to napisano.
+biblioteki, żadnej sieci.
+
+**Post jest liczony WSZYSTKIMI słownikami**, nie tylko tym z detekcji — detekcja
+służy do wyboru znacznika i do rozstrzygania remisów. Powód jest ten sam co
+w całym module: pomyłka detekcji byłaby cichym fałszywym odrzuceniem. Kosztował
+to konkretny błąd: polski post „kupiłem auto w Niemczech, **kto** przywiezie",
+napisany bez ogonków, dostawał znacznik `sk` (bo „kto" jest też słowackie), szedł
+wyłącznie przez słownik czesko-słowacki i wylatywał.
+
+Dwie zasady rozstrzygania między słownikami:
+
+- **jedno przepuszczenie wystarczy** — jeśli choć jeden słownik widzi zlecenie,
+  post idzie do modelu;
+- **wygaszenie widziane przez którykolwiek słownik wygasza post**, bo „już
+  załatwione" przestaje być zleceniem niezależnie od tego, w jakim języku to
+  napisano. Samo „weź najlepszy wynik" tu nie wystarcza: słownik, który nie zna
+  zwrotu „hat sich erledigt", po prostu milczy — a milczenie wygląda lepiej niż
+  odrzucenie.
 
 Szczegóły warstw, wag i doboru wzorców: docstring `workers/gate.py`.
 
@@ -73,7 +86,7 @@ języka drugi raz.
 
 ## Powiadomienie
 
-Alert niesie **dwuliterowy znacznik** (kolumna `zlecenia.jezyk`). Bez niego operator
+Alert niesie **dwuliterowy znacznik** (kolumna `posty.gate_jezyk`). Bez niego operator
 nie wie, w jakim języku oddzwonić — a wszystkie pozostałe pola alertu są już po
 polsku, więc sam post tego nie zdradzi. To jedna z niewielu informacji w alercie,
 która zmienia to, co człowiek **zrobi**, a nie tylko to, co przeczyta.

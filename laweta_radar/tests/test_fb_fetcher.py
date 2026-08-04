@@ -52,14 +52,34 @@ def test_sciezka_z_pomiaru(tmp_path):
     Przepisanie jest krokiem, który da się pominąć — i wtedy fetcher pracuje na
     czyjejś intuicji zamiast na pomiarze, nie mówiąc o tym ani słowem.
     """
+    # Forma, którą generuje scripts/pomiar_actora.py: kropka W ŚRODKU
+    # pogrubienia. To ona odróżnia werdykt od prozy — patrz test niżej.
     raport = tmp_path / "POMIAR-ACTORA.md"
-    raport.write_text("### ROZSTRZYGNIĘCIE: **ŚCIEŻKA A**\n", encoding="utf-8")
+    raport.write_text("Wniosek z pomiaru:\n\n**ŚCIEŻKA A.**\n", encoding="utf-8")
     sciezka, skad = f.wykryj_sciezke(raport, nadpisanie="")
     assert sciezka == "A"
     assert "pomiar" in skad
 
-    raport.write_text("### ROZSTRZYGNIĘCIE: **ŚCIEŻKA B**\n", encoding="utf-8")
+    raport.write_text("Wniosek z pomiaru:\n\n**ŚCIEŻKA B.**\n", encoding="utf-8")
     assert f.wykryj_sciezke(raport, nadpisanie="")[0] == "B"
+
+
+def test_proza_zaslepki_NIE_jest_werdyktem(tmp_path):
+    """Zaślepka raportu OPISUJE obie ścieżki („**ŚCIEŻKA A** — okno działa").
+
+    Regeks czytający samą nazwę trafiłby w to wyjaśnienie i uznał je za wynik
+    pomiaru — akurat ten hojniejszy, czyli najdroższy z możliwych błędów: pełny
+    resultsLimit z każdej grupy w każdym przebiegu, bez objawu poza rachunkiem.
+    """
+    raport = tmp_path / "POMIAR-ACTORA.md"
+    raport.write_text(
+        "> ## POMIAR NIE ZOSTAŁ JESZCZE WYKONANY\n\n"
+        "- **ŚCIEŻKA A** — okno działa: liczba itemów maleje wraz ze zwężaniem\n"
+        "- **ŚCIEŻKA B** — jednostka jest ignorowana\n",
+        encoding="utf-8")
+    sciezka, skad = f.wykryj_sciezke(raport, nadpisanie="")
+    assert sciezka == "B", "proza zaślepki została odczytana jako werdykt pomiaru"
+    assert "zaślepka" in skad
 
 
 def test_bez_pomiaru_schodzimy_na_sciezke_b(tmp_path):
@@ -74,17 +94,17 @@ def test_bez_pomiaru_schodzimy_na_sciezke_b(tmp_path):
     assert sciezka == "B"
     assert "brak raportu" in skad
 
-    # Zaślepka bez rozstrzygnięcia — tak wygląda repo przed wykonaniem pomiaru.
-    zaslepka = tmp_path / "POMIAR-ACTORA.md"
-    zaslepka.write_text("# Pomiar\n\n> POMIAR NIE ZOSTAŁ WYKONANY\n", encoding="utf-8")
-    sciezka, skad = f.wykryj_sciezke(zaslepka, nadpisanie="")
+    # Raport bez werdyktu i bez ramki — też ostrożnie.
+    pusty = tmp_path / "POMIAR-ACTORA.md"
+    pusty.write_text("# Pomiar\n\nNic tu nie ma.\n", encoding="utf-8")
+    sciezka, skad = f.wykryj_sciezke(pusty, nadpisanie="")
     assert sciezka == "B"
     assert "nie zawiera rozstrzygnięcia" in skad
 
 
 def test_nadpisanie_ze_srodowiska_wygrywa(tmp_path):
     raport = tmp_path / "POMIAR-ACTORA.md"
-    raport.write_text("### ROZSTRZYGNIĘCIE: **ŚCIEŻKA B**\n", encoding="utf-8")
+    raport.write_text("**ŚCIEŻKA B.**\n", encoding="utf-8")
     sciezka, skad = f.wykryj_sciezke(raport, nadpisanie="a")
     assert sciezka == "A"
     assert "SCIEZKA_ACTORA" in skad
@@ -340,15 +360,40 @@ def _klasyfikator_ktory_wybucha(*args, **kwargs):
 PROG = TERAZ - timedelta(hours=6)
 
 
-def test_odrzucony_przez_bramke_nie_kosztuje_ani_jednego_tokena():
+SMIEC = "Zatrudnię kierowcę kat. C, praca dla kierowcy od zaraz"
+
+
+def test_w_trybie_AKTYWNYM_odrzucony_post_nie_kosztuje_ani_jednego_tokena(monkeypatch):
     """To jest cała oszczędność tego systemu — nie skrót, tylko powód, dla
     którego stać nas na klasyfikator."""
-    decyzja = f.decyzja_o_poscie(_post("Sprzedam felgi 17 cali, komplet"), PROG,
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "aktywny")
+    decyzja = f.decyzja_o_poscie(_post(SMIEC), PROG,
                                  klasyfikuj=_klasyfikator_ktory_wybucha)
     assert decyzja.zrodlo == "gate"
     assert decyzja.czy_zlecenie is False
     assert decyzja.status == "smiec"
     assert decyzja.pytano_model is False
+
+
+def test_w_trybie_CIENIA_ten_sam_post_IDZIE_do_modelu(monkeypatch):
+    """Cień NIC nie blokuje — i to jest cena, którą płacimy za wiedzę o tym,
+    ile bramka by skasowała. Opinia bramki i tak trafia do bazy.
+
+    Gdyby ten test przestał przechodzić, znaczyłoby to, że tryb cienia zaczął
+    blokować — czyli że system po cichu zaczął gubić zlecenia w okresie,
+    w którym miał wyłącznie mierzyć.
+    """
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "cien")
+    wolano = []
+    decyzja = f.decyzja_o_poscie(
+        _post(SMIEC), PROG,
+        klasyfikuj=lambda *a: wolano.append(a) or {"czy_zlecenie": False})
+    assert wolano, "w cieniu model MA być pytany także o śmieci"
+    assert decyzja.pytano_model is True
+    assert decyzja.zrodlo == "ai"
+    # ...ale OPINIA bramki jest zapisana i to z niej liczy się raport.
+    assert decyzja.gate_werdykt is False
+    assert decyzja.gate_tryb == "cien"
 
 
 def test_post_za_stary_nie_idzie_do_modelu_ale_laduje_w_bazie():

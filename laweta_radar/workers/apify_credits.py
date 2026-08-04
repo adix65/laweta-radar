@@ -1,197 +1,212 @@
-"""Ile kredytu zużyło JEDNO konto Apify — minimalny odczyt, przez proxy tego konta.
+"""
+Saldo konta Apify — ile z miesięcznego kredytu już poszło i ile zostało.
 
-DLACZEGO TO ISTNIEJE (i dlaczego jest takie małe): `docs/APIFY-PROXY.md` zapisało
-świadomą decyzję, że monitora kredytów z repo źródłowego NIE przenosimy — worker
-odpytujący saldo WSZYSTKICH kont naraz to dokładnie ten sygnał (dziesiątki kont,
-jeden moment, jeden adres), przed którym broni cały `apify_proxy.py`. Ten moduł
-nie jest tamtym monitorem: czyta saldo POJEDYNCZEGO tokenu, na żądanie wołającego,
-i wychodzi przez proxy przypisane właśnie temu tokenowi.
+PO CO TO ISTNIEJE: rotacja kluczy (laweta_radar/workers/apify_keys.py) jest świadomie
+REAKTYWNA — nie sprawdza salda z góry, tylko próbuje i przeskakuje na błędzie
+wyczerpania. To dobra strategia dla runów produkcyjnych i zła dla POMIARU: żeby
+policzyć, ile realnie kosztuje jeden pobrany post, trzeba odczytać stan licznika
+PRZED i PO. Ten moduł robi dokładnie to i nic więcej — nie steruje rotacją i nie
+podejmuje decyzji „jechać czy nie".
 
-DO CZEGO SŁUŻY: policzenie, ile realnie kosztuje jeden pobrany post. Cena ze strony
-actora jest ceną katalogową — do decyzji „ile kont Apify potrzebujemy" wchodzi
-liczba ZMIERZONA, bo różnica między 0,002 a 0,005 USD za post to różnica między
-trzydziestoma kontami a dziewięciuset. Pierwszym konsumentem jest
-`scripts/pomiar_actora.py`.
+ODCZYT IDZIE PRZEZ PROXY TEGO KLUCZA (client_for_token), nie wprost z VPS-a. To nie
+jest kosmetyka: sprawdzenie salda to zapytanie do api.apify.com jak każde inne, a
+narzędzie odpytujące po kolei WSZYSTKIE konta z jednego adresu jest dla Apify
+najczystszym możliwym sygnałem multi-accountingu — dokładnie tym, przed którym broni
+laweta_radar/workers/apify_proxy.py. Odczyt salda ma być tańszy niż run actora, a nie
+groźniejszy od niego.
 
-DWA ŹRÓDŁA KOSZTU I PO CO OBA:
-  - `zuzycie(token)` — stan licznika konta (`GET /v2/users/me/limits`). Widzi
-    WSZYSTKO, co konto wydało, także rzeczy, których nie widać w pojedynczym runie.
-    Bywa jednak agregowany z opóźnieniem, więc różnica policzona tuż po runie
-    potrafi być zaniżona.
-  - `koszt_runu(run)` — `usageTotalUsd` z obiektu runu (patrz `apify_run.py`).
-    Natychmiastowy i przypisany DOKŁADNIE do tego runu, ale pokazuje tylko to,
-    co Apify zaksięgował na tym runie.
-Zgodne wyniki znaczą, że pomiar jest wiarygodny. Rozjazd jest informacją, a nie
-błędem — i dlatego pomiar raportuje obie liczby zamiast wybierać „tę ładniejszą".
+ŹRÓDŁO: GET /v2/users/me/limits — pokazuje zużycie w BIEŻĄCYM cyklu miesięcznym
+(`current.monthlyUsageUsd`) i limit konta (`limits.maxMonthlyUsageUsd`). Konta darmowe
+mają limit ~5 USD/mies. Interesuje nas RÓŻNICA dwóch odczytów, więc jednostka i tak
+się skraca — limit służy tylko do powiedzenia, ile jeszcze zostało.
 
-BRAK TOKENU / BŁĄD ODCZYTU NIE JEST AWARIĄ. Funkcje oddają `None` albo rzucają
-wyjątek HTTP do klasyfikacji przez `apify_keys.classify_apify_error` — decyzję,
-czy to zatrzymuje robotę, podejmuje wołający (zasada 3 z README).
+DLACZEGO SZUKAMY KLUCZY REKURENCYJNIE, a nie po sztywnej ścieżce data.current.*:
+kształt tej odpowiedzi to nie jest część kontraktu, na którym warto opierać liczbę
+wchodzącą do decyzji „ile kont / czy płatny plan". Gdy Apify przestawi pole o poziom,
+sztywna ścieżka po cichu zwróciłaby None i pomiar pokazałby koszt 0 USD za post —
+błąd, który wygląda jak świetna wiadomość. Szukanie po NAZWIE klucza przeżywa
+przestawienie zagnieżdżenia, a gdy nazwa naprawdę zniknie, mówimy o tym wprost.
 
-CLI (odpytuje sieć — jedno zapytanie na wskazany klucz):
-    python -m laweta_radar.workers.apify_credits            # klucz #1
-    python -m laweta_radar.workers.apify_credits --klucz 3  # klucz #3
-    python -m laweta_radar.workers.apify_credits --raw      # surowy JSON z API
+UŻYCIE:
+    from laweta_radar.workers.apify_credits import saldo
+    s = saldo(token)                      # przez proxy przypisane temu kluczowi
+    print(s.uzyte_usd, s.zostalo_usd)
+
+    s2 = saldo(token)
+    print(f"ten run kosztował {s2.uzyte_usd - s.uzyte_usd:.4f} USD")
+
+Podgląd salda całej puli (WYMAGA SIECI — po jednym zapytaniu na konto):
+    python -m laweta_radar.workers.apify_credits
+    python -m laweta_radar.workers.apify_credits --limit 5
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 
-from laweta_radar.workers.apify_keys import load_apify_tokens
-from laweta_radar.workers.apify_proxy import client_for_token, proxy_label, proxy_for_token
+from laweta_radar.workers.apify_proxy import client_for_token
 
-API = "https://api.apify.com/v2"
+_ENDPOINT = "https://api.apify.com/v2/users/me/limits"
+_TIMEOUT_S = 30.0
 
-# Odczyt salda to jedno małe zapytanie — długi timeout tylko przedłużałby czekanie
-# na padnięte proxy. Sam run actora ma własny, znacznie dłuższy (apify_run.py).
-TIMEOUT_S = 30.0
+# Nazwy pól w odpowiedzi, w kolejności preferencji. Pierwsza znaleziona wygrywa.
+_POLA_UZYCIA = ("monthlyUsageUsd", "monthlyUsageUsdWithoutDiscounts", "currentUsageUsd")
+_POLA_LIMITU = ("maxMonthlyUsageUsd", "monthlyUsageCreditsUsd")
+
+
+class SaldoNieznane(RuntimeError):
+    """Odpowiedź Apify przyszła, ale nie ma w niej licznika zużycia.
+
+    Osobny wyjątek, bo to INNA sytuacja niż martwy klucz: konto żyje, tylko API
+    zmieniło kształt. Rotacja kluczy nie ma tu czego naprawiać — przeskok na
+    następny klucz da to samo, a pomiar musi się zatrzymać i powiedzieć operatorowi
+    prawdę, zamiast policzyć koszt z brakujących danych.
+    """
 
 
 @dataclass(frozen=True)
-class Zuzycie:
-    """Stan licznika konta Apify w bieżącym cyklu rozliczeniowym.
+class Saldo:
+    """Stan licznika jednego konta Apify w bieżącym cyklu miesięcznym."""
 
-    `zuzyte_usd` to liczba, o którą chodzi: różnica dwóch odczytów wokół serii
-    runów jest kosztem tej serii. `limit_usd` mówi, ile w tym cyklu jeszcze
-    zostało (na darmowym koncie zwykle 5 USD) — bez tego „zużyto 4,90" wygląda
-    tak samo groźnie na koncie darmowym i na płatnym.
-    """
-
-    zuzyte_usd: float
-    limit_usd: float | None
-    cykl_od: str
-    cykl_do: str
+    uzyte_usd: float                 # ile z kredytu poszło od początku cyklu
+    limit_usd: float | None          # limit konta; None, gdy API go nie podało
+    cykl_od: str = ""                # ISO 8601 — początek cyklu rozliczeniowego
+    cykl_do: str = ""                # ISO 8601 — koniec cyklu (wtedy licznik siada)
 
     @property
     def zostalo_usd(self) -> float | None:
-        if self.limit_usd is None:
-            return None
-        return max(0.0, self.limit_usd - self.zuzyte_usd)
+        """Ile kredytu jeszcze zostało; None, gdy limit nieznany."""
+        return None if self.limit_usd is None else self.limit_usd - self.uzyte_usd
 
     def opis(self) -> str:
-        """Jedna linia do logu — bez tokenu i bez czegokolwiek, co jest sekretem."""
+        """Jedna linia do logu — bez tokenu, bo ten dokłada wołający."""
         if self.limit_usd is None:
-            return f"zużyto {self.zuzyte_usd:.4f} USD (limit nieznany)"
-        return (f"zużyto {self.zuzyte_usd:.4f} / {self.limit_usd:.2f} USD "
+            return f"użyte {self.uzyte_usd:.4f} USD (limit nieznany)"
+        return (f"użyte {self.uzyte_usd:.4f} / {self.limit_usd:.2f} USD "
                 f"(zostało {self.zostalo_usd:.4f})")
 
 
-def _float_or_none(value) -> float | None:
-    """Liczba z odpowiedzi API albo None. API bywa zmienne — nie rzucamy na kształcie.
+def _znajdz_liczbe(obiekt, nazwy: tuple[str, ...]) -> float | None:
+    """Pierwsza liczba spod którejkolwiek z `nazw`, na dowolnej głębokości JSON-a.
 
-    Odczyt salda jest pomocniczy: gdy Apify zmieni nazwę pola, pomiar ma zgłosić
-    „nie umiem odczytać salda" i policzyć koszt z runów, a nie wywalić się w połowie
-    serii, za którą już zapłaciliśmy.
+    Przechodzimy wszerz (kolejka), a nie wgłąb, bo pola, których szukamy, siedzą
+    płytko (data.current.*, data.limits.*) — a przy przejściu wgłąb pierwszy trafiony
+    klucz o tej nazwie mógłby pochodzić z jakiejś zagnieżdżonej rozpiski szczegółowej.
     """
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    kolejka = [obiekt]
+    while kolejka:
+        wezel = kolejka.pop(0)
+        if isinstance(wezel, dict):
+            for nazwa in nazwy:
+                wartosc = wezel.get(nazwa)
+                if isinstance(wartosc, (int, float)) and not isinstance(wartosc, bool):
+                    return float(wartosc)
+            kolejka.extend(wezel.values())
+        elif isinstance(wezel, list):
+            kolejka.extend(wezel)
+    return None
 
 
-def z_odpowiedzi(dane: dict) -> Zuzycie | None:
-    """Wyciągnij `Zuzycie` z ciała odpowiedzi `/users/me/limits`. None = nieznany kształt.
+def _znajdz_tekst(obiekt, nazwa: str) -> str:
+    """Pierwszy napis spod klucza `nazwa` (te same zasady co `_znajdz_liczbe`)."""
+    kolejka = [obiekt]
+    while kolejka:
+        wezel = kolejka.pop(0)
+        if isinstance(wezel, dict):
+            wartosc = wezel.get(nazwa)
+            if isinstance(wartosc, str) and wartosc.strip():
+                return wartosc
+            kolejka.extend(wezel.values())
+        elif isinstance(wezel, list):
+            kolejka.extend(wezel)
+    return ""
 
-    Wydzielone z `zuzycie()`, żeby dało się to przetestować bez sieci — a kształt
-    odpowiedzi Apify jest dokładnie tym, co najłatwiej zmieni się pod nami.
+
+def z_odpowiedzi(dane) -> Saldo:
+    """Zbuduj `Saldo` z rozpakowanego JSON-a /v2/users/me/limits.
+
+    Wydzielone z `saldo()`, żeby dało się przetestować BEZ sieci — cała wiedza
+    o kształcie odpowiedzi Apify siedzi tutaj.
     """
-    d = (dane or {}).get("data") or {}
-    biezace = d.get("current") or {}
-    limity = d.get("limits") or {}
-    cykl = d.get("monthlyUsageCycle") or {}
-    zuzyte = _float_or_none(biezace.get("monthlyUsageUsd"))
-    if zuzyte is None:
-        return None
-    return Zuzycie(
-        zuzyte_usd=zuzyte,
-        limit_usd=_float_or_none(limity.get("maxMonthlyUsageUsd")),
-        cykl_od=str(cykl.get("startAt") or ""),
-        cykl_do=str(cykl.get("endAt") or ""),
+    uzyte = _znajdz_liczbe(dane, _POLA_UZYCIA)
+    if uzyte is None:
+        raise SaldoNieznane(
+            f"w odpowiedzi {_ENDPOINT} nie ma żadnego z pól {', '.join(_POLA_UZYCIA)} — "
+            f"Apify zmieniło kształt odpowiedzi; bez licznika zużycia NIE da się policzyć "
+            f"kosztu i nie zgaduję zera"
+        )
+    return Saldo(
+        uzyte_usd=uzyte,
+        limit_usd=_znajdz_liczbe(dane, _POLA_LIMITU),
+        cykl_od=_znajdz_tekst(dane, "startAt"),
+        cykl_do=_znajdz_tekst(dane, "endAt"),
     )
 
 
-def zuzycie(token: str, *, timeout: float = TIMEOUT_S, env=None) -> Zuzycie | None:
-    """Ile to konto zużyło w bieżącym cyklu. None, gdy odpowiedź ma nieznany kształt.
+def saldo(token: str, *, timeout: float = _TIMEOUT_S, env=None, cfg=None) -> Saldo:
+    """Saldo konta stojącego za tym tokenem. Ruch idzie przez proxy TEGO klucza.
 
-    Wychodzi przez proxy PRZYPISANE TEMU TOKENOWI (`client_for_token`), nie wprost
-    z VPS-a — powód w docstringu modułu i w `docs/APIFY-PROXY.md`.
-
-    Błędy HTTP i sieci LECĄ WYŻEJ nietknięte: mają zostać zaklasyfikowane przez
-    `apify_keys.classify_apify_error` (401/402/403 to wyczerpany klucz, a nie
-    „zepsuty odczyt salda"). Tłumienie ich tutaj kazałoby wołającemu zgadywać.
+    Błędy przepuszczamy wyżej BEZ tłumaczenia: wołający (rotacja kluczy albo pomiar)
+    ma je zaklasyfikować sam — 401/402 tutaj znaczy dokładnie to samo co przy runie
+    actora, czyli „ten klucz jest do wymiany", i ma trafić do
+    `classify_apify_error` w laweta_radar/workers/apify_keys.py w oryginalnej postaci.
     """
-    with client_for_token(token, timeout=timeout, env=env) as klient:
-        odp = klient.get(
-            f"{API}/users/me/limits",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    with client_for_token(token, timeout=timeout, env=env, cfg=cfg) as klient:
+        odp = klient.get(_ENDPOINT, headers={"Authorization": f"Bearer {token}"})
         odp.raise_for_status()
         return z_odpowiedzi(odp.json())
 
 
-def koszt_runu(run: dict) -> float | None:
-    """`usageTotalUsd` z obiektu runu Apify. None, gdy pola nie ma.
-
-    Drugie, niezależne od salda źródło kosztu — patrz docstring modułu.
-    """
-    return _float_or_none((run or {}).get("usageTotalUsd"))
-
-
 # ---------------------------------------------------------------------------
-# CLI — jedno zapytanie na wskazany klucz. NIE odpytuje całej puli.
+# CLI — saldo całej puli (WYMAGA SIECI)
 # ---------------------------------------------------------------------------
 def _main(argv: list[str]) -> int:
-    surowy = "--raw" in argv
-    numer = 1
-    if "--klucz" in argv:
-        i = argv.index("--klucz")
-        if i + 1 >= len(argv) or not argv[i + 1].isdigit():
-            print("Użycie: --klucz N  (N liczony od 1)", file=sys.stderr)
-            return 0
-        numer = int(argv[i + 1])
+    import argparse  # noqa: PLC0415 — moduł ma zostać lekki przy imporcie z workera
+
+    ap = argparse.ArgumentParser(
+        description="Saldo miesięcznego kredytu kont Apify z puli (WYMAGA SIECI — "
+                    "po jednym zapytaniu na konto, przez proxy tego konta)."
+    )
+    ap.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="sprawdź tylko N pierwszych kluczy (przy dużej puli)")
+    ap.add_argument("--timeout", type=float, default=_TIMEOUT_S,
+                    help=f"timeout pojedynczego odczytu w sekundach (domyślnie {_TIMEOUT_S:g})")
+    args = ap.parse_args(argv[1:])
+
+    # Import pakietu dociąga wspólny .env sales-core-engine (config/shared_env.py),
+    # więc CLI widzi tę samą pulę kont co cron.
+    from laweta_radar.workers.apify_keys import _mask, load_apify_tokens  # noqa: PLC0415
 
     tokeny = load_apify_tokens()
     if not tokeny:
-        # Brak konfiguracji = czyste wyjście z komunikatem (zasada 3 z README).
-        print("[apify-credits] Brak kluczy Apify (APIFY_API_TOKEN*) — kończę bez "
-              "działania. Sprawdź: python -m laweta_radar.config.settings", file=sys.stderr)
+        print("Brak kluczy APIFY_API_TOKEN* w środowisku — nie ma czego pytać o saldo.")
         return 0
-    if not 1 <= numer <= len(tokeny):
-        print(f"[apify-credits] Nie ma klucza #{numer} — widzę {len(tokeny)}.",
-              file=sys.stderr)
-        return 0
+    if args.limit is not None:
+        tokeny = tokeny[:max(0, args.limit)]
 
-    token = tokeny[numer - 1]
-    print(f"[apify-credits] klucz #{numer}, wyjście: "
-          f"{proxy_label(proxy_for_token(token)) or 'BEZ PROXY (goły IP VPS-a)'}")
-    try:
-        with client_for_token(token, timeout=TIMEOUT_S) as klient:
-            odp = klient.get(f"{API}/users/me/limits",
-                             headers={"Authorization": f"Bearer {token}"})
-            odp.raise_for_status()
-            dane = odp.json()
-    except Exception as e:  # noqa: BLE001 — CLI diagnostyczne: pokaż powód, nie traceback
-        print(f"[apify-credits] błąd odczytu: {type(e).__name__}: {str(e)[:200]}",
-              file=sys.stderr)
-        return 1
+    razem_uzyte = razem_zostalo = 0.0
+    bledy = 0
+    print(f"Sprawdzam saldo {len(tokeny)} kont ...\n")
+    for i, token in enumerate(tokeny, 1):
+        try:
+            s = saldo(token, timeout=args.timeout)
+        except Exception as e:  # noqa: BLE001 — jedno padnięte konto nie kończy przeglądu
+            bledy += 1
+            print(f"  #{i:<3} {_mask(token)}  BŁĄD  {type(e).__name__}: {e}")
+            continue
+        razem_uzyte += s.uzyte_usd
+        if s.zostalo_usd is not None:
+            razem_zostalo += s.zostalo_usd
+        print(f"  #{i:<3} {_mask(token)}  {s.opis()}")
 
-    if surowy:
-        import json  # noqa: PLC0415 — potrzebny tylko w tej gałęzi CLI
-
-        print(json.dumps(dane, indent=2, ensure_ascii=False))
-        return 0
-
-    stan = z_odpowiedzi(dane)
-    if stan is None:
-        print("[apify-credits] Odpowiedź w NIEZNANYM kształcie — API Apify mogło "
-              "zmienić pola. Zobacz surowy JSON: --raw", file=sys.stderr)
-        return 1
-    print(f"[apify-credits] {stan.opis()}")
-    if stan.cykl_od or stan.cykl_do:
-        print(f"[apify-credits] cykl: {stan.cykl_od} → {stan.cykl_do}")
+    print(f"\n=== Razem: użyte {razem_uzyte:.2f} USD, zostało {razem_zostalo:.2f} USD, "
+          f"{bledy} błędów ===")
+    if bledy:
+        print("UWAGA: konta z błędem mogą być martwe albo mieć zepsute proxy — "
+              "sprawdź: python -m laweta_radar.workers.apify_proxy --check")
     return 0
 
 
 if __name__ == "__main__":
+    import sys
+
     raise SystemExit(_main(sys.argv))

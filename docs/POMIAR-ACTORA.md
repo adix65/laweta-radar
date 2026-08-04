@@ -1,97 +1,131 @@
 # Pomiar actora `apify/facebook-groups-scraper`
 
-> ## ⚠️ POMIAR NIE ZOSTAŁ JESZCZE WYKONANY
+> ## ⛔ POMIAR NIE ZOSTAŁ JESZCZE WYKONANY
 >
-> Ten plik jest **zaślepką**. Nie ma w nim ani jednej zmierzonej liczby, bo pomiar
-> wymaga żywych kluczy Apify i publicznej grupy testowej — a repo nie ma jednego
-> ani drugiego. **Prompt 2 nie może ruszyć, dopóki tu stoi ta ramka.**
+> Ten plik jest **miejscem na wynik**, a nie wynikiem. Narzędzie
+> (`laweta_radar/scripts/pomiar_actora.py`) jest gotowe i przetestowane, ale samego
+> pomiaru nie dało się przeprowadzić tam, gdzie powstawał kod: nie ma stamtąd dostępu
+> do `api.apify.com` ani do puli kluczy. **Pomiar musi odpalić człowiek na VPS-ie**,
+> a skrypt nadpisze wtedy ten plik prawdziwymi liczbami.
 >
-> Zaślepka istnieje po to, żeby brak pomiaru był widoczny. Brakujący plik wygląda
-> jak „jeszcze do niego nie doszliśmy" i kusi, żeby napisać fetchera na wyczucie.
-
-Uruchomienie pomiaru **nadpisze cały ten plik** wynikami:
-
-```bash
-export PYTHONPATH=$PWD
-python -m laweta_radar.scripts.pomiar_actora \
-    --grupa https://www.facebook.com/groups/PUBLICZNA_TESTOWA \
-    --grupa https://www.facebook.com/groups/DRUGA \
-    --grupa https://www.facebook.com/groups/TRZECIA
-```
-
-Zajmuje ~20 minut, kosztuje **najwyżej 270 pobranych postów** (≈ 1,35 USD po cenie
-katalogowej, ≈ 27 % miesięcznego kredytu jednego darmowego konta). Skrypt pokaże
-tę liczbę jeszcze raz i poczeka na potwierdzenie, zanim cokolwiek wyda.
+> **Do promptu 2 (`_build_actor_input`):** dopóki widzisz ten blok, **nie zakładaj
+> ścieżki A**. Nie ma zmierzonej wartości `onlyPostsNewerThan`, nie wiadomo, czy
+> `resultsLimit` jest per grupa, i nie ma kosztu posta do `POSTY_NA_DOBE`.
+> Bezpieczne założenia do czasu pomiaru są w sekcji
+> [Zanim będzie pomiar](#zanim-będzie-pomiar) na końcu.
 
 ---
 
 ## Po co ten pomiar
 
-Trzy pytania, na które nie da się odpowiedzieć z dokumentacji, bo actory zmieniają
-zachowanie między wersjami — a każda z odpowiedzi zmienia architekturę fetchera,
-nie jego szczegół.
+Trzy liczby, na których stoi cała architektura fetchera, a których dokumentacja
+actora nie podaje:
 
-### Pytanie 1 — czy `onlyPostsNewerThan` naprawdę działa?
+1. **Jaką najmniejszą jednostkę czasu przyjmuje `onlyPostsNewerThan`?**
+   Bez działającego okna czasowego każdy przebieg pobiera — i płaci za — te same
+   posty co poprzedni. Przy cronie co 5 minut to różnica między systemem opłacalnym
+   a nieopłacalnym.
+   - **ŚCIEŻKA A** — okno działa: liczba itemów maleje wraz ze zwężaniem okna, a wiek
+     najstarszego posta mieści się w oknie.
+   - **ŚCIEŻKA B** — jednostka jest ignorowana: wynik dla wąskiego okna jest taki sam
+     jak dla szerokiego, albo actor odrzuca pole.
+2. **Czy `resultsLimit` przy wielu grupach w `startUrls` działa per grupa, czy
+   globalnie?** Przy limicie globalnym batch po dziesięć grup zgubiłby posty
+   z ośmiu z nich — batchowanie byłoby wprost szkodliwe, nie tylko nieoptymalne.
+3. **Ile realnie kosztuje jeden pobrany post?** Liczba wchodzi wprost do
+   `POSTY_NA_DOBE` i do decyzji „ile kont / czy płatny plan”.
 
-Seria wywołań dla jednej grupy, zmienia się **wyłącznie** to pole: `7 days`,
-`1 day`, `12 hours`, `1 hour`, `30 minutes`.
+## Jak odpalić pomiar
 
-| wynik | co znaczy | co z tego wynika |
-|---|---|---|
-| **ŚCIEŻKA A** — liczba postów albo wiek najstarszego maleje przy zwężaniu okna, nic nie wychodzi poza okno | filtr czasowy działa | fetcher pobiera sam **przyrost** od ostatniego przebiegu; wolno chodzić gęsto, bo gęściej znaczy mniejsze okno, a nie większy rachunek |
-| **ŚCIEŻKA B** — wyniki dla `1 hour` i `1 day` identyczne, albo posty wychodzą poza okno, albo actor odrzuca okna poniżej doby | pole jest ignorowane | **każdy** przebieg pobiera i opłaca te same posty od nowa; `resultsLimit` musi być mały, przebieg rzadszy, a koszt liczy się jako `grupy × resultsLimit × przebiegi` bez żadnej ulgi |
+```bash
+cd /home/ubuntu/laweta-radar
+export PYTHONPATH=$PWD
 
-To jest najważniejsza liczba w projekcie. Przy przebiegu co 5 minut różnica między
-A i B to rząd 288× w rachunku za tę samą grupę.
+# 1. Sprawdź, że widać klucze i proxy (pomiar ma iść TĄ SAMĄ ścieżką co produkcja)
+python -m laweta_radar.workers.apify_keys
+python -m laweta_radar.workers.apify_proxy
+python -m laweta_radar.workers.apify_credits --limit 3     # saldo kilku kont
 
-Deduplikacja w bazie **nie ratuje ścieżki B**: oszczędza model i Telegram, ale za
-pobranie postu Apify policzył już wcześniej.
+# 2. Plan i prognoza kosztu — NIE dotyka sieci, nic nie kosztuje
+python laweta_radar/scripts/pomiar_actora.py --sucho
 
-### Pytanie 2 — `resultsLimit` przy wielu grupach w `startUrls`
+# 3. Realny pomiar (zapyta o potwierdzenie i nadpisze ten plik)
+python laweta_radar/scripts/pomiar_actora.py
+```
 
-Ten sam limit raz dla jednej grupy, raz dla trzech.
+**Grupa testowa musi być publiczna i potwierdzona ręcznie.** Domyślnie skrypt bierze
+grupy ze statusem `"ok"` z `laweta_radar/config/groups.py` — a ten status oznacza
+dokładnie to, że człowiek wszedł w grupę zalogowany i sprawdził, że jest publiczna
+i żywa. Grupę spoza tej listy podajesz jawnie:
 
-- **LIMIT PER GRUPA** (trzy grupy ≈ 3 × limit) → grupy wolno batchować w jednym
-  wywołaniu.
-- **LIMIT GLOBALNY** (trzy grupy ≈ limit) → batchowanie jest **zakazane**. Batch po
-  dziesięć grup zgubiłby posty z ośmiu z nich, a run i tak zostałby policzony.
+```bash
+python laweta_radar/scripts/pomiar_actora.py \
+  --grupa https://www.facebook.com/groups/... \
+  --potwierdzam-publiczne
+```
 
-### Pytanie 3 — ile realnie kosztuje jeden pobrany post
+Na grupie prywatnej zmierzyłbyś komunikat błędu zamiast zachowania actora — a run
+i tak zostałby policzony.
 
-Liczone dwoma niezależnymi sposobami: z licznika konta
-(`laweta_radar/workers/apify_credits.py`) i z `usageTotalUsd` każdego runu.
-Zgodność znaczy, że pomiar jest wiarygodny; rozjazd jest informacją, a nie błędem
-— licznik konta agreguje z opóźnieniem, więc tuż po serii bywa zaniżony.
+### Ile to kosztuje
 
-Cena katalogowa ze strony actora to **~0,005 USD za post** (~5 USD za 1000). Nie
-jest wynikiem pomiaru — służy tylko do oszacowania kosztu serii **przed** jej
-odpaleniem i do porównania z liczbą zmierzoną.
+Plan domyślny to **8 wywołań i najwyżej ~240 pobranych postów**
+(6 × `resultsLimit` 20 na pytanie 1 + 4 × 30 w najgorszym wypadku na pytanie 2).
+Skrypt liczy tę prognozę **przed** odpaleniem, pokazuje ją razem z ceną katalogową
+actora i pyta o potwierdzenie. Twardy sufit to `--budzet-postow` (domyślnie **500**)
+i działa dwustronnie: blokuje plan, który go przekracza, i przerywa serię w trakcie,
+gdyby actor oddał więcej, niż zapowiadał.
 
-Stąd liczy się flotę kont: darmowe konto to ~5 USD miesięcznie, czyli ~1000 postów
-po cenie katalogowej. `POSTY_NA_DOBE × 30 / postów_na_konto` daje liczbę kont —
-i to jest miejsce, w którym rozstrzyga się „trzydzieści czy dziewięćset".
+Kredyt jest **wspólny z sales-core-engine** (patrz README) — te posty odejmują się
+z tej samej puli, z której korzysta drugi system.
+
+## Wynik
+
+_Wypełni skrypt. Poniżej struktura, którą zapisze._
+
+| Pytanie | Odpowiedź |
+|---|---|
+| 1. Najmniejsza jednostka `onlyPostsNewerThan` | — NIE ZMIERZONO — |
+| 2. `resultsLimit` przy wielu grupach | — NIE ZMIERZONO — |
+| 3. Koszt jednego pobranego posta | — NIE ZMIERZONO — |
+
+Do tego, per pytanie:
+
+- **Pytanie 1** — tabela: okno, liczba itemów, wiek najstarszego i najnowszego posta,
+  czy mieści się w oknie, czas runu, zaczęte minuty, koszt, błąd. Plus wywołanie
+  **kontrolne bez pola okna**: porównanie *zestawów* postów (nie tylko ich liczby)
+  odróżnia „okno zwróciło wszystko, bo grupa jest mała” od „pole jest ignorowane”.
+- **Pytanie 2** — tabela: to samo `resultsLimit` dla jednej i dla trzech grup, wraz
+  z rozkładem itemów **na grupę** (limit globalny bywa zjadany w całości przez
+  pierwszą grupę i to wygląda inaczej niż limit dzielony po równo).
+- **Pytanie 3** — koszt z **salda konta** (różnica odczytów przed i po każdym runie)
+  z kontrolą przez `usageTotalUsd` runu, rozbity na **składnik stały wywołania**
+  i **koszt krańcowy posta**, plus sprawdzenie hipotezy rozliczania **za zaczętą
+  minutę** — ta ostatnia decyduje, czy fetcherowi opłaca się wołać częściej i płycej,
+  czy rzadziej i grubiej.
+- **Metryka poboczna, a ważna:** nazwa pola z czasem publikacji w itemie. Fetcher
+  potrzebuje jej, żeby odsiewać stare posty po swojej stronie — i jest to jedyna
+  rzecz, bez której ścieżka B w ogóle nie ma planu awaryjnego. Skrypt ustala ją
+  z danych, nie zgaduje.
+
+## Zanim będzie pomiar
+
+Założenia, przy których kod napisany **przed** pomiarem będzie poprawny niezależnie
+od tego, co pomiar pokaże — najwyżej droższy, nigdy błędny:
+
+1. **Nie polegaj na `onlyPostsNewerThan`.** Ustawiaj je (nic nie kosztuje, a przy
+   ścieżce A od razu działa), ale odsiew wieku rób **także** po swojej stronie, po
+   polu z czasem posta. Kod napisany odwrotnie — ufający oknu — przy ścieżce B
+   przepuszcza stare posty do klasyfikatora i płaci Claude'owi za każdy z nich.
+2. **Jedna grupa na wywołanie.** To wariant poprawny przy obu odpowiedziach na
+   pytanie 2; przy limicie per grupa jest tylko droższy, przy globalnym jest
+   jedynym, który nie gubi danych. Batchowanie włączysz, gdy pomiar pokaże
+   `PER GRUPA`.
+3. **`POSTY_NA_DOBE` zostaw jako pojedynczą stałą w konfiguracji**, wyliczaną
+   z kosztu posta — nie rozsiewaj limitów po kodzie. Po pomiarze zmieni się jedna
+   liczba w jednym miejscu.
 
 ---
 
-## Zanim odpalisz
-
-1. **Grupa testowa musi być PUBLICZNA i sprawdzona ręcznie.** Apify czyta tylko
-   grupy publiczne. Na prywatnej albo martwej zmierzysz błąd, nie zachowanie
-   actora — i zapłacisz za to tyle samo. Sprawdza to człowiek, zalogowany na FB;
-   z zewnątrz się nie da (patrz `laweta_radar/config/groups.py`).
-2. **Grupa musi być RUCHLIWA.** Przy kilku postach na tydzień filtr działający
-   i filtr ignorowany dają identyczny wynik — skrypt wypisze wtedy
-   „NIEROZSTRZYGNIĘTE" zamiast udawać, że coś zmierzył. Celuj w grupę, w której
-   przez 7 dni przybywa wyraźnie więcej niż 30 postów.
-3. **Klucze Apify muszą być widoczne:**
-   `python -m laweta_radar.workers.apify_keys` ma pokazać niezerową liczbę.
-4. **Sprawdź plan bez wydawania:** `--sucho` pokazuje przewidywany koszt i kończy.
-
-Pytanie 2 wymaga trzech grup (`--grupa` trzy razy). Samo pytanie 1 wystarczy
-jedna grupa: `--tylko 1`.
-
-## Powtórka pomiaru
-
-Powtórz przy **zmianie wersji actora** (numer builda jest w wygenerowanym raporcie)
-oraz gdy rachunek za Apify przestanie się zgadzać z przewidywaniem. Zachowanie
-actorów ze Store zmienia się między wersjami bez ostrzeżenia i bez zmiany nazw pól.
+Ostatnia aktualizacja tego pliku: **2026-08-04** (szkielet, bez pomiaru).
+Po odpaleniu skryptu ta linia i całość powyżej zostaną nadpisane wynikiem.
