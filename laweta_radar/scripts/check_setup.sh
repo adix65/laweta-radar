@@ -51,11 +51,26 @@ echo "=== 5. Proxy dla Apify (bez sieci) ==="
 "$PY" -m laweta_radar.workers.apify_proxy
 
 echo
-echo "=== 6. Telegram (WYSYŁA wiadomość testową) ==="
+echo "=== 6. Klasyfikator (provider modelu, bez sieci) ==="
+# Brak paczki providera to awaria CICHA: system wstaje, a modelu nie woła.
+# Ma się objawić tutaj, a nie tracebackiem w środku runu o trzeciej w nocy.
+"$PY" -m laweta_radar.services.llm
+
+echo
+echo "=== 7. Baza kodów pocztowych (services/geo.py, bez sieci) ==="
+"$PY" -c "
+from laweta_radar.services import geo
+print(geo.stan_bazy())
+p = geo.baza()
+print(f'  baza operatora: {p.nazwa} ({p.wspolrzedne()})')
+"
+
+echo
+echo "=== 8. Telegram (WYSYŁA wiadomość testową) ==="
 "$PY" -m laweta_radar.services.telegram_notify
 
 echo
-echo "=== 7. Baza (wymaga wstającego API albo psql) ==="
+echo "=== 9. Baza danych (wymaga wstającego API albo psql) ==="
 echo "Migracje:  bash laweta_radar/scripts/migrate.sh"
 echo "Stan:      curl -s localhost:8002/health"
 echo

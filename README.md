@@ -51,8 +51,11 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 - **gate** — darmowy filtr słowny **przed** modelem. Bez niego płacilibyśmy
   Claude'owi za każdy post o sprzedaży felg. Odrzuca wyłącznie cztery kategorie
   wymienione wyżej i nic poza nimi.
-- **classifier** — Claude decyduje, czy to realne zlecenie, i wyciąga z posta to,
-  co operator musi wiedzieć, zanim kliknie.
+- **classifier** — model decyduje, czy to realne zlecenie, i wyciąga z posta to,
+  co operator musi wiedzieć, zanim kliknie. Domyślnie Haiku, ale provider jest
+  wymienny jedną zmienną w `.env` (`services/llm.py`) — bo o tym, który model
+  lepiej czyta polski post bez ogonków, decyduje pomiar na własnych danych,
+  a nie benchmark.
 - **geo** — liczy dystans i trasę, żeby **pokazać** je przy zleceniu. Nie ukrywa
   rekordów: o tym, czy kurs pod Kolonię się opłaca, decyduje kierowca.
 - **Telegram** — jedyny kanał dowozu. Alert niesie link do posta; odpowiada
@@ -62,10 +65,11 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 
 Działa już: konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy,
 proxy, bandyta, transport Telegrama, API diagnostyczne, migracje tabeli `posty`,
-diagnostyka actora oraz **bramka** (`workers/gate.py`). Brakuje
-`workers/fb_fetcher.py`, `workers/classifier.py` i `services/geo.py` — dopóki ich
-nie ma, system nic nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego
-mu brakuje.
+diagnostyka actora, **bramka** (`workers/gate.py`), **klasyfikator**
+(`workers/classifier.py` + wymienna warstwa `services/llm.py`) oraz **geo**
+(`services/geo.py`). Brakuje `workers/fb_fetcher.py` — dopóki go nie ma, system
+nic nie pobiera i nic nie wysyła, ale wstaje czysto, mówi czego mu brakuje,
+a każdy gotowy klocek da się odpalić z ręki na pojedynczej treści.
 
 Bramka jest na razie w **trybie cienia** (`GATE_TRYB=cien`): liczy i zapisuje swoją
 decyzję, ale niczego nie blokuje. Inaczej się nie da — bramka odrzuca posty, zanim
@@ -83,9 +87,12 @@ laweta_radar/
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
     apify_credits.py   # saldo miesięcznego kredytu konta (do pomiaru kosztu)
     gate.py            # darmowy prefiltr słownikowy PRZED modelem
+    classifier.py      # ekstrakcja zlecenia z posta: prompt, rozbiór, walidacja
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate)
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
+    llm.py             # JEDNA funkcja `zapytaj` — provider wymienny w .env
+    geo.py             # kody -> współrzędne, kilometry, deep linki do map
   config/
     settings.py        # jedyne miejsce czytające środowisko
     shared_env.py      # dociąga klucze Apify ze WSPÓLNEGO .env sales-core-engine
@@ -96,9 +103,13 @@ laweta_radar/
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     raport_gate.py     # rozliczenie trybu cienia bramki
+    porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
+    pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
   tests/               # testy offline (bez sieci i bez bazy)
+    dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
   .env.example
   requirements.txt
+data/kody_eu.csv       # baza kodów pocztowych — commitowana, patrz data/README.md
 docs/APIFY-PROXY.md    # po co proxy i jak je skonfigurować
 docs/POMIAR-ACTORA.md  # co actor realnie robi i ile kosztuje (wynik pomiaru)
 ```
@@ -266,6 +277,89 @@ przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazu
 (`docs/APIFY-PROXY.md`). Pula wychodząca z jednego IP wygląda dla Apify jak
 multi-accounting i kończy się utratą **całej puli naraz**, nie jednego konta.
 
+### Klasyfikator i wybór modelu
+
+Bramka odpowiada, czy w ogóle warto wydać na post token. Klasyfikator
+(`workers/classifier.py`) odpowiada na pytanie drugie i ostatnie: czy to realne
+zlecenie, skąd dokąd, czym, w jakim stanie i jak pilnie. Podejrzysz go na
+pojedynczej treści:
+
+```bash
+python -m laweta_radar.workers.classifier --prompt          # sam prompt, bez kosztu
+python -m laweta_radar.workers.classifier "zdechlem w Sanoku, akumulator padl"
+```
+
+**Domyślny model to Haiku** (`CLASSIFIER_MODEL`). To zadanie ekstrakcji, nie
+rozumowania — Haiku robi je równie dobrze za ułamek ceny, a liczy się też czas:
+każda sekunda opóźnienia to przewaga konkurencji.
+
+Model jest jednak **wymienny bez dotykania logiki**. Cała komunikacja z modelem
+przechodzi przez jedną funkcję w `services/llm.py`, a `LLM_PROVIDER` w `.env`
+wybiera implementację (`anthropic`, `openai`, `gemini`). Parsowanie JSON-a,
+walidacja pól i obsługa błędów zostają w klasyfikatorze — wspólne dla
+wszystkich, żeby porównanie mierzyło modele, a nie nasz kod.
+
+Powód tej warstwy jest **pomiarowy, nie estetyczny**. Różnica w cenie między
+najdroższym a najtańszym modelem przy tym wolumenie to około 25 zł miesięcznie,
+czyli mniej niż szum. Różnica w JAKOŚCI na polskich postach pisanych bez ogonków,
+z literówkami i skrótami drogowymi może być duża — i nie da się jej przewidzieć
+z benchmarków, bo żaden nie mierzy „wyciąganie miejscowości z posta
+laweciarskiego". Dlatego mierzymy na swoich danych:
+
+```bash
+python laweta_radar/scripts/porownaj_modele.py --sucho   # plan i koszt, BEZ sieci
+python laweta_radar/scripts/porownaj_modele.py           # tabela porównawcza
+```
+
+Skrypt puszcza `tests/dane/posty_referencyjne.jsonl` przez wszystkie
+skonfigurowane providery i liczy per model: trafność `czy_zlecenie`, trafność
+miasta odbioru i dostawy, trafność `pilnosc`, ile razy wynik nie dał się
+sparsować, medianę czasu odpowiedzi i realny koszt runu.
+
+Zbiór w repo to na razie **22 seedy napisane razem z promptem** — dość, żeby
+sprawdzić, że skrypt chodzi, za mało na decyzję i skrypt mówi to wprost.
+Po pierwszym tygodniu produkcji dopisz do niego **min. 40 realnych postów
+z bazy** z ręcznie wpisanym wynikiem (instrukcja jest w nagłówku tego pliku).
+To robota do zrobienia raz; bez niej wybór modelu pozostaje zgadywaniem.
+
+### Geo: kody pocztowe, kilometry, jeden klikalny link
+
+`services/geo.py` zamienia to, co model wyciągnął z posta, na współrzędne,
+kilometry i **jeden link, który na telefonie otwiera Google Maps z gotową trasą**.
+
+```bash
+python -m laweta_radar.services.geo Krosno Rzeszow
+python -m laweta_radar.services.geo --kody "auto w 50667 Koln, moge dac 2500 zl"
+```
+
+**Nie używamy płatnego geokodera** i nie zamierzamy. 90% przypadków to kod
+pocztowy albo nazwa miasta, a to załatwia lokalna baza — za darmo, offline,
+w mikrosekundy, bez limitu zapytań i bez klucza, który może wygasnąć w środku
+nocy. Google Maps jest wyłącznie deep linkiem: darmowym i bez API key.
+
+Świeży klon ma w `data/kody_eu.csv` **zalążek** (~70 miast). Pełną bazę
+pobierasz raz i **commitujesz** — szczegóły i licencja w `data/README.md`:
+
+```bash
+python laweta_radar/scripts/pobierz_geo.py --sucho   # plan, bez sieci
+python laweta_radar/scripts/pobierz_geo.py           # PL DE CZ SK NL BE AT FR IT
+```
+
+Trzy rzeczy, które w tym module są decyzją, a nie szczegółem:
+
+- **Null jest lepszy niż zła współrzędna.** Geokoder ma prawo powiedzieć „nie
+  wiem" i nie ma prawa zgadnąć. Zła współrzędna wysyła człowieka 80 km w złą
+  stronę i wygląda przy tym dokładnie tak samo jak trafiona.
+- **`zrodlo` jest częścią produktu.** Gdy nazwa jest niejednoznaczna
+  (kilkanaście „Nowych Wsi" w Polsce), bierzemy największą i oznaczamy wynik
+  jako `miasto_niepewne`. To **musi** trafić na ekran: operator ma zobaczyć,
+  że lokalizacja jest zgadywana, zanim pojedzie 60 km.
+- **Trasa, nie promień.** Pierwszą liczbą jest długość kursu odbiór→dostawa;
+  dystans od bazy idzie obok, jako pomocniczy. Żadna z nich niczego nie
+  filtruje, a `kalkulacja()` jest etykietą na ekranie, nie bramką i nie wyceną
+  (dystans liczymy Haversine razy 1,25 — to szacunek do przesiewu, nie na
+  fakturę).
+
 ## Deploy (VPS + PM2 + nginx)
 
 ```bash
@@ -333,6 +427,12 @@ pm2 restart laweta-api
 | ile kredytu zostało na kontach | `python -m laweta_radar.workers.apify_credits` (wymaga sieci) |
 | dlaczego bramka przepuściła/odrzuciła post | `python -m laweta_radar.workers.gate "treść"` |
 | czy bramkę można już włączyć | `python laweta_radar/scripts/raport_gate.py` |
+| co model wyciąga z konkretnego posta | `python -m laweta_radar.workers.classifier "treść"` (wymaga sieci) |
+| jak brzmi prompt systemowy | `python -m laweta_radar.workers.classifier --prompt` |
+| który provider modelu jest gotowy | `python -m laweta_radar.services.llm` |
+| który model wybrać | `python laweta_radar/scripts/porownaj_modele.py` (wymaga sieci) |
+| czy geokoder zna to miasto | `python -m laweta_radar.services.geo "Krosno" "Rzeszow"` |
+| jakie kody widzi geokoder w treści | `python -m laweta_radar.services.geo --kody "treść"` |
 | rotator widzi 0 kluczy | zła ścieżka do wspólnego `.env` — `python -m laweta_radar.config.settings` |
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |

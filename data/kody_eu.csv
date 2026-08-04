@@ -1,0 +1,74 @@
+kraj,kod,miejscowosc,wojewodztwo,lat,lng
+PL,00-001,Warszawa,mazowieckie,52.2297,21.0122
+PL,10-001,Olsztyn,warminsko-mazurskie,53.7784,20.4801
+PL,15-001,Bialystok,podlaskie,53.1325,23.1688
+PL,20-001,Lublin,lubelskie,51.2465,22.5684
+PL,22-400,Zamosc,lubelskie,50.7231,23.2518
+PL,25-001,Kielce,swietokrzyskie,50.8661,20.6286
+PL,27-600,Sandomierz,swietokrzyskie,50.6820,21.7490
+PL,30-001,Krakow,malopolskie,50.0647,19.9450
+PL,33-100,Tarnow,malopolskie,50.0121,20.9858
+PL,33-300,Nowy Sacz,malopolskie,49.6216,20.6971
+PL,35-001,Rzeszow,podkarpackie,50.0412,21.9991
+PL,36-200,Brzozow,podkarpackie,49.6947,22.0186
+PL,37-450,Stalowa Wola,podkarpackie,50.5827,22.0533
+PL,37-500,Jaroslaw,podkarpackie,50.0157,22.6780
+PL,37-700,Przemysl,podkarpackie,49.7838,22.7677
+PL,38-200,Jaslo,podkarpackie,49.7450,21.4715
+PL,38-400,Krosno,podkarpackie,49.6886,21.7706
+PL,38-430,Miejsce Piastowe,podkarpackie,49.6350,21.7900
+PL,38-450,Dukla,podkarpackie,49.5570,21.6830
+PL,38-500,Sanok,podkarpackie,49.5558,22.2060
+PL,39-200,Debica,podkarpackie,50.0516,21.4111
+PL,39-300,Mielec,podkarpackie,50.2874,21.4239
+PL,39-400,Tarnobrzeg,podkarpackie,50.5730,21.6790
+PL,40-001,Katowice,slaskie,50.2649,19.0238
+PL,45-001,Opole,opolskie,50.6751,17.9213
+PL,50-001,Wroclaw,dolnoslaskie,51.1079,17.0385
+PL,60-001,Poznan,wielkopolskie,52.4064,16.9252
+PL,65-001,Zielona Gora,lubuskie,51.9356,15.5062
+PL,70-001,Szczecin,zachodniopomorskie,53.4285,14.5528
+PL,80-001,Gdansk,pomorskie,54.3520,18.6466
+PL,85-001,Bydgoszcz,kujawsko-pomorskie,53.1235,18.0084
+PL,87-100,Torun,kujawsko-pomorskie,53.0138,18.5984
+PL,90-001,Lodz,lodzkie,51.7592,19.4560
+DE,01067,Dresden,Sachsen,51.0504,13.7373
+DE,04109,Leipzig,Sachsen,51.3397,12.3731
+DE,10115,Berlin,Berlin,52.5200,13.4050
+DE,20095,Hamburg,Hamburg,53.5511,9.9937
+DE,28195,Bremen,Bremen,53.0793,8.8017
+DE,30159,Hannover,Niedersachsen,52.3759,9.7320
+DE,40213,Dusseldorf,Nordrhein-Westfalen,51.2277,6.7735
+DE,50667,Koln,Nordrhein-Westfalen,50.9375,6.9603
+DE,52062,Aachen,Nordrhein-Westfalen,50.7753,6.0839
+DE,60311,Frankfurt am Main,Hessen,50.1109,8.6821
+DE,70173,Stuttgart,Baden-Wurttemberg,48.7758,9.1829
+DE,80331,Munchen,Bayern,48.1351,11.5820
+DE,90402,Nurnberg,Bayern,49.4521,11.0767
+CZ,110 00,Praha,Praha,50.0755,14.4378
+CZ,602 00,Brno,Jihomoravsky,49.1951,16.6068
+CZ,702 00,Ostrava,Moravskoslezsky,49.8209,18.2625
+SK,010 01,Zilina,Zilinsky,49.2231,18.7394
+SK,040 01,Kosice,Kosicky,48.7164,21.2611
+SK,811 01,Bratislava,Bratislavsky,48.1486,17.1077
+NL,1012 AB,Amsterdam,Noord-Holland,52.3676,4.9041
+NL,,Rotterdam,Zuid-Holland,51.9244,4.4777
+NL,,Den Haag,Zuid-Holland,52.0705,4.3007
+NL,,Utrecht,Utrecht,52.0907,5.1214
+BE,1000,Bruxelles,Bruxelles-Capitale,50.8503,4.3517
+BE,2000,Antwerpen,Antwerpen,51.2194,4.4025
+BE,4000,Liege,Liege,50.6326,5.5797
+BE,9000,Gent,Oost-Vlaanderen,51.0543,3.7174
+AT,1010,Wien,Wien,48.2082,16.3738
+AT,4020,Linz,Oberosterreich,48.3069,14.2858
+AT,5020,Salzburg,Salzburg,47.8095,13.0550
+AT,8010,Graz,Steiermark,47.0707,15.4395
+FR,13001,Marseille,Provence-Alpes-Cote d'Azur,43.2965,5.3698
+FR,69001,Lyon,Auvergne-Rhone-Alpes,45.7640,4.8357
+FR,75001,Paris,Ile-de-France,48.8566,2.3522
+IT,00186,Roma,Lazio,41.9028,12.4964
+IT,10121,Torino,Piemonte,45.0703,7.6869
+IT,20121,Milano,Lombardia,45.4642,9.1900
+IT,30100,Venezia,Veneto,45.4408,12.3155
+IT,50100,Firenze,Toscana,43.7696,11.2558
+IT,80100,Napoli,Campania,40.8518,14.2681
