@@ -112,10 +112,64 @@ BAZA_LAT = _float("BAZA_LAT", 0.0)
 BAZA_LON = _float("BAZA_LON", 0.0)
 MAX_DYSTANS_KM = _int("MAX_DYSTANS_KM", 80)
 
-# Posty starsze niż to okno pomijamy przy pobieraniu. Zlecenie na lawetę jest
-# ważne kilkadziesiąt minut — po dobie ktoś już przyjechał, a my płacimy Apify
-# za pobranie i model za klasyfikację czegoś, co jest nieaktualne.
-MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 12)
+# Po ilu godzinach post przestaje być zleceniem. Starszy trafia do bazy ze
+# znacznikiem `stale`, ale NIE budzi nikogo powiadomieniem i nie idzie do modelu.
+#
+# UWAGA — TA LICZBA JEST DO USTALENIA I ZALEŻY OD PROFILU OPERATORA. Sześć godzin
+# pochodzi z założenia „awaria na poboczu": zlecenie żyje kilkadziesiąt minut,
+# więc post sprzed sześciu godzin jest już cudzy.
+#
+# README opisuje jednak profil INNY — trasy międzynarodowe zestawem B+E, gdzie
+# „kupiłem auto w Niemczech, kto przywiezie" żyje DNIAMI, nie kwadransem. Przy
+# tym profilu sześć godzin kasuje powiadomienia o zleceniach, które są jeszcze
+# w pełni aktualne, a to jest dokładnie ten rodzaj decyzji, który zasada naczelna
+# repo („system pokazuje, decyduje kierowca") odbiera kodowi.
+#
+# Dla profilu transportowego ustaw 48 albo więcej. Mechanizm jest ten sam —
+# różni się tylko liczba, i to świadomie, bo nikt poza operatorem nie wie,
+# którego rodzaju zleceń realnie szuka.
+MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 6)
+
+# ---------------------------------------------------------------------------
+# BUDŻET APIFY — TWARDY SUFIT POBRANYCH POSTÓW NA DOBĘ dla całego systemu.
+#
+# Liczony w POSTACH, nie w runach, bo tak rozlicza się ten actor (patrz
+# config/groups.py). Sufit jest wspólny dla wszystkich grup i pilnuje go fetcher
+# przez licznik w tabeli `harmonogram` — po jego wyczerpaniu NIE wykonuje
+# kolejnych wywołań i mówi to wyraźnie w logu.
+#
+# DLACZEGO TAK OSTRO: pula kont Apify jest WSPÓLNA z sales-core-engine. Cicho
+# przekroczony budżet to nie jest „trochę wyższy rachunek" — to spalona pula,
+# z której korzysta też drugi system, i awaria dwóch rzeczy naraz.
+#
+# 2000 postów/dobę przy cenie rzędu 2,60 USD/1000 to ok. 156 USD miesięcznie.
+# ---------------------------------------------------------------------------
+POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
+
+# Nadpisanie ścieżki z pomiaru actora ("A" albo "B"). Puste = fetcher czyta
+# werdykt z docs/POMIAR-ACTORA.md, a gdy pomiaru nie ma — schodzi na ścieżkę B,
+# czyli droższą w pobraniu, ale tańszą w pomyłce (patrz workers/fb_fetcher.py).
+SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
+
+# ---------------------------------------------------------------------------
+# BRAMKA (workers/gate.py) — darmowy prefiltr słownikowy przed modelem.
+#
+# GATE_PROG: suma wag, od której post idzie do AI. Piątka jest CELOWO niska.
+# Asymetria kosztów jest brutalna: śmieć przepuszczony do AI to ~0,002 zł, a
+# zlecenie odrzucone przez bramkę to ~300 zł straconego kursu, o którym nigdy
+# się nie dowiemy — post nie trafi nigdzie. Jeden przegapiony kurs miesięcznie
+# kasuje CAŁĄ oszczędność na tokenach. Właściwą wartość odczytuje się
+# z rozkładu punktów w scripts/raport_gate.py, a nie zgaduje.
+#
+# GATE_TRYB: "cien" albo "aktywny". W cieniu bramka liczy i zapisuje swoją
+# decyzję, ale NICZEGO nie blokuje — wszystkie posty idą do AI. Dopiero to daje
+# pary (decyzja bramki, werdykt AI), z których widać jedyną liczbę, która ma
+# znaczenie: ile zleceń bramka by skasowała. Przełączenie na "aktywny" ma sens
+# wyłącznie wtedy, gdy ta liczba wynosi zero. Nieznana wartość degraduje do
+# "cien" — literówka w .env nie może po cichu włączyć blokowania.
+# ---------------------------------------------------------------------------
+GATE_PROG = _int("GATE_PROG", 5)
+GATE_TRYB = _txt("GATE_TRYB", "cien")
 
 # ---------------------------------------------------------------------------
 # Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
@@ -179,6 +233,9 @@ def opis_srodowiska() -> str:
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
     ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+         f", gate={GATE_TRYB}(prog {GATE_PROG})"
+         f", budzet={POSTY_NA_DOBE} postow/dobe"
+         f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 
 
