@@ -5,12 +5,41 @@
 > 1:1 — zmieniły się tylko ścieżki pakietu i to, co wypisano niżej w sekcji
 > „Czego tu nie ma".
 
+## Pula jest WSPÓŁDZIELONA — przeczytaj to najpierw
+
+Ten system **nie ma własnych kont Apify**. Stoi na tym samym VPS-ie co
+sales-core-engine i korzysta z **tej samej puli kont oraz tych samych proxy**.
+Klucze i konfigurację proxy `config/settings.py` dociąga z `.env` tamtego repo
+(ścieżka: `SHARED_ENV_PATH`, domyślnie `/home/ubuntu/sales-core-engine/.env`).
+
+Zakładanie drugiej puli byłoby działaniem **wprost przeciwnym** do celu tej
+strony: dwa razy więcej kont z tego samego adresu to dwa razy mocniejszy sygnał
+multi-accountingu, przy zerowym zysku.
+
+Przepisywane są **wyłącznie** `APIFY_API_TOKEN*`, `APIFY_PROXY{N}`,
+`APIFY_PROXY_URL(S)` i `APIFY_PROXY_REQUIRED`. Reszta tamtego pliku — jego
+`DATABASE_URL`, jego `TELEGRAM_*` — jest ignorowana, bo zwykłe wczytanie obu
+plików sprawiłoby, że laweta pisze do bazy sprzedażowej, a alerty o zleceniach
+idą na czat handlowca. Pilnują tego testy w `laweta_radar/tests/test_config.py`.
+
+> **Budżet też jest wspólny.** Każdy run lawety odejmuje kredyt tej samej puli.
+> Dlatego fetcher rozdziela runy między grupy bandytą (`services/bandit.py`):
+> run wydany na martwą grupę to nie tylko zmarnowany run, ale run **zabrany
+> drugiemu systemowi**.
+
+Sprawdzenie, co realnie zostało wczytane i skąd:
+
+```bash
+python -m laweta_radar.config.settings
+python -m laweta_radar.workers.apify_keys
+```
+
 ## Po co to jest
 
-Scrapery FB stoją na puli darmowych kont Apify (`APIFY_API_TOKEN1..N`, rotacja
-w `laweta_radar/workers/apify_keys.py`). Każde konto to ~5 USD kredytu na
-miesiąc, więc puli robi się dużo — i cała siedzi na JEDNYM adresie IP naszego
-VPS-a. Z punktu widzenia Apify wygląda to jak podręcznikowy multi-accounting:
+Pula darmowych kont Apify (`APIFY_API_TOKEN1..N`, rotacja w
+`laweta_radar/workers/apify_keys.py`) to źródło kredytu na scrapery FB. Każde
+konto to ~5 USD na miesiąc, więc puli robi się dużo — i cała siedzi na JEDNYM
+adresie IP naszego VPS-a. Z punktu widzenia Apify wygląda to jak podręcznikowy multi-accounting:
 
 - kilkadziesiąt kont łączy się z tego samego adresu,
 - narzędzia, które dotykają **wszystkich** kont naraz (choćby odczyt salda),
@@ -119,37 +148,38 @@ Login i hasło w URL-u trzeba zakodować procentowo, jeśli zawierają `@ : / ? 
 Na przykład hasło `p@ss:word` zapisujesz jako `p%40ss%3Aword`. Niezakodowane `@`
 rozjeżdża parsowanie adresu i ruch pójdzie nie tam, gdzie miał iść.
 
-### 4. Pula z pliku
+### 4. Pula z pliku — WYŁĄCZONA, nie włączaj
 
-Moduł umie doczytać listę zweryfikowanych adresów z pliku JSON i **dołożyć** ją do
-`APIFY_PROXY_URLS` (nie zastąpić), żeby dało się trzymać kilka stałych, płatnych
-adresów i dosypywać tańszymi.
+`APIFY_PROXY_POOL` jest **wyłączone i ma takie zostać.** W repo źródłowym pulę
+wyłączono 2026-07-31 i decyzja przenosi się tutaj bez zmian.
 
-```
-APIFY_PROXY_POOL=1
-APIFY_PROXY_POOL_FILE=/sciezka/do/pool.json     # domyślnie laweta_radar/.apify_proxy_pool.json
-APIFY_PROXY_POOL_MAX_AGE_H=6
-```
+Powód jest pomiarowy, nie ideologiczny. Odświeżenie zwracało **zero
+zweryfikowanych adresów z 411 kandydatów**. W pliku zostawał jeden stary wpis,
+odpowiadający w ~20% prób — a rendezvous hashing kierował przez ten jeden wpis
+**komplet kont**. Scrapery zbierały timeouty na wywołaniach, za które Apify i tak
+nalicza. **Pula, której nikt nie odświeża, jest gorsza niż jej brak**, a plik
+leżący na dysku wygląda w logu identycznie w obu przypadkach.
 
-Format pliku: `{"updated_at": "<ISO8601>", "proxies": [{"url": "...", "apify_ok": true}]}`.
-Brane są **wyłącznie** wpisy z `apify_ok: true` — proxy, które żyje, ale nie dochodzi
-do `api.apify.com`, zajmowałoby w puli miejsce, a przypisane do niego konto po prostu
-by nie działało.
+Dlatego:
 
-> **Domyślnie wyłączone i tak ma zostać, dopóki nie masz czym tego pliku
-> odświeżać.** To wniosek z produkcji, nie ostrożność na wszelki wypadek: gdy plik
-> czytał się sam z dysku, jedno odświeżenie zwracające 0 żywych adresów zostawiało
-> w nim JEDEN stary wpis odpowiadający w ~20% prób — a rendezvous hashing kierował
-> przez ten jeden wpis **komplet kont**. Scrapery zbierały timeouty na wywołaniach,
-> za które Apify i tak nalicza. **Pula, której nikt nie odświeża, jest gorsza niż
-> jej brak**, a plik leżący na dysku wygląda identycznie w obu przypadkach. Stary
-> plik (powyżej `APIFY_PROXY_POOL_MAX_AGE_H`) daje ostrzeżenie w logu każdego runu.
+- nie ustawiaj `APIFY_PROXY_POOL=1`,
+- nie dopisuj wpisu odświeżania do crona,
+- generatora puli świadomie **nie przenieśliśmy** (patrz „Czego tu nie ma").
 
-**Uczciwie o darmowych adresach**, gdyby kusiło je tu wpiąć: żyją krótko, są
-współdzielone przez tysiące ludzi i część jest już spalona na popularnych
-serwisach. Psują też lepkość — gdy adres umiera, konto przenosi się na inne.
-Zdejmują najmocniejszy sygnał (cała pula pod jednym adresem), ale nie zastępują
-kilku stabilnych wyjść. Bywa, że darmowe proxy jest gorsze niż czysty VPS.
+`APIFY_PROXY_POOL*` jest też celowo **wykluczone z dziedziczenia** ze wspólnego
+`.env` — gdyby ktoś włączył pulę w sales-core-engine, nie włączy jej tutaj po
+cichu.
+
+Kod czytający plik puli został w module nietknięty (jest kopią 1:1) i zadziała,
+jeśli ktoś świadomie ustawi `APIFY_PROXY_POOL=1` i `APIFY_PROXY_POOL_FILE`.
+Format: `{"updated_at": "<ISO8601>", "proxies": [{"url": "...", "apify_ok": true}]}`,
+brane są wyłącznie wpisy z `apify_ok: true`. Zanim to zrobisz, przeczytaj akapit
+wyżej jeszcze raz.
+
+**Uczciwie o darmowych adresach**, gdyby kusiło: żyją krótko, są współdzielone
+przez tysiące ludzi i część jest już spalona na popularnych serwisach. Psują też
+lepkość — gdy adres umiera, konto przenosi się na inne. Bywa, że darmowe proxy
+jest gorsze niż czysty VPS.
 
 ### Bezpiecznik
 
@@ -250,11 +280,10 @@ python -m laweta_radar.workers.apify_proxy --check --limit 10
 Świadome pominięcia, żeby nikt ich nie szukał:
 
 - **Generatora darmowej puli proxy.** Moduł, który pobierał publiczną listę,
-  weryfikował adresy i zapisywał `.apify_proxy_pool.json`, nie został przeniesiony.
-  Strona **czytająca** ten plik działa (sekcja 4 wyżej), ale plik musisz dostarczyć
-  sam. Powód: pula bez odświeżania jest gorsza niż jej brak, a przenoszenie
-  generatora do repo, w którym nikt nie ustawił mu crona, tworzy dokładnie tę
-  pułapkę.
+  weryfikował adresy i zapisywał `.apify_proxy_pool.json`, nie został przeniesiony —
+  i nie ma być. Sama pula jest wyłączona (sekcja 4), więc generator bez niej nie ma
+  zastosowania, a jego obecność kusiłaby do odtworzenia wpisu w cronie, który
+  w repo źródłowym został świadomie usunięty.
 - **Monitora kredytów Apify.** Osobny worker odpytujący saldo wszystkich kont
   (i cała rodzina `APIFY_CREDITS_*`) nie został przeniesiony. Gdy się pojawi, ma
   korzystać z `proxies_for_token()` i **nie** wychodzić bezpośrednio: poll

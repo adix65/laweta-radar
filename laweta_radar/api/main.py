@@ -79,6 +79,15 @@ def health() -> dict:
             "baza_ustawiona": bool(settings.BAZA_LAT or settings.BAZA_LON),
             "max_dystans_km": settings.MAX_DYSTANS_KM,
         },
+        # Klucze Apify nie należą do tego repo — przychodzą ze wspólnego .env
+        # sales-core-engine. Bez tej sekcji „brak kluczy Apify" wyglądałoby na
+        # problem lawety, a najczęstszą przyczyną jest zła ŚCIEŻKA do tamtego
+        # pliku. Podajemy ścieżkę i liczbę zmiennych — nigdy wartości.
+        "wspolna_pula_apify": {
+            "plik": str(settings.sciezka_wspolnego_env() or ""),
+            "znaleziony": settings.sciezka_wspolnego_env() is not None,
+            "wczytanych_zmiennych": settings.WSPOLNE_APIFY_ILE,
+        },
     }
 
 

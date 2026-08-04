@@ -30,19 +30,32 @@ echo "=== 2. Grupy FB ==="
 "$PY" -m laweta_radar.config.groups
 
 echo
-echo "=== 3. Klucze Apify (rotacja) ==="
+echo
+echo "=== 3. Wspólna pula Apify (z .env sales-core-engine) ==="
+# Klucze i proxy NIE należą do tego repo — przychodzą ze wspólnego pliku.
+# „0 zmiennych" tutaj wyjaśnia z góry każde „brak kluczy Apify" niżej.
+"$PY" -c "
+from laweta_radar.config import settings as s
+sciezka = s.sciezka_wspolnego_env()
+print(f'  plik:     {sciezka or \"NIE ZNALEZIONO (ustaw SHARED_ENV_PATH)\"}')
+print(f'  wczytano: {s.WSPOLNE_APIFY_ILE} zmiennych APIFY_*')
+print('  uwaga:    APIFY_PROXY_POOL* jest świadomie NIE dziedziczone — pula ma być wyłączona')
+"
+
+echo
+echo "=== 4. Klucze Apify (rotacja) ==="
 "$PY" -m laweta_radar.workers.apify_keys
 
 echo
-echo "=== 4. Proxy dla Apify (bez sieci) ==="
+echo "=== 5. Proxy dla Apify (bez sieci) ==="
 "$PY" -m laweta_radar.workers.apify_proxy
 
 echo
-echo "=== 5. Telegram (WYSYŁA wiadomość testową) ==="
+echo "=== 6. Telegram (WYSYŁA wiadomość testową) ==="
 "$PY" -m laweta_radar.services.telegram_notify
 
 echo
-echo "=== 6. Baza (wymaga wstającego API albo psql) ==="
+echo "=== 7. Baza (wymaga wstającego API albo psql) ==="
 echo "Migracje:  bash laweta_radar/scripts/migrate.sh"
 echo "Stan:      curl -s localhost:8002/health"
 echo

@@ -22,7 +22,9 @@ grupy FB ──> fb_fetcher ──> gate ──> classifier ──> geo ──> 
 Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 
 - **fb_fetcher** — pobiera najnowsze posty ze zweryfikowanych grup przez Apify.
-  Klucze rotują się po puli kont, ruch wychodzi przez proxy per konto.
+  Klucze rotują się po **wspólnej z sales-core-engine** puli kont, ruch wychodzi
+  przez proxy per konto. Budżet runów rozdziela między grupy bandyta
+  (`services/bandit.py`), bo kredyt jest wspólny z drugim systemem.
 - **gate** — tani filtr słowny **przed** modelem. Bez niego płacilibyśmy Claude'owi
   za każdy post o sprzedaży felg.
 - **classifier** — Claude decyduje, czy to realne zlecenie, i wyciąga z posta to,
@@ -35,11 +37,11 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 ### Stan repo
 
 Ten commit to **szkielet + przeniesiona infrastruktura Apify**. Działa już:
-konfiguracja, rotacja kluczy, proxy, transport Telegrama, API diagnostyczne,
-migracja tabeli `posty`. Kroki pipeline'u (`workers/gate.py`,
-`workers/fb_fetcher.py`, `workers/classifier.py`, `services/geo.py`) dochodzą
-w kolejnych krokach — dopóki ich nie ma, system nic nie pobiera i nic nie wysyła,
-ale wstaje czysto i mówi, czego mu brakuje.
+konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
+bandyta, transport Telegrama, API diagnostyczne, migracja tabeli `posty`. Kroki
+pipeline'u (`workers/gate.py`, `workers/fb_fetcher.py`, `workers/classifier.py`,
+`services/geo.py`) dochodzą w kolejnych krokach — dopóki ich nie ma, system nic
+nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego mu brakuje.
 
 ## Struktura
 
@@ -50,8 +52,10 @@ laweta_radar/
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate)
+    bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
   config/
     settings.py        # jedyne miejsce czytające środowisko
+    shared_env.py      # dociąga klucze Apify ze WSPÓLNEGO .env sales-core-engine
     groups.py          # lista grup FB — dane, nie kod
   api/
     main.py            # FastAPI: /health
@@ -63,10 +67,45 @@ laweta_radar/
 docs/APIFY-PROXY.md    # po co proxy i jak je skonfigurować
 ```
 
-Trzy moduły oznaczone `[kopia 1:1]` pochodzą z repo, w którym chodzą produkcyjnie.
+Moduły oznaczone `[kopia 1:1]` pochodzą z repo, w którym chodzą produkcyjnie.
 Zmieniły się w nich **wyłącznie** ścieżki pakietu i komunikaty wskazujące na moduły
 nieprzeniesione tutaj — logika jest nietknięta i pilnują tego testy w
 `laweta_radar/tests/`.
+
+`bandit.py` to przypadek osobny: przeniesiona jest **matematyka Thompson Samplingu
+co do stałej** (sprawdza to `test_bandit.py`, licząc posteriory wprost ze wzorów
+z oryginału), ale źródło danych — tabela `sales_techniques_log` i katalog technik
+sprzedażowych — zostało wycięte jako domena. Szczegóły w docstringu modułu.
+
+## Infrastruktura Apify jest WSPÓŁDZIELONA
+
+Ten system **nie ma własnych kont Apify**. Stoi na tym samym VPS-ie co
+sales-core-engine i korzysta z **tej samej puli kont oraz tych samych proxy** —
+klucze dociągane są z `.env` tamtego repo (`SHARED_ENV_PATH`, domyślnie
+`/home/ubuntu/sales-core-engine/.env`). Druga pula kont dałaby tylko dwa razy
+mocniejszy sygnał multi-accountingu przy zerowym zysku.
+
+Przepisywane są **wyłącznie** `APIFY_API_TOKEN*`, `APIFY_PROXY{N}`,
+`APIFY_PROXY_URL(S)` i `APIFY_PROXY_REQUIRED`. Reszta tamtego pliku — jego
+`DATABASE_URL`, jego `TELEGRAM_*` — jest świadomie ignorowana. Bez tego
+ograniczenia laweta bez własnego `DATABASE_URL` po cichu pisałaby do bazy
+sprzedażowej, a alerty o zleceniach szłyby na czat handlowca. Testy
+(`test_config.py`) pilnują, że nic spoza listy `APIFY_*` nie przechodzi.
+
+**Baza danych pozostaje osobna** (`laweta`) — współdzielimy tylko wyjście do
+Apify, nie dane.
+
+> **Budżet Apify jest wspólny.** Każdy run lawety odejmuje kredyt tej samej puli,
+> z której korzysta sales-core-engine. Dlatego fetcher rozdziela runy między grupy
+> bandytą (`services/bandit.py`): run wydany na martwą grupę to run **zabrany
+> drugiemu systemowi**, a nie tylko zmarnowany.
+
+**Darmowa pula proxy zostaje wyłączona.** `APIFY_PROXY_POOL=1` nie jest tu
+wspierane i nie ma wpisu odświeżania w cronie — odświeżanie zwracało zero żywych
+adresów z 411 kandydatów, a jedyny stary wpis przejmował przez rendezvous hashing
+komplet kont i zamieniał runy w timeouty. Zmienna jest też wykluczona
+z dziedziczenia, więc włączenie puli w tamtym repo nie włączy jej tutaj.
+Szczegóły: `docs/APIFY-PROXY.md`.
 
 ## Zasady obowiązujące w całym repo
 
@@ -132,15 +171,19 @@ awarii mieszałoby dwie zupełnie różne sytuacje.
 Świeży klon **nie strzela do Apify** — wszystkie wpisy w `config/groups.py` są bez
 adresu i ze statusem `unverified`. Żeby ruszyło:
 
-1. wpisz `APIFY_API_TOKEN1` (i kolejne) do `.env`,
+1. wskaż wspólny `.env` z pulą Apify — `SHARED_ENV_PATH` w `.env` lawety albo
+   symlink. Sprawdź, że działa:
+   `python -m laweta_radar.workers.apify_keys` ma pokazać niezerową liczbę kluczy.
+   Własnych `APIFY_API_TOKEN*` **nie wpisujesz** (patrz sekcja o współdzieleniu),
 2. dodaj realne grupy w `config/groups.py`, zweryfikuj każdą ręcznie
    (publiczna? żywa? zgłoszeniowa czy sama reklama lawet?) i dopiero wtedy przestaw
-   `status` na `"ok"`,
-3. ustaw proxy — **zanim** ruszysz z pulą kont: `docs/APIFY-PROXY.md`.
+   `status` na `"ok"`.
 
-Punkt 3 nie jest opcjonalny przy więcej niż kilku kontach. Pula kont wychodząca
-z jednego IP wygląda dla Apify jak multi-accounting i kończy się utratą **całej
-puli naraz**, nie jednego konta.
+Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
+przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
+„BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
+(`docs/APIFY-PROXY.md`). Pula wychodząca z jednego IP wygląda dla Apify jak
+multi-accounting i kończy się utratą **całej puli naraz**, nie jednego konta.
 
 ## Deploy (VPS + PM2 + nginx)
 
@@ -161,6 +204,12 @@ pm2 save && pm2 startup
 `ecosystem.config.js` zakłada `/home/ubuntu/laweta-radar` — podmień, jeśli
 rozpakowujesz gdzie indziej. PM2 startuje procesy ze swojego środowiska, nie
 z powłoki logowania, dlatego `scripts/start_api.sh` wczytuje `.env` jawnie.
+
+W `.env` **nie wpisujesz kluczy Apify** — ustaw tylko `SHARED_ENV_PATH` na `.env`
+sales-core-engine (domyślna ścieżka `/home/ubuntu/sales-core-engine/.env` zwykle
+wystarcza). Użytkownik, z którego chodzi PM2, musi mieć prawo odczytu tamtego
+pliku — jeśli go nie ma, laweta wstanie i będzie milczeć, bo rotator zobaczy zero
+kluczy. Sprawdzisz to `bash laweta_radar/scripts/check_setup.sh`.
 
 nginx — API **musi** zostać na loopbacku (nie ma własnej autoryzacji, więc dostępem
 zarządza wyłącznie nginx):
@@ -200,6 +249,7 @@ pm2 restart laweta-api
 | nic nie przychodzi na Telegram | `python -m laweta_radar.services.telegram_notify` |
 | „brak kluczy Apify", choć są w `.env` | `source laweta_radar/scripts/env-shell.sh` |
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
+| rotator widzi 0 kluczy | zła ścieżka do wspólnego `.env` — `python -m laweta_radar.config.settings` |
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |
 | stan API i bazy | `curl -s localhost:8002/health` |

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from laweta_radar.config import shared_env
+
 # Katalog pakietu — tu leży .env, tu rotacja kluczy Apify trzyma swój plik stanu.
 # Wszystkie moduły liczą tę ścieżkę tak samo (parent.parent od siebie), więc
 # .env jest jeden, niezależnie od tego, co odpalasz.
@@ -31,6 +33,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # w skrypcie deploya) mają wygrywać z plikiem. Inaczej deploy przez PM2 czytałby
 # .env developera, który akurat został na dysku.
 load_dotenv(BASE_DIR / ".env", override=False)
+
+
+# Klucze Apify NIE należą do tego repo — przychodzą ze wspólnego .env
+# sales-core-engine (ta sama pula kont, te same proxy). Całość wraz z listą
+# przepisywanych zmiennych i uzasadnieniem: config/shared_env.py. Tutaj tylko
+# re-eksport, żeby wołający miał jedno miejsce do pytania o konfigurację.
+sciezka_wspolnego_env = shared_env.sciezka_wspolnego_env
+_wczytaj_wspolne_apify = shared_env.wczytaj
+WSPOLNE_APIFY_ILE = shared_env.ILE
+WSPOLNE_APIFY_SKAD = shared_env.SKAD
 
 
 def _txt(name: str, default: str = "") -> str:
@@ -112,11 +124,12 @@ MAX_WIEK_POSTA_H = _int("MAX_WIEK_POSTA_H", 12)
 # kluczu i wracać po poprawce po kolejny.
 # ---------------------------------------------------------------------------
 OPIS_ZMIENNYCH: dict[str, str] = {
-    "DATABASE_URL": "DSN do bazy `laweta` (postgresql://user:haslo@host:5432/laweta)",
+    "DATABASE_URL": "DSN do bazy `laweta` — OSOBNEJ od sales-core-engine",
     "ANTHROPIC_API_KEY": "klucz API Anthropic — bez niego klasyfikator nie ruszy",
     "TELEGRAM_BOT_TOKEN": "token bota od @BotFather",
     "TELEGRAM_CHAT_ID": "ID czatu operatora (bot musi tam być dodany)",
-    "APIFY_API_TOKEN1": "pierwszy klucz Apify (rotacja: APIFY_API_TOKEN1..N)",
+    "APIFY_API_TOKEN1": ("klucz Apify — normalnie przychodzi ze WSPÓLNEGO .env "
+                         "(SHARED_ENV_PATH), nie ustawiaj go tutaj bez powodu"),
 }
 
 
@@ -165,7 +178,8 @@ def opis_srodowiska() -> str:
     }
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
-    ) + f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+    ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+         f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 
 
 # Podgląd konfiguracji bez odpalania czegokolwiek:
