@@ -14,5 +14,13 @@ anthropic>=0.40.0        # klasyfikator postów
 python-dotenv>=1.0.0     # .env — jedyne źródło konfiguracji
 pytest>=8.0.0            # testy offline (laweta_radar/tests/)
 
+# WEB PUSH jest OPCJONALNY i świadomie NIE jest na liście wyżej. Szyfrowanie
+# treści push ciągnie `cryptography` — największą paczkę w całym projekcie,
+# z kompilacją na części VPS-ów. Deploy korzystający wyłącznie z Telegrama
+# (czyli domyślny) nie ma powodu jej budować:
+#   pip install pywebpush
+# Bez niej `services/powiadomienia._wyslij_push` po prostu milczy, a Telegram
+# dowozi alerty tak samo.
+
 # socks5:// w APIFY_PROXY_* wymaga dodatkowo: pip install "httpx[socks]"
 # Dla http:// i https:// nic nie trzeba dokładać — patrz docs/APIFY-PROXY.md.
