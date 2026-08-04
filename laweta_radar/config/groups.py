@@ -68,6 +68,73 @@ APIFY_SORT = "CHRONOLOGICAL"   # nie "TOP" — interesuje nas świeżość, nie 
 APIFY_TIMEOUT = 300            # s na jeden run actora; po tym czasie run jest stracony
 
 
+# ── BUDŻET I HARMONOGRAM (workers/fb_fetcher.py) ────────────────────────────
+#
+# WSZYSTKO PONIŻEJ LICZY SIĘ W POBRANYCH POSTACH, nie w runach. Apify rozlicza
+# tego actora ZA POBRANY POST, więc run jest darmowy, a jego zawartość nie jest.
+# To odwraca dwie intuicje:
+#   • batchowanie grup w jednym runie NIE oszczędza kredytu — oszczędza tylko
+#     narzut uruchomienia (i tak jest zabronione, jeśli pomiar pokaże, że
+#     `resultsLimit` jest globalny, patrz docs/POMIAR-ACTORA.md, pytanie 2);
+#   • płacimy także za post, który widzieliśmy dwadzieścia razy. Deduplikacja
+#     w bazie chroni model i Telegram, ale nie chroni rachunku za Apify.
+
+# Cena katalogowa jednego pobranego posta. UWAGA — NIE ZWERYFIKOWANA na stronie
+# actora: polityka sieciowa środowiska, w którym powstawał ten kod, blokuje
+# apify.com. W założeniach do fetchera pada rząd wielkości 2,60 USD za 1000
+# postów i taką wartość tu przyjęto; `scripts/pomiar_actora.py` ma własną,
+# WYŻSZĄ (0,005 USD/post) z wcześniejszego odczytu. Rozjazd jest świadomy
+# i rozstrzyga go POMIAR (pytanie 3), a nie kolejny odczyt ze strony — do tego
+# czasu ta liczba służy WYŁĄCZNIE do szacunku pokazywanego przed wydaniem
+# pieniędzy (`--sucho`), nigdy do decyzji podejmowanych automatycznie.
+CENA_USD_ZA_POST = 0.0026
+
+# Widełki odstępu między przebiegami JEDNEJ grupy.
+# Dolna granica zależy od ścieżki z pomiaru actora i to jest różnica finansowa,
+# nie kosmetyczna: w ścieżce A koszt dobowy nie zależy od częstotliwości (actor
+# oddaje sam przyrost), a w ścieżce B każdy przebieg to pełny `resultsLimit`
+# opłaconych postów — czyli gęstsze pytanie boli wprost proporcjonalnie.
+MIN_INTERWAL_MIN_A = 5
+MIN_INTERWAL_MIN_B = 15
+MAX_INTERWAL_MIN = 120      # nawet martwa grupa dostaje szansę dwa razy na dobę... i tyle
+
+# Dobowa pula postów dla grupy BEZ historii. Bez niej nowa grupa nigdy nie
+# zbierze danych, na podstawie których bandyta mógłby jej cokolwiek przyznać —
+# a grupa bez danych wygląda dla bandyty tak samo jak grupa bezwartościowa.
+PULA_STARTOWA_POSTOW = 60
+
+# Z ilu dni liczymy wydajność grupy (zlecenia / pobrane posty) dla bandyty.
+# Siedem, bo to najkrótsze okno obejmujące pełny tydzień: soboty i niedziele
+# mają inny ruch niż wtorek, a okno pięciodniowe kazałoby bandycie porównywać
+# grupy zmierzone w różnych dniach tygodnia.
+OKNO_WYDAJNOSCI_DNI = 7
+
+# Limit adaptacyjny per grupa — okna liczone w GODZINACH, nie w dniach jak
+# w repo źródłowym. Post na lawetę żyje kilkadziesiąt minut, więc doba jest tu
+# jednostką bezużyteczną: mieści całe życie i śmierć zlecenia.
+OKNO_TEMPA_H = 24 * 7       # z ilu godzin historii liczymy tempo grupy
+MIN_POSTOW_NA_GRUPE = 2     # podłoga — cicha grupa nigdy nie spada do zera
+DOMYSLNIE_POSTOW_NA_GRUPE = 10   # bootstrap dla grupy bez historii
+ZAPAS_NA_PACZKE = 3         # mnożnik nad średnim tempem
+
+# Sufit limitu — RÓŻNY dla obu ścieżek, i to jest sedno różnicy między nimi.
+# ŚCIEŻKA A: koszt tnie warunek wieku, więc actor i tak przerwie paginację
+#   wcześniej. Hojny sufit jest tu ZALETĄ — chroni przed zgubieniem paczki
+#   postów, którą moderator zatwierdził naraz.
+# ŚCIEŻKA B: limit JEST kosztem, co do sztuki. Każdy punkt to wydane pieniądze,
+#   więc sufit musi być ciasny, a jego podniesienie jest decyzją finansową.
+MAX_POSTOW_NA_GRUPE_A = 50
+MAX_POSTOW_NA_GRUPE_B = 12
+
+# `onlyPostsNewerThan` liczymy jako odstęp grupy razy ten mnożnik, z podłogą.
+# Dwukrotność, bo moderatorzy grup zatwierdzają posty z opóźnieniem: post
+# opublikowany tuż przed poprzednim przebiegiem bywa widoczny dopiero teraz,
+# a okno równe odstępowi wycięłoby go bezpowrotnie. Podłoga jest po to, żeby
+# przy odstępie 5 minut nie pytać o okno, którego actor może nie obsłużyć.
+MNOZNIK_OKNA = 2
+MIN_OKNO_MIN = 30
+
+
 def grupy_do_pobrania(grupy=None) -> list[dict[str, str]]:
     """Tylko wpisy nadające się do pobrania: zweryfikowane i z adresem.
 

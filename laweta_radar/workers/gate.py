@@ -37,9 +37,19 @@ Dwa miejsca, w których ta kolejność ratuje realne pieniądze:
   • "szukam lawety" ma 13 znaków, a warstwa 3 odrzuca wszystko poniżej 15.
     Warstwa 2 łapie ten post wcześniej i dlatego limit długości jest nieszkodliwy.
 
-ZERO WYWOŁAŃ SIECIOWYCH i zero I/O. Moduł działa offline, w mikrosekundach, i da
-się go zaimportować bez bazy, bez kluczy i bez internetu. Zapis decyzji do bazy
-robi wołający — kontrakt kolumn: `wiersz_do_zapisu()` + api/migrations/0002_gate.sql.
+CZTERY JĘZYKI: PL / DE / CS / SK. Każdy ma WŁASNY słownik o tej samej strukturze
+warstw i tych samych wagach; czeski i słowacki dzielą jeden, z wariantami obu
+w środku. Powód jest ten sam co wyżej — asymetria kosztów. Niemieckie „Suche
+Autotransport von München nach Krakau, Fahrzeug fährt nicht" to wzorcowe zlecenie
+transportowe, a przy samych polskich wzorcach nie trafia ANI JEDNEGO i wylatuje
+z zerem punktów, wyglądając w logach dokładnie jak odrzucona reklama felg.
+Szczegóły rozstrzygania między słownikami: docstring `gate()`.
+
+ZERO WYWOŁAŃ SIECIOWYCH i zero I/O — także w detekcji języka, która jest
+heurystyką na znakach i słowach funkcyjnych, a nie biblioteką. Moduł działa
+offline, w mikrosekundach, i da się go zaimportować bez bazy, bez kluczy
+i bez internetu. Zapis decyzji do bazy robi wołający — kontrakt kolumn:
+`wiersz_do_zapisu()` + api/migrations/0002_gate.sql i 0003_fetcher.sql.
 
 CLI:
     python -m laweta_radar.workers.gate "treść posta"
@@ -479,13 +489,527 @@ HAMULCE_WARUNKOWE: list[tuple[str, int, str, str]] = [
     (r"kilka dni temu", -2, "HAMULEC", "PILNOSC"),
 ]
 
-_WYGASZENIE = _skompiluj_liste(WYGASZENIE)
-_PRZEPUSZCZENIE = _skompiluj_liste(PRZEPUSZCZENIE)
-_ODRZUCENIE = _skompiluj_liste(ODRZUCENIE)
-_PUNKTACJA = _skompiluj_liste(PUNKTACJA)
-_HAMULCE = _skompiluj_liste(HAMULCE)
-_HAMULCE_WARUNKOWE = [(_skompiluj(w), waga, etykieta, kat)
-                      for w, waga, etykieta, kat in HAMULCE_WARUNKOWE]
+# ===========================================================================
+# WIELOJĘZYCZNOŚĆ
+#
+# Wszystko powyżej to słownik POLSKI. Poniżej ta sama struktura warstw i te same
+# wagi dla niemieckiego oraz czesko-słowackiego.
+#
+# DLACZEGO W OGÓLE: bramka jednojęzyczna jest cicha i śmiertelna. Niemieckie
+# „Suche Autotransport von München nach Krakau, Fahrzeug fährt nicht" to wzorcowe
+# zlecenie transportowe — i przy polskich wzorcach nie trafia ANI JEDNEGO, dostaje
+# zero punktów i wylatuje. W logach wygląda dokładnie jak odrzucona reklama felg,
+# więc nikt się o tym nie dowie. To jest ta sama asymetria kosztów, na której stoi
+# cały ten moduł, tylko w wariancie, którego nie widać w polskim korpusie.
+#
+# CZESKI I SŁOWACKI DZIELĄ JEDEN SŁOWNIK, z wariantami obu języków w środku.
+# Rozdzielenie ich dałoby dwie listy różniące się w połowie pozycji jedną literą
+# („odtahovka" / „odťahovka"), czyli dwa miejsca do zapomnienia przy każdej
+# zmianie. Po normalizacji część wariantów i tak się ZLEWA (obie formy dają
+# „odtahov"), a część nie („hledam" / „hladam") — dlatego lista nie jest
+# symetryczna i nie jest to niedopatrzenie.
+#
+# Detekcja języka ROZRÓŻNIA cs od sk mimo wspólnego słownika, bo znacznik nie
+# służy filtrowaniu — służy człowiekowi, który ma oddzwonić.
+#
+# WZORCE PISZEMY W FORMIE ZNORMALIZOWANEJ, tak samo jak polskie: bez umlautów,
+# haczków i długości („fährt nicht" -> „fahrt nicht", „potřebuji" -> „potrebuji").
+# Normalizacja zbija je wszystkie, więc wzorzec z diakrytykiem nie trafiłby nigdy.
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class Slownik:
+    """Komplet wzorców dla jednego języka — ta sama struktura we wszystkich.
+
+    `jezyk` jest etykietą słownika, nie zawsze językiem posta: słownik
+    czesko-słowacki obsługuje dwa języki, a znacznik w wyniku bierze się
+    z detekcji, nie stąd.
+    """
+
+    jezyk: str
+    wygaszenie: list
+    przepuszczenie: list
+    odrzucenie: list
+    punktacja: list
+    hamulce: list
+    hamulce_warunkowe: list
+
+
+# ---------------------------------------------------------------------------
+# NIEMIECKI
+#
+# Rynek transportowy, nie awaryjny: niemiecka grupa dowozi głównie „przywieź mi
+# auto z Niemiec do Polski", a nie „stoję na poboczu". Dlatego warstwa
+# przepuszczenia jest tu szersza po stronie przewozu niż po stronie awarii.
+# ---------------------------------------------------------------------------
+WYGASZENIE_DE: list[tuple[str, int, str]] = [
+    (r"(hat sich )?erledigt", 0, "wygaszone"),
+    (r"nicht mehr aktuell", 0, "wygaszone"),
+    (r"schon geregelt", 0, "wygaszone"),
+    (r"brauche (es )?nicht mehr", 0, "wygaszone"),
+    (r"hat sich gefunden", 0, "wygaszone"),
+    # „gefunden" SAMO jest tu ZAWĘŻONE — dokładnie z tego powodu, dla którego
+    # zawężono polskie „znalazlem": „habe niemanden gefunden" to POCZĄTEK
+    # zlecenia, a nie jego koniec, i wzorzec w formie dosłownej kasowałby je
+    # razem z tymi prawdziwie wygaszonymi.
+    (r"(jemanden|jemand|eine firma|hilfe|einen abschleppdienst) gefunden",
+     0, "wygaszone"),
+]
+
+PRZEPUSZCZENIE_DE: list[tuple[str, int, str]] = [
+    # --- prośba wprost ---
+    (r"suche (einen )?autotransport", 0, "prosba wprost"),
+    (r"suche (einen )?abschlepp[a-z]*", 0, "prosba wprost"),
+    (r"brauche (einen |eine )?abschlepp[a-z]*", 0, "prosba wprost"),
+    (r"brauche (einen )?transport", 0, "prosba wprost"),
+    (r"wer kann (mein |mir |mein auto |mein fahrzeug )?abschleppen", 0, "prosba wprost"),
+    (r"wer kann helfen", 0, "prosba wprost"),
+    (r"kann (mir )?jemand helfen", 0, "prosba wprost"),
+    (r"wer holt", 0, "prosba wprost"),
+    (r"wer hat platz", 0, "prosba wprost"),
+    (r"(fahrzeug|auto|wagen|pkw) transportier[a-z]*", 0, "prosba wprost"),
+    (r"(fahrzeug|auto|wagen) uberfuhr[a-z]*", 0, "prosba wprost"),
+    # SAMO „abschleppen" / „abschleppdienst" NIE jest tu wzorcem — i to jest ta
+    # sama decyzja, dla której polski słownik nie ma w tej warstwie samego
+    # „holowanie". Warstwa 2 bije warstwę 3, więc bezokolicznik usługi wpuszczałby
+    # KAŻDĄ reklamę konkurencji („Wir bieten Abschleppdienst, günstige Preise").
+    # Nazwa usługi żyje w PUNKTACJI jako AKCJA (+3) i tam robi swoją robotę.
+
+    # --- transport planowany (główny produkt na tym rynku) ---
+    (r"nach polen (bringen|transportieren|uberfuhren)", 0, "transport planowany"),
+    (r"auto gekauft", 0, "transport planowany"),
+    (r"gekauftes auto", 0, "transport planowany"),
+    (r"vom (handler|autohaus|hof)", 0, "transport planowany"),
+    (r"aus (deutschland|holland|belgien|frankreich|italien|osterreich)",
+     0, "transport planowany"),
+    (r"ruckfahrt", 0, "transport planowany"),
+    (r"noch platz (auf|frei)", 0, "transport planowany"),
+
+    # --- zdarzenie / awaria ---
+    (r"springt nicht (mehr )?an", 0, "zdarzenie drogowe"),
+    (r"startet nicht (mehr)?", 0, "zdarzenie drogowe"),
+    (r"motor kaputt", 0, "zdarzenie drogowe"),
+    (r"getriebe kaputt", 0, "zdarzenie drogowe"),
+    (r"panne", 0, "zdarzenie drogowe"),
+    (r"liegen ?geblieben", 0, "zdarzenie drogowe"),
+    (r"fahrt nicht (mehr)?", 0, "zdarzenie drogowe"),
+    (r"nicht (fahrbereit|fahrtuchtig)", 0, "zdarzenie drogowe"),
+    (r"bleibt stehen", 0, "zdarzenie drogowe"),
+    (r"unfall", 0, "zdarzenie drogowe"),
+    (r"totalschaden", 0, "zdarzenie drogowe"),
+]
+
+ODRZUCENIE_DE: list[tuple[str, int, str]] = [
+    # „biete" jest ZAWĘŻONE tak samo jak polskie „oferuje": „biete 300 euro fur
+    # den transport" to KLIENT Z GOTÓWKĄ, nie konkurencja.
+    (r"biete (abschlepp|transport|uberfuhr|meine dienste|service|hilfe an)",
+     0, "autopromocja"),
+    (r"wir bieten", 0, "autopromocja"),
+    (r"wir ubernehmen", 0, "autopromocja"),
+    (r"(gunstige|faire|beste) preise", 0, "autopromocja"),
+    (r"rund um die uhr", 0, "autopromocja"),
+    (r"24/7 service", 0, "autopromocja"),
+    (r"verkaufe (anhanger|abschleppwagen|autotransporter|trailer|auflieger)",
+     0, "sprzedaz sprzetu"),
+    (r"zu verkaufen: (anhanger|abschleppwagen|trailer)", 0, "sprzedaz sprzetu"),
+    (r"suche fahrer", 0, "ogloszenie o pracy"),
+    (r"wir suchen (einen )?fahrer", 0, "ogloszenie o pracy"),
+    (r"stellenangebot", 0, "ogloszenie o pracy"),
+    (r"jobangebot", 0, "ogloszenie o pracy"),
+    (r"bewerbung an", 0, "ogloszenie o pracy"),
+]
+
+PUNKTACJA_DE: list[tuple[str, int, str]] = [
+    # --- POJAZD (+2) ---
+    (r"auto", 2, "POJAZD"),
+    (r"wagen", 2, "POJAZD"),
+    (r"fahrzeug", 2, "POJAZD"),
+    (r"pkw", 2, "POJAZD"),
+    (r"transporter", 2, "POJAZD"),
+    (r"motorrad", 2, "POJAZD"),
+    (r"roller", 2, "POJAZD"),
+    (r"anhanger", 2, "POJAZD"),
+    (r"wohnmobil", 2, "POJAZD"),
+    (r"oldtimer", 2, "POJAZD"),
+
+    # --- PROBLEM (+3) ---
+    (r"defekt", 3, "PROBLEM"),
+    (r"kaputt", 3, "PROBLEM"),
+    (r"motorschaden", 3, "PROBLEM"),
+    (r"getriebeschaden", 3, "PROBLEM"),
+    (r"kupplung", 3, "PROBLEM"),
+    (r"batterie", 3, "PROBLEM"),
+    (r"lichtmaschine", 3, "PROBLEM"),
+    (r"turbolader", 3, "PROBLEM"),
+    (r"werkstatt", 3, "PROBLEM"),
+    (r"mechaniker", 3, "PROBLEM"),
+    (r"reparatur", 3, "PROBLEM"),
+    (r"tuv", 3, "PROBLEM"),
+
+    # --- AKCJA (+3) ---
+    (r"transport(ieren)?", 3, "AKCJA"),
+    (r"autotransport", 3, "AKCJA"),
+    (r"abschlepp[a-z]*", 3, "AKCJA"),
+    (r"uberfuhr[a-z]*", 3, "AKCJA"),
+    (r"abhol(en|ung)", 3, "AKCJA"),
+    (r"bringen", 3, "AKCJA"),
+    (r"liefern|lieferung", 3, "AKCJA"),
+    (r"verladen", 3, "AKCJA"),
+
+    # --- MIEJSCE (+2) ---
+    (r"autobahn", 2, "MIEJSCE"),
+    (r"raststatte", 2, "MIEJSCE"),
+    (r"parkplatz", 2, "MIEJSCE"),
+    (r"standstreifen", 2, "MIEJSCE"),
+    (r"grenze", 2, "MIEJSCE"),
+    (r"bab ?[0-9]*", 2, "MIEJSCE"),
+
+    # --- TRASA (+3) ---
+    (r"nach (polen|deutschland|tschechien|osterreich)", 3, "TRASA"),
+    (r"von (deutschland|polen|holland|belgien)", 3, "TRASA"),
+    (r"richtung", 3, "TRASA"),
+
+    # --- PILNOSC (+3) ---
+    (r"dringend", 3, "PILNOSC"),
+    (r"sofort", 3, "PILNOSC"),
+    (r"notfall", 3, "PILNOSC"),
+    (r"eilig", 3, "PILNOSC"),
+    (r"heute", 3, "PILNOSC"),
+    (r"jetzt", 3, "PILNOSC"),
+
+    # --- KONTAKT (+1) ---
+    (r"telefon", 1, "KONTAKT"),
+    (r"tel", 1, "KONTAKT"),
+    (r"anrufen", 1, "KONTAKT"),
+    (r"whatsapp", 1, "KONTAKT"),
+    (r"pn", 1, "KONTAKT"),
+]
+
+HAMULCE_DE: list[tuple[str, int, str]] = [
+    (r"nur aus interesse", -3, "HAMULEC"),
+    (r"rein theoretisch", -3, "HAMULEC"),
+    (r"(ein freund|ein kollege) fragt", -2, "HAMULEC"),
+]
+
+HAMULCE_WARUNKOWE_DE: list[tuple[str, int, str, str]] = [
+    (r"was kostet", -4, "HAMULEC", "AKCJA"),
+    (r"wie viel kostet", -4, "HAMULEC", "AKCJA"),
+    (r"gestern", -2, "HAMULEC", "PILNOSC"),
+    (r"letzte woche", -2, "HAMULEC", "PILNOSC"),
+]
+
+
+# ---------------------------------------------------------------------------
+# CZESKI I SŁOWACKI — jeden słownik, warianty obu języków obok siebie.
+# ---------------------------------------------------------------------------
+WYGASZENIE_CS_SK: list[tuple[str, int, str]] = [
+    (r"vyresen[oy]", 0, "wygaszone"),      # vyřešeno
+    (r"vyriesen[ey]", 0, "wygaszone"),     # vyriešené
+    (r"neaktualn[iey]", 0, "wygaszone"),   # neaktuální / neaktuálne
+    (r"uz nepotrebuj[ie]", 0, "wygaszone"),
+    (r"zrusen[oey]", 0, "wygaszone"),
+    (r"uz (mam|je) (vyreseno|vyriesene|to)", 0, "wygaszone"),
+    # Zawężone tak samo jak polskie „znalazlem" i niemieckie „gefunden".
+    (r"(nasel jsem|nasiel som) (uz )?(nekoho|niekoho|odtah|firmu|pomoc)",
+     0, "wygaszone"),
+]
+
+PRZEPUSZCZENIE_CS_SK: list[tuple[str, int, str]] = [
+    # --- prośba wprost (formy, które się NIE zlewają po normalizacji) ---
+    (r"hledam odtah[a-z]*", 0, "prosba wprost"),
+    (r"hladam odtah[a-z]*", 0, "prosba wprost"),
+    (r"potrebuji odtah[a-z]*", 0, "prosba wprost"),
+    (r"potrebuju odtah[a-z]*", 0, "prosba wprost"),
+    (r"potrebujem odtah[a-z]*", 0, "prosba wprost"),
+    (r"prosim o odtah", 0, "prosba wprost"),
+    (r"kdo pomuze", 0, "prosba wprost"),
+    (r"kto pomoze", 0, "prosba wprost"),
+    (r"(kdo|kto) ma (volno|volny cas)", 0, "prosba wprost"),
+    (r"(kdo|kto) (privezie|priveze|odveze|odvezie)", 0, "prosba wprost"),
+    # --- czynność Z DOPEŁNIENIEM (po normalizacji wspólna dla obu języków) ---
+    # Samo „odtahov*" tu NIE stoi z tego samego powodu co niemieckie
+    # „abschleppen": warstwa 2 bije warstwę 3, więc nazwa usługi wpuszczałaby
+    # reklamy („Nabízíme odtahovou službu, výhodné ceny"). Nazwa żyje
+    # w PUNKTACJI jako AKCJA (+3).
+    (r"odtah aut[a-z]*", 0, "prosba wprost"),
+    (r"prevoz aut[a-z]*", 0, "prosba wprost"),
+    (r"preprava aut[a-z]*", 0, "prosba wprost"),
+    (r"prevezt|previezt", 0, "prosba wprost"),
+    # --- transport planowany ---
+    (r"koupil jsem auto", 0, "transport planowany"),
+    (r"kupil som auto", 0, "transport planowany"),
+    (r"z (nemecka|rakouska|holandska|nemecko)", 0, "transport planowany"),
+    (r"z autobazar[a-z]*", 0, "transport planowany"),
+    # --- awaria / zdarzenie ---
+    (r"nenastartuje", 0, "zdarzenie drogowe"),
+    (r"nestartuje", 0, "zdarzenie drogowe"),
+    (r"nejde nastartovat", 0, "zdarzenie drogowe"),
+    (r"nepojizdn[a-z]*", 0, "zdarzenie drogowe"),
+    (r"nepojazdn[a-z]*", 0, "zdarzenie drogowe"),
+    (r"zustal jsem stat", 0, "zdarzenie drogowe"),
+    (r"zostal som stat", 0, "zdarzenie drogowe"),
+    (r"nehod[auy]", 0, "zdarzenie drogowe"),
+    (r"havari[aey]", 0, "zdarzenie drogowe"),
+]
+
+ODRZUCENIE_CS_SK: list[tuple[str, int, str]] = [
+    # „nabizim/ponukam" zawężone jak polskie „oferuje" — sama oferta pieniędzy
+    # to klient, nie konkurencja.
+    (r"(nabizim|nabizime|ponukam|ponukame) (odtah[a-z]*|prepravu|prevoz|"
+     r"sluzby|nase sluzby)", 0, "autopromocja"),
+    (r"(vyhodne|levne|lacne|najlepsie) ceny", 0, "autopromocja"),
+    (r"nonstop (odtah|servis)", 0, "autopromocja"),
+    (r"(prodam|predam) (odtahovku|prives|privesny vozik|navjes)",
+     0, "sprzedaz sprzetu"),
+    (r"(hledame|hladame) (ridice|vodica|vodicov)", 0, "ogloszenie o pracy"),
+    (r"(prijmeme|primeme) (ridice|vodica)", 0, "ogloszenie o pracy"),
+    (r"(nabidka|ponuka) prace", 0, "ogloszenie o pracy"),
+]
+
+PUNKTACJA_CS_SK: list[tuple[str, int, str]] = [
+    # --- POJAZD (+2) ---
+    (r"auto", 2, "POJAZD"),
+    (r"vozidl[oauy]", 2, "POJAZD"),
+    (r"vuz|voz", 2, "POJAZD"),
+    (r"dodavk[auy]", 2, "POJAZD"),
+    (r"motork[auy]", 2, "POJAZD"),
+    (r"prives|privesu", 2, "POJAZD"),
+    (r"karavan", 2, "POJAZD"),
+
+    # --- PROBLEM (+3) ---
+    (r"poruch[auy]", 3, "PROBLEM"),
+    (r"rozbit[eyaou]", 3, "PROBLEM"),
+    (r"pokazen[eyao]", 3, "PROBLEM"),
+    (r"motor", 3, "PROBLEM"),
+    (r"prevodovk[auy]", 3, "PROBLEM"),
+    (r"spojk[auy]", 3, "PROBLEM"),
+    (r"baterk[auy]|bateri[ei]", 3, "PROBLEM"),
+    (r"alternator", 3, "PROBLEM"),
+    (r"servis[uy]?", 3, "PROBLEM"),
+    (r"mechanik[auy]?", 3, "PROBLEM"),
+    (r"oprav[auy]", 3, "PROBLEM"),
+
+    # --- AKCJA (+3) ---
+    (r"odtah[a-z]*", 3, "AKCJA"),
+    (r"prevoz|prepravu?", 3, "AKCJA"),
+    (r"odvez[a-z]*", 3, "AKCJA"),
+    (r"nalozit|nalozenie", 3, "AKCJA"),
+    (r"dopravit|dopravu", 3, "AKCJA"),
+
+    # --- MIEJSCE (+2) ---
+    (r"dalnic[ie]|dialnic[ie]", 2, "MIEJSCE"),
+    (r"krajnic[ie]", 2, "MIEJSCE"),
+    (r"parkovist[ie]|parkovisk[ou]", 2, "MIEJSCE"),
+    (r"benzin[a-z]*", 2, "MIEJSCE"),
+    (r"hranic[ie]", 2, "MIEJSCE"),
+    (r"d ?[0-9]{1,2}", 2, "MIEJSCE"),
+
+    # --- TRASA (+3) ---
+    (r"do (polska|polski|nemecka|rakouska)", 3, "TRASA"),
+    (r"smer|smerom", 3, "TRASA"),
+
+    # --- PILNOSC (+3) ---
+    (r"nutne|nutno", 3, "PILNOSC"),
+    (r"surne|surn[aeo]", 3, "PILNOSC"),
+    (r"hned", 3, "PILNOSC"),
+    (r"dnes", 3, "PILNOSC"),
+    (r"co nejdriv|co najskor", 3, "PILNOSC"),
+
+    # --- KONTAKT (+1) ---
+    (r"telefon", 1, "KONTAKT"),
+    (r"tel", 1, "KONTAKT"),
+    (r"zavolat|zavolejte", 1, "KONTAKT"),
+    (r"sms", 1, "KONTAKT"),
+]
+
+HAMULCE_CS_SK: list[tuple[str, int, str]] = [
+    (r"jen ze zvedavosti|len zo zvedavosti", -3, "HAMULEC"),
+    (r"cist[eo] teoreticky", -3, "HAMULEC"),   # čistě (cz) / čisto (sk)
+    (r"(kamarad|kolega) se pta|(kamarat|kolega) sa pyta", -2, "HAMULEC"),
+]
+
+HAMULCE_WARUNKOWE_CS_SK: list[tuple[str, int, str, str]] = [
+    (r"kolik (to )?stoji", -4, "HAMULEC", "AKCJA"),
+    (r"kolko (to )?stoji", -4, "HAMULEC", "AKCJA"),
+    (r"jaka je cena", -4, "HAMULEC", "AKCJA"),
+    (r"vcera", -2, "HAMULEC", "PILNOSC"),
+    (r"minuly tyden|minuly tyzden", -2, "HAMULEC", "PILNOSC"),
+]
+
+
+def _zbuduj_slownik(jezyk: str, wygaszenie, przepuszczenie, odrzucenie,
+                    punktacja, hamulce, hamulce_warunkowe) -> Slownik:
+    """Kompilacja RAZ, przy imporcie — bramka stoi na ścieżce każdego posta."""
+    return Slownik(
+        jezyk=jezyk,
+        wygaszenie=_skompiluj_liste(wygaszenie),
+        przepuszczenie=_skompiluj_liste(przepuszczenie),
+        odrzucenie=_skompiluj_liste(odrzucenie),
+        punktacja=_skompiluj_liste(punktacja),
+        hamulce=_skompiluj_liste(hamulce),
+        hamulce_warunkowe=[(_skompiluj(w), waga, etykieta, kat)
+                           for w, waga, etykieta, kat in hamulce_warunkowe],
+    )
+
+
+_PL = _zbuduj_slownik("pl", WYGASZENIE, PRZEPUSZCZENIE, ODRZUCENIE,
+                      PUNKTACJA, HAMULCE, HAMULCE_WARUNKOWE)
+_DE = _zbuduj_slownik("de", WYGASZENIE_DE, PRZEPUSZCZENIE_DE, ODRZUCENIE_DE,
+                      PUNKTACJA_DE, HAMULCE_DE, HAMULCE_WARUNKOWE_DE)
+_CS_SK = _zbuduj_slownik("cs", WYGASZENIE_CS_SK, PRZEPUSZCZENIE_CS_SK,
+                         ODRZUCENIE_CS_SK, PUNKTACJA_CS_SK, HAMULCE_CS_SK,
+                         HAMULCE_WARUNKOWE_CS_SK)
+
+# Klucze to dwuliterowe znaczniki języka POSTA; „cs" i „sk" celowo wskazują ten
+# SAM obiekt. Kod, który iteruje po słownikach, musi więc odróżniać „ile jest
+# kluczy" od „ile jest różnych słowników" (patrz `_rozne_slowniki`).
+SLOWNIKI: dict[str, Slownik] = {
+    "pl": _PL,
+    "de": _DE,
+    "cs": _CS_SK,
+    "sk": _CS_SK,
+}
+
+# Zgodność wstecz: przed wielojęzycznością te nazwy były jedynym wejściem do
+# skompilowanych warstw. Zostają jako polskie, bo tak je czyta reszta repo.
+_WYGASZENIE = _PL.wygaszenie
+_PRZEPUSZCZENIE = _PL.przepuszczenie
+_ODRZUCENIE = _PL.odrzucenie
+_PUNKTACJA = _PL.punktacja
+_HAMULCE = _PL.hamulce
+_HAMULCE_WARUNKOWE = _PL.hamulce_warunkowe
+
+
+def _rozne_slowniki() -> list[tuple[str, Slownik]]:
+    """(znacznik, słownik) — po jednym wpisie na RÓŻNY słownik, nie na klucz.
+
+    Bez tego przebieg „sprawdź wszystkimi" liczyłby czesko-słowacki dwa razy:
+    ten sam wynik, podwójny koszt i mylące logi.
+    """
+    widziane: set[int] = set()
+    wynik: list[tuple[str, Slownik]] = []
+    for znacznik, slownik in SLOWNIKI.items():
+        if id(slownik) in widziane:
+            continue
+        widziane.add(id(slownik))
+        wynik.append((znacznik, slownik))
+    return wynik
+
+
+# ---------------------------------------------------------------------------
+# DETEKCJA JĘZYKA — heurystyka na znakach i słowach funkcyjnych
+#
+# ŻADNEJ biblioteki i żadnego wywołania sieciowego. Bramka stoi na ścieżce
+# każdego pobranego posta; wołanie zewnętrznego detektora zamieniłoby filtr,
+# który kosztuje mikrosekundy, w filtr, który kosztuje pieniądze i potrafi paść.
+#
+# UWAGA — detekcja działa na treści SUROWEJ, nie znormalizowanej. Normalizacja
+# zbija dokładnie te znaki, które są tu najmocniejszą przesłanką („ř", „ł",
+# „ö"). Stąd dwa różne widoki tego samego tekstu w jednym module; to nie jest
+# niedopatrzenie.
+# ---------------------------------------------------------------------------
+
+# Znaki ROZSTRZYGAJĄCE: występują w jednym z czterech języków i nie występują
+# w pozostałych. Wspólne (á, í, é, ú, ý, ó, č, š, ž) świadomie pominięte — nie
+# niosą informacji, a rozmyłyby punktację.
+_ZNAKI: dict[str, str] = {
+    "pl": "ąęłńśźż",
+    "de": "öüß",
+    "cs": "řěů",
+    "sk": "ľĺŕô",
+}
+
+# „ä" jest i niemieckie, i słowackie — punktuje OBA, więc samo z siebie niczego
+# nie rozstrzyga i decyzja spada na słowa funkcyjne. To jest poprawne: jeden
+# znak wspólny nie powinien przeważać.
+_ZNAKI_WSPOLNE: dict[str, tuple[str, ...]] = {"ä": ("de", "sk")}
+
+# Słowa funkcyjne: krótkie, bardzo częste, NIE związane z tematem lawet. Dobrane
+# tak, żeby nie pokrywały się między językami — dlatego nie ma tu polskiego
+# „nie" (identyczne ze słowackim) ani „na"/„do"/„je" (wspólnych dla wszystkich).
+_SLOWA: dict[str, tuple[str, ...]] = {
+    "pl": ("się", "jest", "czy", "żeby", "mam", "proszę", "bardzo", "tylko",
+           "który", "gdzie", "jakiś", "coś", "kogoś", "przy", "oraz", "moje"),
+    "de": ("ich", "nicht", "und", "der", "die", "das", "ist", "von", "nach",
+           "mit", "für", "kann", "wer", "einen", "bitte", "mein", "hat", "wird"),
+    # UWAGA — z list czeskiej i słowackiej WYCIĘTE są słowa, które istnieją też
+    # po polsku: „kto" (identyczne ze słowackim), „jak" i „moc" (identyczne
+    # z czeskim). Kosztowało to konkretny błąd: polski post „kupiłem auto
+    # w Niemczech, KTO przywiezie na lawecie", napisany bez ogonków, dostawał
+    # znacznik „sk", szedł wyłącznie przez słownik czesko-słowacki i wylatywał —
+    # czyli dokładnie fałszywe odrzucenie, którego ten moduł ma nie popełniać.
+    "cs": ("jsem", "jsme", "se", "nebo", "může", "který", "není", "také",
+           "kdo", "prosím", "jsou", "musím", "dobrý den"),
+    "sk": ("som", "sme", "sa", "alebo", "môže", "ktorý", "veľmi", "aj",
+           "prosím", "musím", "chcem", "však", "dobrý deň"),
+}
+
+# Znak diakrytyczny waży więcej niż słowo funkcyjne, bo jest trudniejszy do
+# przypadkowego trafienia: „ř" w polskim poście nie wystąpi, a „mám" jest
+# i czeskie, i słowackie.
+_WAGA_ZNAKU = 3
+_WAGA_SLOWA = 2
+
+# O ile najlepszy język musi wyprzedzać drugi, żeby uznać detekcję za pewną.
+# Poniżej tej różnicy zwracamy "" i liczymy WSZYSTKIMI słownikami. Wartość jest
+# niska celowo: pomyłka w detekcji jest droższa niż trzy zbędne przejścia
+# regeksem.
+_MARGINES_PEWNOSCI = 2
+
+_WYRAZY = re.compile(r"\w+", re.UNICODE)
+
+
+def _punkty_jezykow(tresc: str) -> dict[str, int]:
+    """Ile przesłanek wskazuje na każdy z czterech języków. BEZ normalizacji."""
+    tekst = (tresc or "").casefold()
+    punkty = {j: 0 for j in _ZNAKI}
+    if not tekst:
+        return punkty
+
+    obecne = set(tekst)
+    for jezyk, znaki in _ZNAKI.items():
+        punkty[jezyk] += _WAGA_ZNAKU * sum(1 for z in znaki if z in obecne)
+    for znak, jezyki in _ZNAKI_WSPOLNE.items():
+        if znak in obecne:
+            for jezyk in jezyki:
+                punkty[jezyk] += _WAGA_ZNAKU
+
+    # Słowa funkcyjne szukane na granicach wyrazów — „se" jako podciąg trafiałoby
+    # w połowę polskich zdań („się", „sercu"), a to jest właśnie ten rodzaj
+    # fałszywej przesłanki, który przewraca detekcję na krótkim tekście.
+    wyrazy = set(_WYRAZY.findall(tekst))
+    for jezyk, slowa in _SLOWA.items():
+        punkty[jezyk] += _WAGA_SLOWA * sum(1 for s in slowa if s in wyrazy)
+    return punkty
+
+
+def wykryj_jezyk(tresc: str) -> str:
+    """Dwuliterowy znacznik języka albo "" gdy nie da się rozstrzygnąć.
+
+    "" NIE jest błędem — to normalna odpowiedź dla krótkiego posta bez znaków
+    charakterystycznych („Kto podjedzie na S19?"). Wołający sprawdza wtedy
+    wszystkimi słownikami, co jest tańsze niż zgadywanie.
+    """
+    punkty = _punkty_jezykow(tresc)
+    ranking = sorted(punkty.items(), key=lambda kv: kv[1], reverse=True)
+    najlepszy, wynik = ranking[0]
+    drugi = ranking[1][1] if len(ranking) > 1 else 0
+    if wynik <= 0 or (wynik - drugi) < _MARGINES_PEWNOSCI:
+        return ""
+    return najlepszy
+
+
+def _wariant_cs_sk(tresc: str) -> str:
+    """„cs" czy „sk" dla posta obsłużonego wspólnym słownikiem.
+
+    Słownik jest jeden, ale znacznik ma powiedzieć operatorowi, czy dzwoni po
+    czesku, czy po słowacku. Przy remisie oddajemy „cs" — nie dlatego, że jest
+    bardziej prawdopodobny, tylko dlatego, że pole musi mieć wartość, a te dwa
+    języki są wzajemnie zrozumiałe (polski dla obu nie jest).
+    """
+    punkty = _punkty_jezykow(tresc)
+    return "sk" if punkty.get("sk", 0) > punkty.get("cs", 0) else "cs"
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +1056,11 @@ class GateResult:
     trafienia: list[str] = field(default_factory=list)
     werdykt: bool = True
     tryb: str = TRYB_CIEN
+    # Dwuliterowy znacznik języka posta ("pl"/"de"/"cs"/"sk") albo "" gdy nie da
+    # się rozstrzygnąć. Idzie do bazy i dalej do powiadomienia, bo od niego
+    # zależy, w jakim języku operator ma oddzwonić — a wszystkie pozostałe pola
+    # alertu są już po polsku, więc sam post tego nie zdradzi.
+    jezyk: str = "pl"
 
 
 def _etykieta(nazwa: str, wzorzec: re.Pattern[str], waga: int = 0) -> str:
@@ -545,51 +1074,38 @@ def _etykieta(nazwa: str, wzorzec: re.Pattern[str], waga: int = 0) -> str:
     return f"{nazwa}:{fraza}" + (f"({waga:+d})" if waga else "")
 
 
-def gate(tresc: str, prog: int | None = None, tryb: str | None = None) -> GateResult:
-    """Czy post ma iść do klasyfikatora AI.
+def _ocen(tekst: str, oryginal: str, slownik: Slownik, prog: int
+          ) -> tuple[bool, int, str, list[str], bool]:
+    """Cztery warstwy JEDNYM słownikiem -> (werdykt, punkty, powód, trafienia, wygaszone).
 
-    `prog` i `tryb` są nadpisywalne argumentem wyłącznie po to, żeby dało się
-    przeliczyć historyczne posty przy innym progu (scripts/raport_gate.py
-    --prog) i przetestować obie ścieżki bez dotykania środowiska.
+    Wydzielone z `gate`, żeby przy niepewnej detekcji dało się policzyć post
+    każdym słownikiem osobno i porównać wyniki. Kolejność warstw jest tu
+    nietknięta — to ona ratuje realne pieniądze (patrz docstring modułu).
     """
-    prog = settings.GATE_PROG if prog is None else prog
-    tryb = normalizuj_tryb(settings.GATE_TRYB if tryb is None else tryb)
-    oryginal = (tresc or "").strip()
-    tekst = normalizuj(tresc)
-
-    def wynik(werdykt: bool, punkty: int, powod: str, trafienia: list[str]) -> GateResult:
-        return GateResult(
-            przepusc=True if tryb == TRYB_CIEN else werdykt,
-            punkty=punkty,
-            powod=powod,
-            trafienia=trafienia,
-            werdykt=werdykt,
-            tryb=tryb,
-        )
-
     # WARSTWA 1 — wygaszenie. Pierwsza, bo unieważnia wszystko poniżej.
-    for wzorzec, _, etykieta in _WYGASZENIE:
+    for wzorzec, _, etykieta in slownik.wygaszenie:
         if wzorzec.search(tekst):
-            return wynik(False, 0, "wygaszone", [_etykieta("WYGASZENIE", wzorzec)])
+            return False, 0, "wygaszone", [_etykieta("WYGASZENIE", wzorzec)], True
 
     # WARSTWA 2 — twarde przepuszczenie. PRZED odrzuceniem: sygnał potrzeby
     # zawsze bije sygnał odrzucenia.
-    for wzorzec, _, etykieta in _PRZEPUSZCZENIE:
+    for wzorzec, _, etykieta in slownik.przepuszczenie:
         if wzorzec.search(tekst):
-            return wynik(True, 0, etykieta, [_etykieta("PRZEPUSZCZENIE", wzorzec)])
+            return True, 0, etykieta, [_etykieta("PRZEPUSZCZENIE", wzorzec)], False
 
     # WARSTWA 3 — twarde odrzucenie. Tylko wzorce jednoznaczne.
-    for wzorzec, _, etykieta in _ODRZUCENIE:
+    for wzorzec, _, etykieta in slownik.odrzucenie:
         if wzorzec.search(tekst):
-            return wynik(False, 0, etykieta, [_etykieta("ODRZUCENIE", wzorzec)])
+            return False, 0, etykieta, [_etykieta("ODRZUCENIE", wzorzec)], False
     if len(oryginal) < MIN_DLUGOSC:
-        return wynik(False, 0, "za krotkie", [f"DLUGOSC:{len(oryginal)}<{MIN_DLUGOSC}"])
+        return (False, 0, "za krotkie",
+                [f"DLUGOSC:{len(oryginal)}<{MIN_DLUGOSC}"], False)
 
     # WARSTWA 4 — punktacja.
     punkty = 0
     trafienia: list[str] = []
     kategorie: set[str] = set()
-    for wzorzec, waga, etykieta in _PUNKTACJA:
+    for wzorzec, waga, etykieta in slownik.punktacja:
         if wzorzec.search(tekst):
             punkty += waga
             kategorie.add(etykieta)
@@ -598,18 +1114,117 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None) -> GateRe
         punkty += 1
         kategorie.add("KONTAKT")
         trafienia.append("KONTAKT:numer telefonu(+1)")
-    for wzorzec, waga, etykieta in _HAMULCE:
+    for wzorzec, waga, etykieta in slownik.hamulce:
         if wzorzec.search(tekst):
             punkty += waga
             trafienia.append(_etykieta(etykieta, wzorzec, waga))
-    for wzorzec, waga, etykieta, blokujaca in _HAMULCE_WARUNKOWE:
+    for wzorzec, waga, etykieta, blokujaca in slownik.hamulce_warunkowe:
         if blokujaca not in kategorie and wzorzec.search(tekst):
             punkty += waga
             trafienia.append(_etykieta(etykieta, wzorzec, waga))
 
     zdal = punkty >= prog
-    return wynik(zdal, punkty, f"punktacja {punkty} {'>=' if zdal else '<'} prog {prog}",
-                 trafienia)
+    return (zdal, punkty,
+            f"punktacja {punkty} {'>=' if zdal else '<'} prog {prog}",
+            trafienia, False)
+
+
+def _rozstrzygnij(wynik: tuple, wykryty: str) -> tuple:
+    """Klucz porównania między słownikami. Inny dla przepuszczeń i odrzuceń.
+
+    PRZEPUSZCZENIE bije wszystko — jeden słownik widzący zlecenie wystarczy,
+    bo ułamek grosza za niepotrzebne pytanie modelu jest nieporównywalny
+    z kursem straconym przez odrzucenie. Wśród przepuszczeń wygrywa wyższa
+    punktacja (więcej sygnału), a przy remisie — słownik zgodny z detekcją.
+
+    WŚRÓD ODRZUCEŃ wygrywa uzasadnienie NAJBARDZIEJ KONKRETNE: najpierw to,
+    w którym zadziałała nazwana reguła, potem NIŻSZA punktacja. Odwrotnie niż
+    przy przepuszczeniach — i to jest celowe. Czeska reklama odrzucona przez
+    słownik czeski jako „autopromocja" niesie do raportu z trybu cienia
+    informację, z której da się kalibrować próg; ta sama reklama odrzucona przez
+    słownik polski jako „punktacja 0 < prog 5" nie niesie żadnej.
+    """
+    werdykt, punkty, _powod, trafienia, znacznik = wynik
+    zgodny_z_detekcja = 1 if (wykryty and znacznik == wykryty) else 0
+    # Oba warianty mają tę samą długość, żeby porównanie nigdy nie zależało od
+    # kolejności argumentów (krotki różnej długości porównują się poprawnie
+    # tylko dopóki różnią się wcześniej — a to jest założenie, które łatwo
+    # złamać przy kolejnej zmianie kryteriów).
+    if werdykt:
+        return (1, punkty, 0, zgodny_z_detekcja)
+    return (0, 1 if trafienia else 0, -punkty, zgodny_z_detekcja)
+
+
+def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
+         jezyk: str | None = None) -> GateResult:
+    """Czy post ma iść do klasyfikatora AI.
+
+    `prog` i `tryb` są nadpisywalne argumentem wyłącznie po to, żeby dało się
+    przeliczyć historyczne posty przy innym progu (scripts/raport_gate.py
+    --prog) i przetestować obie ścieżki bez dotykania środowiska. `jezyk`
+    wymusza słownik — dla grup, o których wiadomo z góry, w jakim są języku.
+
+    BEZ WYMUSZENIA język jest WYKRYWANY, a przy niepewnej detekcji post idzie
+    przez WSZYSTKIE słowniki. Cztery przebiegi regeksem po krótkim tekście to
+    mikrosekundy, a zgubione zlecenie to kilkaset złotych — przy tej asymetrii
+    nie ma czego optymalizować.
+
+    ZASADY ROZSTRZYGANIA MIĘDZY SŁOWNIKAMI, obie wynikające z reguły naczelnej
+    tego modułu („odrzucamy wyłącznie to, co jest śmieciem ponad wszelką
+    wątpliwość"):
+
+      1. WYGASZENIE WIDZIANE PRZEZ KTÓRYKOLWIEK SŁOWNIK WYGASZA POST. Samo „weź
+         najlepszy wynik" tu nie wystarcza: słownik, który nie zna zwrotu
+         „hat sich erledigt", milczy — a milczenie wygląda lepiej niż odrzucenie.
+         Post załatwiony przestaje być zleceniem niezależnie od języka.
+      2. JEDNO PRZEPUSZCZENIE WYSTARCZY. Jeśli choć jeden słownik widzi
+         zlecenie, post idzie do modelu. Kosztuje to ułamek grosza, a wariant
+         odwrotny kosztuje kurs.
+    """
+    prog = settings.GATE_PROG if prog is None else prog
+    tryb = normalizuj_tryb(settings.GATE_TRYB if tryb is None else tryb)
+    oryginal = (tresc or "").strip()
+    tekst = normalizuj(tresc)
+
+    wykryty = wykryj_jezyk(oryginal)
+    if jezyk is not None and jezyk in SLOWNIKI:
+        kandydaci = [(jezyk, SLOWNIKI[jezyk])]
+    else:
+        # ZAWSZE wszystkimi słownikami, nie tylko przy niepewnej detekcji.
+        # Detekcja służy wtedy do wyboru znacznika i do rozstrzygania remisów,
+        # a nie do zawężania wyszukiwania — bo pomyłka w detekcji jest właśnie
+        # cichym fałszywym odrzuceniem, czyli jedynym błędem, którego ten moduł
+        # ma nie popełniać. Cztery przebiegi regeksem po krótkim tekście
+        # kosztują mikrosekundy; zgubione zlecenie kosztuje kurs.
+        kandydaci = _rozne_slowniki()
+
+    najlepszy = None          # (werdykt, punkty, powod, trafienia, znacznik)
+    wygaszone = None
+    for znacznik, slownik in kandydaci:
+        werdykt, punkty, powod, trafienia, wyg = _ocen(tekst, oryginal, slownik, prog)
+        if wyg and wygaszone is None:
+            wygaszone = (werdykt, punkty, powod, trafienia, znacznik)
+        biezacy = (werdykt, punkty, powod, trafienia, znacznik)
+        if najlepszy is None or _rozstrzygnij(biezacy, wykryty) > _rozstrzygnij(najlepszy, wykryty):
+            najlepszy = biezacy
+
+    werdykt, punkty, powod, trafienia, znacznik = wygaszone or najlepszy
+
+    # Znacznik języka dla operatora. Bierzemy go ze słownika, który wygrał — ten
+    # „wytłumaczył" post najlepiej. Dla wspólnego czesko-słowackiego rozstrzyga
+    # jeszcze wariant, bo od niego zależy język oddzwonienia.
+    if znacznik in ("cs", "sk"):
+        znacznik = _wariant_cs_sk(oryginal)
+
+    return GateResult(
+        przepusc=True if tryb == TRYB_CIEN else werdykt,
+        punkty=punkty,
+        powod=powod,
+        trafienia=trafienia,
+        werdykt=werdykt,
+        tryb=tryb,
+        jezyk=znacznik,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +1242,7 @@ UPDATE posty SET
     gate_powod     = %(gate_powod)s,
     gate_trafienia = %(gate_trafienia)s,
     gate_tryb      = %(gate_tryb)s,
+    gate_jezyk     = %(gate_jezyk)s,
     gate_at        = NOW()
 WHERE fb_id = %(fb_id)s
 """
@@ -641,7 +1257,35 @@ def wiersz_do_zapisu(wynik: GateResult, fb_id: str) -> dict[str, object]:
         "gate_powod": wynik.powod,
         "gate_trafienia": list(wynik.trafienia),
         "gate_tryb": wynik.tryb,
+        # Znacznik języka jedzie do bazy razem z werdyktem, bo powiadomienie
+        # bierze go stamtąd — a nie liczy jeszcze raz z treści.
+        "gate_jezyk": wynik.jezyk or None,
     }
+
+
+# ---------------------------------------------------------------------------
+# KONTRAKT Z KLASYFIKATOREM
+#
+# Bramka NIE tłumaczy — tylko wpuszcza. Tłumaczenie robi klasyfikator, i to on
+# musi wiedzieć, że post bywa obcojęzyczny. Instrukcja stoi TUTAJ, a nie
+# w klasyfikatorze, z jednego powodu: to bramka wpuszcza obce języki do
+# pipeline'u, więc to przy niej trzeba pamiętać o konsekwencji. Klasyfikator
+# wkleja ją do promptu systemowego przez IMPORT, a nie przepisując — przepisana
+# rozjechałaby się przy pierwszej zmianie listy języków.
+# ---------------------------------------------------------------------------
+INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA = """\
+JĘZYK POSTA. Post może być po polsku, niemiecku, czesku albo słowacku — grupy \
+z tych czterech obszarów idą przez ten sam pipeline. Nie komentuj języka posta \
+i nie dołączaj tłumaczenia treści.
+
+WSZYSTKIE pola wyniku wypełniaj PO POLSKU, niezależnie od języka posta. Czyta \
+je polskojęzyczny operator, który ma podjąć decyzję w kilkanaście sekund — \
+opis po niemiecku zmusiłby go do tłumaczenia w najgorszym możliwym momencie.
+
+WYJĄTEK: nazwy miejscowości zostawiaj W FORMIE ORYGINALNEJ z posta („München", \
+nie „Monachium"; „Praha", nie „Praga"). Te pola idą wprost do geokodowania \
+i do linku z mapą — przetłumaczona nazwa albo nie znajdzie się w geokoderze, \
+albo znajdzie się w złym miejscu."""
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +1311,13 @@ def _main(argv: list[str]) -> int:
         return 0
 
     w = gate(tresc, prog=args.prog, tryb=args.tryb)
+    wykryty = wykryj_jezyk(tresc)
     print(f"WERDYKT BRAMKI: {'PRZEPUSZCZAM' if w.werdykt else 'ODRZUCAM'}  ({w.powod})")
+    # Detekcja i znacznik to DWIE różne rzeczy. Pusta detekcja jest normalną
+    # ścieżką (krótki post bez znaków charakterystycznych), a znacznik bierze
+    # się wtedy ze słownika, który wytłumaczył post najlepiej.
+    print(f"JĘZYK:          {w.jezyk or '—'}"
+          f"   (detekcja: {wykryty or 'nierozstrzygnięta, liczę wszystkimi słownikami'})")
     print(f"PUNKTY:         {w.punkty}"
           + (f"  (prog {args.prog if args.prog is not None else settings.GATE_PROG})"
              if w.powod.startswith("punktacja") else ""))

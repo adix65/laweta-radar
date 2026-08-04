@@ -51,11 +51,25 @@ echo "=== 5. Proxy dla Apify (bez sieci) ==="
 "$PY" -m laweta_radar.workers.apify_proxy
 
 echo
-echo "=== 6. Telegram (WYSYŁA wiadomość testową) ==="
+echo "=== 6. Bramka słowna (PL/DE/CS/SK, bez sieci) ==="
+# Niemiecki post to test wielojęzyczności: przy bramce jednojęzycznej dostałby
+# zero punktów i wyleciał — i wyglądałoby to w logach jak odrzucona reklama.
+"$PY" -m laweta_radar.workers.gate "Suche Abschleppdienst, Motor kaputt" \
+    | sed 's/^/  /' || true
+
+echo
+echo "=== 7. Fetcher — plan i koszt NAJBLIŻSZEGO przebiegu (nic nie wydaje) ==="
+# Pierwsza linia mówi, na której ścieżce (A/B) stoi fetcher. „domyślna,
+# ostrożna" znaczy, że pomiar actora NIE został wykonany — patrz
+# docs/POMIAR-ACTORA.md i README, sekcja „Budżet liczy się w POSTACH".
+"$PY" -m laweta_radar.workers.fb_fetcher --sucho 2>&1 | sed 's/^/  /'
+
+echo
+echo "=== 8. Telegram (WYSYŁA wiadomość testową) ==="
 "$PY" -m laweta_radar.services.telegram_notify
 
 echo
-echo "=== 7. Baza (wymaga wstającego API albo psql) ==="
+echo "=== 9. Baza (wymaga wstającego API albo psql) ==="
 echo "Migracje:  bash laweta_radar/scripts/migrate.sh"
 echo "Stan:      curl -s localhost:8002/health"
 echo

@@ -22,6 +22,10 @@ dist/
 # Pula proxy: żyje godziny i każdy VPS ma własną. Nie ma czego commitować.
 .apify_proxy_pool.json
 .apify_proxy_pool.json.tmp
+# Ślad po przerwanym zapisie data/kandydaci_grupy.csv (zapis jest atomowy: tmp
+# + podmiana nazwy, patrz scripts/znajdz_grupy.py). SAM plik .csv jest
+# wersjonowany świadomie — siedzi w nim ręczna weryfikacja grup, patrz data/README.md.
+data/*.csv.tmp
 
 # === Logi ===
 *.log
