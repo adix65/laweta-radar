@@ -36,12 +36,58 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 
 ### Stan repo
 
-Ten commit to **szkielet + przeniesiona infrastruktura Apify**. Działa już:
-konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
-bandyta, transport Telegrama, API diagnostyczne, migracja tabeli `posty`. Kroki
+Ten commit to **szkielet + infrastruktura Apify + narzędzia rozpoznawcze**. Działa
+już: konfiguracja (w tym dociąganie wspólnej puli Apify), rotacja kluczy, proxy,
+bandyta, transport Telegrama, API diagnostyczne, migracja tabeli `posty`, a także
+dwa narzędzia uruchamiane ręcznie: **pomiar actora** i **wyszukiwarka grup**. Kroki
 pipeline'u (`workers/gate.py`, `workers/fb_fetcher.py`, `workers/classifier.py`,
 `services/geo.py`) dochodzą w kolejnych krokach — dopóki ich nie ma, system nic
 nie pobiera i nic nie wysyła, ale wstaje czysto i mówi, czego mu brakuje.
+
+## Zanim powstanie fetcher: dwa pomiary, nie dwie intuicje
+
+Fetchera nie da się dobrze napisać, nie znając dwóch rzeczy, których nie ma
+w dokumentacji: **jak actor naprawdę zachowuje się przy zawężaniu okna czasowego**
+i **z jakich grup w ogóle warto pobierać**. Obie odpowiedzi produkują narzędzia
+z `laweta_radar/scripts/` — uruchamiane ręcznie, nie z crona.
+
+```bash
+export PYTHONPATH=$PWD
+
+# 1. POMIAR ACTORA (~20 min, ≤ 270 pobranych postów ≈ 1,35 USD)
+python -m laweta_radar.scripts.pomiar_actora --sucho --grupa <URL>   # sam plan i koszt
+python -m laweta_radar.scripts.pomiar_actora --grupa <URL> --grupa <URL2> --grupa <URL3>
+#    -> docs/POMIAR-ACTORA.md
+
+# 2. WYSZUKIWARKA GRUP (raz na start, potem raz w miesiącu)
+python -m laweta_radar.scripts.znajdz_grupy --schema   # jakie pola actor przyjmuje
+python -m laweta_radar.scripts.znajdz_grupy --sucho    # plan i koszt, bez wydawania
+python -m laweta_radar.scripts.znajdz_grupy            # seria (pyta o potwierdzenie)
+#    -> data/kandydaci_grupy.csv  ->  KROK RĘCZNY  ->  --raport  ->  config/groups.py
+```
+
+**Pomiar actora** odpowiada na trzy pytania, z których każde zmienia architekturę,
+a nie szczegół:
+
+| pytanie | co rozstrzyga |
+|---|---|
+| czy `onlyPostsNewerThan` działa | czy fetcher pobiera **przyrost**, czy za każdym razem to samo od nowa — przy przebiegu co 5 minut to rząd 288× w rachunku |
+| czy `resultsLimit` jest per grupa | czy batchowanie grup jest bezpieczne; przy limicie globalnym batch po dziesięć grup gubi posty z ośmiu, a run i tak zostaje policzony |
+| ile kosztuje jeden post | ile kont Apify trzeba — trzydzieści czy dziewięćset |
+
+Wynik ląduje w `docs/POMIAR-ACTORA.md`. **Dopóki stoi tam ramka „POMIAR NIE ZOSTAŁ
+WYKONANY", fetchera piszemy na wyczucie** — a wyczucie kosztuje tu realne pieniądze.
+
+**Wyszukiwarka grup** buduje listę kandydatów przez wyszukiwarkę FB (cztery bloki
+językowe: PL / DE / CS / SK — laweta na trasie do Niemiec wraca pusta, jeśli
+zleceń szuka tylko po polsku). Kończy się **krokiem ręcznym, którego nie da się
+pominąć**: człowiek otwiera każdy URL i wpisuje w kolumnie `publiczna` TAK/NIE, bo
+Apify czyta wyłącznie grupy publiczne, a z zewnątrz tego nie widać. Powtórne
+uruchomienie **scala** wynik z istniejącym CSV — praca ręczna nie ginie.
+
+Oba narzędzia liczą i pokazują przewidywany koszt **przed** serią i czekają na
+potwierdzenie; oba mają twardy sufit i odstęp między wywołaniami, bez
+zrównoleglania.
 
 ## Struktura
 
@@ -50,6 +96,8 @@ laweta_radar/
   workers/
     apify_keys.py      # rotacja puli kluczy APIFY_API_TOKEN1..N     [kopia 1:1]
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
+    apify_run.py       # odpal actora, doczekaj, oddaj itemy + koszt + czas
+    apify_credits.py   # zużycie kredytu JEDNEGO konta (przez jego proxy)
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate)
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
@@ -57,15 +105,27 @@ laweta_radar/
     settings.py        # jedyne miejsce czytające środowisko
     shared_env.py      # dociąga klucze Apify ze WSPÓLNEGO .env sales-core-engine
     groups.py          # lista grup FB — dane, nie kod
+    frazy_grup.py      # frazy wyszukiwania grup (PL/DE/CS/SK) — dane, nie kod
   api/
     main.py            # FastAPI: /health
     migrations/        # SQL odpalany RĘCZNIE, nigdy z workera
-  scripts/             # env-shell, migrate, start_api, check_setup
+  scripts/
+    pomiar_actora.py   # RĘCZNIE, raz: zmierz actora  -> docs/POMIAR-ACTORA.md
+    znajdz_grupy.py    # RĘCZNIE, raz w miesiącu      -> data/kandydaci_grupy.csv
+    check_setup.sh, env-shell.sh, migrate.sh, start_api.sh
   tests/               # testy offline (bez sieci i bez bazy)
   .env.example
   requirements.txt
-docs/APIFY-PROXY.md    # po co proxy i jak je skonfigurować
+data/kandydaci_grupy.csv  # lista grup do ręcznego sprawdzenia (kolumna `publiczna`)
+docs/APIFY-PROXY.md       # po co proxy i jak je skonfigurować
+docs/POMIAR-ACTORA.md     # wynik pomiaru actora — czyta go prompt fetchera
 ```
+
+Podział `workers/` vs `scripts/` jest celowy: **worker odpala się sam**, z crona, co
+kilka minut — więc brak konfiguracji kończy w nim ciszą i czystym wyjściem.
+**Skrypt odpala człowiek**, świadomie i zwykle raz — więc wolno mu zadać pytanie
+i wypisać ścianę tekstu, ale musi powiedzieć, ile będzie kosztował, zanim
+cokolwiek wyda.
 
 Moduły oznaczone `[kopia 1:1]` pochodzą z repo, w którym chodzą produkcyjnie.
 Zmieniły się w nich **wyłącznie** ścieżki pakietu i komunikaty wskazujące na moduły
@@ -177,7 +237,9 @@ adresu i ze statusem `unverified`. Żeby ruszyło:
    Własnych `APIFY_API_TOKEN*` **nie wpisujesz** (patrz sekcja o współdzieleniu),
 2. dodaj realne grupy w `config/groups.py`, zweryfikuj każdą ręcznie
    (publiczna? żywa? zgłoszeniowa czy sama reklama lawet?) i dopiero wtedy przestaw
-   `status` na `"ok"`.
+   `status` na `"ok"`. Listy kandydatów nie wpisuj z pamięci — zbuduj ją
+   wyszukiwarką: `python -m laweta_radar.scripts.znajdz_grupy` (patrz sekcja
+   „Zanim powstanie fetcher").
 
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
@@ -251,6 +313,9 @@ pm2 restart laweta-api
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
 | rotator widzi 0 kluczy | zła ścieżka do wspólnego `.env` — `python -m laweta_radar.config.settings` |
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
+| ile kredytu zostało na koncie #N | `python -m laweta_radar.workers.apify_credits --klucz N` |
+| jakie pola przyjmuje actor wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --schema` |
+| ile kosztowałby pomiar / seria wyszukiwania | dowolny z dwóch skryptów z `--sucho` |
 | stan całości | `bash laweta_radar/scripts/check_setup.sh` |
 | stan API i bazy | `curl -s localhost:8002/health` |
 

@@ -284,11 +284,18 @@ python -m laweta_radar.workers.apify_proxy --check --limit 10
   i nie ma być. Sama pula jest wyłączona (sekcja 4), więc generator bez niej nie ma
   zastosowania, a jego obecność kusiłaby do odtworzenia wpisu w cronie, który
   w repo źródłowym został świadomie usunięty.
-- **Monitora kredytów Apify.** Osobny worker odpytujący saldo wszystkich kont
-  (i cała rodzina `APIFY_CREDITS_*`) nie został przeniesiony. Gdy się pojawi, ma
-  korzystać z `proxies_for_token()` i **nie** wychodzić bezpośrednio: poll
-  wszystkich kont naraz z jednego adresu to dokładnie ten sygnał, przed którym
-  broni cała ta strona.
+- **Monitora kredytów Apify.** Osobny worker odpytujący saldo **wszystkich** kont
+  (i cała rodzina `APIFY_CREDITS_*`) nadal nie jest przeniesiony i nadal nie ma
+  być: poll wszystkich kont naraz z jednego adresu to dokładnie ten sygnał, przed
+  którym broni cała ta strona.
+
+  Jest za to `laweta_radar/workers/apify_credits.py` — odczyt zużycia
+  **pojedynczego** konta, na żądanie wołającego, wychodzący przez
+  `client_for_token()`, czyli przez proxy tego właśnie konta. Powstał, bo pomiar
+  actora (`scripts/pomiar_actora.py`) musi policzyć koszt jednego pobranego posta,
+  a to wymaga odczytu licznika przed serią i po niej. Różnica wobec monitora jest
+  istotna i warto ją utrzymać: jedno konto, jeden moment wybrany przez człowieka,
+  jego własne wyjście — zamiast stu kont odpytywanych naraz w kółko z crona.
 
 ## Czego to NIE załatwia
 
