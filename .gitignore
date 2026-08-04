@@ -1,0 +1,34 @@
+# === Sekrety — NIGDY do repo ===
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+build/
+dist/
+
+# === Stan maszyny, nie kod ===
+# Indeks ostatnio działającego klucza APIFY_API_TOKEN{N} — per środowisko,
+# patrz laweta_radar/workers/apify_keys.py.
+.apify_key_state
+# Pula proxy: żyje godziny i każdy VPS ma własną. Nie ma czego commitować.
+.apify_proxy_pool.json
+.apify_proxy_pool.json.tmp
+
+# === Logi ===
+*.log
+logs/
+
+# === IDE / system ===
+.vscode/
+.idea/
+*.swp
+.DS_Store

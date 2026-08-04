@@ -1,0 +1,18 @@
+# Python 3.11. Wersje przypięte tam, gdzie zmiana major realnie potrafi zepsuć
+# działający deploy (FastAPI/uvicorn/httpx), i luźne tam, gdzie chcemy poprawki
+# bezpieczeństwa bez ręcznego bumpa (psycopg2, anthropic).
+#
+# Lista jest KRÓTKA celowo. Każda paczka to coś, co może się nie zainstalować na
+# świeżym VPS-ie o 2 w nocy, a ten system ma jedno zadanie: dowieźć zlecenie na
+# telefon operatora w kilka minut.
+
+fastapi==0.115.0
+uvicorn==0.30.6          # serwer dla api/main.py (PM2 -> scripts/start_api.sh)
+httpx==0.27.2            # wołania do Apify; obsługuje proxy per klucz (workers/apify_proxy.py)
+psycopg2-binary>=2.9.9   # PostgreSQL; -binary, żeby nie wymagać kompilatora na VPS-ie
+anthropic>=0.40.0        # klasyfikator postów
+python-dotenv>=1.0.0     # .env — jedyne źródło konfiguracji
+pytest>=8.0.0            # testy offline (laweta_radar/tests/)
+
+# socks5:// w APIFY_PROXY_* wymaga dodatkowo: pip install "httpx[socks]"
+# Dla http:// i https:// nic nie trzeba dokładać — patrz docs/APIFY-PROXY.md.
