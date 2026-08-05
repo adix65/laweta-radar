@@ -32,6 +32,14 @@ CO LICZYMY, per model:
     tokeny ROZUMOWANIA osobno: model, który dużo myśli i mało pisze, wygląda
     inaczej w kolumnie „wyjście" niż na rachunku.
 
+MIERZYMY SAM MODEL, NIE CAŁY PIPELINE. Ten skrypt woła model i przepuszcza
+odpowiedź przez `classifier.zwaliduj`, ale POMIJA `classifier.uzupelnij_kody` —
+regexowy fallback, który na produkcji dokłada kody pocztowe przeoczone przez
+model. Tak ma być: tabela ma odpowiadać na pytanie „który model lepiej czyta
+posty", a nie „ile ratuje nasza łatka". Skutek uboczny warto znać przy czytaniu
+liczb: produkcja gubi kody rzadziej, niż wychodzi tutaj. Ile rzadziej, mówi
+licznik w logu (`grep -c fallback-kod`), a nie ta tabela.
+
 TRYB JSON JEDZIE W ETYKIECIE MODELU i to nie jest ozdoba. Przy
 OPENAI_JSON_MODE=schema nie porównujesz dwóch modeli, tylko dwa STACKI: jeden
 z gwarancją schematu i jeden bez. To legalne pytanie produkcyjne, ale inne niż

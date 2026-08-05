@@ -140,7 +140,50 @@ def test_nierozpoznane_miejsce_jest_oznaczone():
         dict(ZLECENIE, odbior_kod="", odbior_miasto="Zmyslone Miasto",
              dostawa_miasto="", dostawa_kod=""), teraz=TERAZ)
     assert "nierozpoznane" in tresc
-    assert "? km" in tresc
+    assert "trasa nieustalona" in tresc
+
+
+def test_nierozpoznany_cel_kasuje_km_i_cene_bez_podstawiania_bazy():
+    """REALNY PRZYPADEK Z PRODUKCJI. Odbiór rozpoznany, cel NIE — a pierwsza
+    linia pokazywała „60 km · ~250 zł", czyli dojazd z bazy do odbioru wzięty
+    za długość kursu i wycenę. Kierowca odrzuca wtedy kurs na pół Polski,
+    widząc cenę lokalnego skoku, i to jest gorsze niż brak liczby."""
+    zlecenie = dict(ZLECENIE, odbior_miasto="Krosno", odbior_kod="38-400",
+                    dostawa_miasto="Turek", dostawa_kod="62-700",
+                    tresc="transport Aixam z Krosna do Turku. Trasa ma okolo 490 km")
+    linie = pw.zbuduj_tresc(zlecenie, teraz=TERAZ).splitlines()
+
+    assert "trasa nieustalona" in linie[0]
+    assert "zł" not in linie[0]
+    # Dojazd z bazy do Krosna to kilka kilometrów — nie ma prawa stać w linii,
+    # która mówi o długości kursu. Jedyne „km" tam to odległość od autora.
+    assert "km" not in linie[0].replace("490 km", "")
+    # Cel BYŁ w poście, tylko go nie znamy — i to musi być widać przy nazwie,
+    # bo tam operator patrzy, szukając powodu, dla którego nie ma kilometrów.
+    assert "Turek" in linie[2] and "nierozpoznane" in linie[2]
+
+
+def test_odleglosc_od_autora_idzie_obok_naszej_i_jest_podpisana():
+    """Autor zna trasę lepiej niż nasz geokoder, ale to nadal cudza liczba —
+    więc stoi obok naszej, z podpisem, a nie zamiast niej."""
+    zlecenie = dict(ZLECENIE, dostawa_miasto="Turek", dostawa_kod="62-700",
+                    tresc="z Krosna do Turku, trasa ma okolo 490 km")
+    assert "wg autora: 490 km" in pw.zbuduj_tresc(zlecenie, teraz=TERAZ)
+
+    # Znana trasa nie wycisza cytatu z posta: rozjazd „60 km" vs „490 km" jest
+    # jedynym sygnałem, że któryś punkt złapaliśmy źle.
+    obie = pw.zbuduj_tresc(dict(ZLECENIE, tresc="Krosno -> Rzeszow, trasa ma 60 km"),
+                           teraz=TERAZ)
+    assert "wg autora: 60 km" in obie
+    assert "zł" in obie.splitlines()[0]
+
+
+def test_przebieg_auta_nie_udaje_odleglosci():
+    """Każdy post w tych grupach ma kilometry, bo każdy ma przebieg."""
+    tresc = pw.zbuduj_tresc(
+        dict(ZLECENIE, tresc="Golf 1.9 TDI, przebieg 190 tys km, nie odpala"),
+        teraz=TERAZ)
+    assert "wg autora" not in tresc
 
 
 def test_pewna_lokalizacja_bez_ostrzezenia():
@@ -297,6 +340,62 @@ def test_pauza_wycisza_ale_nie_kasuje():
     assert "panelu" in d.powod
 
 
+# ---------------------------------------------------------------------------
+# TRANSPORT ZWIERZĄT — cisza, ale NIE zniknięcie
+#
+# Bramka takich postów nie odrzuca (patrz workers/gate.py): operator zwierząt nie
+# wozi, ale „nie wożę" i „nie chcę o tym wiedzieć" to dwie różne rzeczy. Tutaj
+# rozstrzyga się wyłącznie to, czy brzęczy telefon — reszta systemu ma się
+# zachować dokładnie tak samo jak przy każdym innym zleceniu.
+# ---------------------------------------------------------------------------
+ZWIERZE = dict(ZLECENIE, kategoria_ladunku="zwierze",
+               pojazd_opis="koń — wałach", tresc="szukam transportu dla walacha")
+
+
+def test_zwierze_domyslnie_nie_brzeczy(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    d = _ocen(ZWIERZE)
+    assert d.wysylac is False
+    assert d.kod == "zwierze"
+    # Ten fragment powodu jest kontraktem, nie ozdobą: to jedyne zdanie, które
+    # odróżnia „wyciszone" od „zgubione", gdy operator pyta, gdzie jest zlecenie.
+    assert "panelu" in d.powod
+
+
+def test_zwierze_z_wlaczonym_alertem_idzie_normalnie(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 1)
+    assert _ocen(ZWIERZE).wysylac is True
+
+
+def test_zwierze_nie_rusza_pozostalych_zlecen(monkeypatch):
+    """Reguła ma dotyczyć WYŁĄCZNIE kategorii 'zwierze'. Brak pola (wiersze
+    sprzed migracji 0010) i 'pojazd' zachowują się identycznie jak dotąd."""
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    assert _ocen(ZLECENIE).wysylac is True
+    assert _ocen(dict(ZLECENIE, kategoria_ladunku="pojazd")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kategoria_ladunku=None)).wysylac is True
+
+
+def test_zwierze_po_dedupie(monkeypatch):
+    """Kolejność jak przy pauzie: post już wysłany zostaje duplikatem, a nie
+    zwierzęciem — inaczej zniknąłby powód, dla którego nie poszedł drugi raz."""
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    assert _ocen(ZWIERZE, juz_wyslane=True).kod == "duplikat"
+
+
+def test_zwierze_ma_widoczny_znacznik_w_tresci_alertu():
+    """Przy ALERT_ZWIERZETA=1 alert dociera — i musi być rozpoznawalny w pierwszym
+    rzucie oka. „1100 km · ~4400 zł" wygląda tak samo dla golfa i dla wałacha."""
+    tresc = pw.zbuduj_tresc(ZWIERZE, teraz=TERAZ)
+    assert "ZWIERZ" in tresc.upper()
+    # Nad cytatem, czyli w części czytanej najpierw.
+    assert tresc.upper().index("ZWIERZ") < tresc.index("szukam transportu")
+
+
+def test_zwykle_zlecenie_bez_znacznika_zwierzat():
+    assert "ZWIERZ" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).upper()
+
+
 @pytest.mark.parametrize("godzina,cisza", [(23, True), (2, True), (5, True),
                                            (6, False), (12, False), (21, False),
                                            (22, True)])
@@ -380,7 +479,7 @@ def test_zbuduj_tresc_znosi_puste_zlecenie():
     degradacja tak, wyjątek nie."""
     tresc = pw.zbuduj_tresc({"fb_id": "x"}, teraz=TERAZ)
     assert "ZLECENIE" in tresc
-    assert "? km" in tresc
+    assert "trasa nieustalona" in tresc
 
 
 def test_przyciski_bez_trasy_gdy_nie_znamy_miejsca():

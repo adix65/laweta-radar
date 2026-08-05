@@ -7,6 +7,12 @@ powiadomienia.py`) i obie ścieżki liczą je tym samym kodem (`services/geo.py`
 Gdyby panel liczył po swojemu, operator zobaczyłby w alercie 42 km, a w aplikacji
 48 km i przestałby ufać obu.
 
+`km_trasy` I `szacunek_pln` BYWAJĄ NULL-em i to jest wynik, nie awaria: bez obu
+rozpoznanych końców trasy nie ma czego liczyć, a panel ma wtedy napisać „trasa
+nieustalona" zamiast pokazać jakąkolwiek liczbę. Panel nie ma prawa podstawić
+tam `km_od_bazy` — to jest dokładnie ten błąd, przez który kurs Dębica->Turek
+(490 km wg autora, nierozpoznany Turek) wyglądał na ekranie jak „60 km, ~250 zł".
+
 FILTRY TO PYTANIA OPERATORA, NIE PROGI SYSTEMU. `max_km` zawęża listę, bo ktoś
 kliknął pigułkę „do 50 km" — i przestaje działać, gdy tę pigułkę odklika.
 Domyślne wywołanie bez parametrów zwraca WSZYSTKO, co system złapał, niezależnie
@@ -39,6 +45,7 @@ STATUSY = ("nowe", "dzwonie", "wygrane", "przegrane", "smiec")
 # nie ma powodu wozić pełnej treści posta dla stu rekordów.
 POLA_LISTY = ("fb_id", "grupa_nazwa", "grupa_url", "post_url", "opublikowany_at",
               "pobrany_at", "status", "status_at", "stale", "gate_jezyk",
+              "kategoria_ladunku",
               "typ", "odbior_raw", "odbior_kod", "odbior_miasto",
               "dostawa_raw", "dostawa_kod", "dostawa_miasto",
               "pojazd_opis", "pojazd_kategoria", "stan_toczy_sie",
@@ -60,24 +67,41 @@ class Zmiana(BaseModel):
     cena_koncowa: float | None = Field(default=None, ge=0, le=1_000_000)
 
 
-def _rekord(wiersz: dict) -> dict:
+def _rekord(wiersz: dict, *, zwroc_tresc: bool = True) -> dict:
     """Wiersz z `posty` -> rekord dla panelu, z policzoną geografią.
 
     Pola klasyfikatora idą DALEJ PŁASKO, dokładnie pod nazwami kolumn
     z `0004_klasyfikacja.sql`. Świadomie bez przepakowywania na `zlecenie.odbior
     .miasto`: nazwa w SQL-u, w API i w TypeScripcie jest wtedy ta sama, więc
     „gdzie to się bierze" sprawdza się grepem, a nie czytaniem mapowania.
+
+    `zwroc_tresc=False` na liście: pełna treść posta jest tu POTRZEBNA (wyciąga
+    się z niej odległość podaną przez autora), ale nie ma po co jechać przez
+    LTE dla stu rekordów — więc liczymy z niej i wyrzucamy z odpowiedzi.
     """
     dane = dict(wiersz)
+    tresc = dane.get("tresc")
+    if not zwroc_tresc:
+        dane.pop("tresc", None)
     odbior = geo.geokoduj(dane.get("odbior_kod"), dane.get("odbior_miasto"))
     dostawa = geo.geokoduj(dane.get("dostawa_kod"), dane.get("dostawa_miasto"))
-    pods = geo.podsumowanie(odbior, dostawa)
+    pods = geo.podsumowanie(odbior, dostawa, tresc)
 
     dane.setdefault("jezyk", dane.get("gate_jezyk"))
     dane.update({
+        # NULL, gdy którykolwiek koniec trasy jest nierozpoznany — razem
+        # z `szacunek_pln`. Panel pisze wtedy „trasa nieustalona" i nie ma
+        # czego zaokrąglić: patrz `services/geo.podsumowanie`.
         "km_trasy": pods["km_trasy"],
+        # Dojazd baza->odbiór. LICZBA POMOCNICZA, pod własną etykietą i tylko
+        # pod nią. Nie wolno jej pokazać w miejscu długości kursu — dokładnie
+        # to podstawienie kazało panelowi wyświetlić „60 km" przy kursie
+        # Dębica->Turek, którego drugiego końca nie rozpoznaliśmy.
         "km_od_bazy": pods["km_od_bazy"],
         "szacunek_pln": pods["szacunek_pln"],
+        # Odległość z treści posta („trasa ma około 490 km"). Osobne pole, bo
+        # to CUDZA liczba i na ekranie ma być oznaczona jako cudza.
+        "km_wg_autora": pods["km_wg_autora"],
         "link_mapy": pods["link_trasa"],
         "link_nawigacji": pods["link_nawigacja"],
         # Panel rysuje nad kilometrami wyraźny pasek ostrzegawczy, gdy punkt jest
@@ -85,6 +109,11 @@ def _rekord(wiersz: dict) -> dict:
         # co REALNIE stało w poście. Bez surowej treści ostrzeżenie mówi „nie
         # ufaj", nie mówiąc czemu, a operator nie ma jak sam rozstrzygnąć.
         "lokalizacja_zrodlo": odbior.zrodlo if odbior else "brak",
+        # Ten sam znacznik dla DRUGIEGO końca trasy. Bez niego zlecenie
+        # z rozpoznanym odbiorem i nierozpoznaną dostawą nie dostawało w panelu
+        # żadnego ostrzeżenia — a to jest właśnie ten przypadek, w którym
+        # kilometry znikają i trzeba powiedzieć dlaczego.
+        "dostawa_zrodlo": dostawa.zrodlo if dostawa else "brak",
         "lokalizacja_niepewne": pods["niepewne"],
         # Pinezka na mapie. `null` przy nierozpoznanym miejscu — panel pokazuje
         # takie zlecenia listą pod mapą, z powodem, zamiast stawiać pinezkę
@@ -111,6 +140,11 @@ def lista(
     obsłużenia. Sortowanie po `opublikowany_at DESC NULLS LAST`: post bez daty
     publikacji (Apify nie zawsze ją oddaje) ląduje NA KOŃCU, bo góra listy należy
     do najświeższych, a nie do tych o nieznanym wieku.
+
+    TRANSPORT ZWIERZĄT LĄDUJE NIŻEJ, ale ZOSTAJE NA LIŚCIE — to jest cała
+    różnica między „nie wożę koni" a „nie chcę o tym wiedzieć", i tylko pierwsze
+    wolno tu zakodować. Kolejność jest podpowiedzią, nie filtrem: zlecenie widać
+    w każdym widoku, wchodzi w `limit` i daje się otworzyć jak każde inne.
 
     `max_km` filtruje PO policzeniu geografii, w Pythonie — kilometrów nie ma
     w bazie i nie ma ich tam z premedytacją: zależą od `BAZA_LAT/BAZA_LON`, które
@@ -141,15 +175,26 @@ def lista(
         _sprawdz_migracje(conn)
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT {', '.join(POLA_LISTY)} FROM posty "  # noqa: S608 — lista stała
+                # `tresc` jest tu do POLICZENIA odległości podanej przez autora
+                # posta, nie do zwrócenia — `_rekord(zwroc_tresc=False)`
+                # wyrzuca ją z odpowiedzi. Powód, dla którego nie ma jej
+                # w `POLA_LISTY`, dotyczył wielkości odpowiedzi na LTE,
+                # a nie odczytu z Postgresa.
+                f"SELECT {', '.join(POLA_LISTY)}, tresc FROM posty "  # noqa: S608 — lista stała
                 f" WHERE {' AND '.join(warunki)}"
-                "  ORDER BY opublikowany_at DESC NULLS LAST, pobrany_at DESC "
+                # COALESCE, a nie samo porównanie: `kategoria_ladunku` jest NULL
+                # dla wierszy sprzed migracji 0010, a NULL w ORDER BY ... ASC
+                # idzie na KONIEC — czyli cała historia wylądowałaby pod
+                # zwierzętami. NULL znaczy „bramka nie orzekała" i ma się
+                # zachowywać jak zwykłe zlecenie.
+                "  ORDER BY (COALESCE(kategoria_ladunku, '') = 'zwierze') ASC,"
+                "           opublikowany_at DESC NULLS LAST, pobrany_at DESC "
                 "  LIMIT %s",
                 (*parametry, zapas),
             )
             wiersze = cur.fetchall()
 
-    rekordy = [_rekord(w) for w in wiersze]
+    rekordy = [_rekord(w, zwroc_tresc=False) for w in wiersze]
     if max_km is not None:
         # Rekord z nieznanymi kilometrami ZOSTAJE. Nie wiemy, czy jest bliżej czy
         # dalej niż próg, a ukrycie go znaczyłoby, że nierozpoznana nazwa miasta
@@ -253,6 +298,7 @@ def _sprawdz_migracje(conn) -> None:
     for potrzebne, migracja in (
         ({"odbior_miasto", "pojazd_opis", "pewnosc"}, "0004_klasyfikacja.sql"),
         ({"notatka", "cena_koncowa", "status_at"}, "0005_panel.sql"),
+        ({"kategoria_ladunku"}, "0010_kategoria_ladunku.sql"),
     ):
         brak = potrzebne - kolumny
         if brak:

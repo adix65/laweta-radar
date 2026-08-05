@@ -363,6 +363,7 @@ def _tabela_istnieje(conn, nazwa: str) -> bool:
 KOLUMNY_SWIADKOWIE = (
     ("zrodlo_decyzji", "0003_fetcher.sql"),
     ("pewnosc", "0004_klasyfikacja.sql"),
+    ("kategoria_ladunku", "0010_kategoria_ladunku.sql"),
 )
 
 
@@ -376,16 +377,36 @@ def _brakujace_migracje(conn) -> list[str]:
             for kolumna, plik in KOLUMNY_SWIADKOWIE if kolumna not in maja]
 
 
-def _istniejace_id(conn) -> set[str]:
-    """Wszystkie znane fb_id — dedup w pamięci na czas przebiegu.
+def _istniejace_id(conn) -> tuple[set[str], set[str]]:
+    """(wszystkie znane fb_id, te do naprawy) — dedup w pamięci na czas przebiegu.
 
     Jedno zapytanie zamiast SELECT-a per post: przebieg dotyka kilkuset postów,
     a tabela rośnie wolno (kilkanaście tysięcy wierszy na miesiąc), więc komplet
     identyfikatorów mieści się w pamięci bez dyskusji.
+
+    DRUGI ZBIÓR ISTNIEJE PO TO, ŻEBY DEDUP NIE ZAMRAŻAŁ USZKODZONYCH WIERSZY.
+    Post z `zrodlo_decyzji='ai'` i kompletem NULL-i to post, za który zapłacono
+    tokenami i nie dostano nic. Sam dedup („fb_id już znam") nie odróżnia go od
+    posta obsłużonego poprawnie, więc kolejne przebiegi pomijałyby go w
+    nieskończoność, a naprawcza ścieżka ON CONFLICT nigdy by się nie wykonała.
+    Takie posty przepuszczamy jeszcze raz: klasyfikator dostaje je ponownie
+    (koszt tokenów, ale NIE Apify — post i tak przyszedł w tej odpowiedzi),
+    a `_zapisz_post` dopisuje wynik do istniejącego wiersza. Po naprawie wiersz
+    ma ekstrakcję i wypada z tego zbioru, więc nie płacimy za niego drugi raz.
+
+    Brak kolumn ekstrakcji (klasyfikatora nie ma w drzewie) daje pusty drugi
+    zbiór — nie ma czym naprawiać, więc nie ma po co pytać modelu.
     """
+    kolumny = _kolumny_ekstrakcji()
     with conn.cursor() as cur:
         cur.execute("SELECT fb_id FROM posty")
-        return {r[0] for r in cur.fetchall()}
+        wszystkie = {r[0] for r in cur.fetchall()}
+        if not kolumny:
+            return wszystkie, set()
+        warunek = " AND ".join(f"{k} IS NULL" for k in kolumny)
+        cur.execute(f"SELECT fb_id FROM posty "  # noqa: S608 — nazwy ze stałej classifiera
+                    f"WHERE zrodlo_decyzji = 'ai' AND {warunek}")
+        return wszystkie, {r[0] for r in cur.fetchall()}
 
 
 def _statystyki_grup(conn, okno_dni: int, okno_tempa_h: int) -> dict[str, dict]:
@@ -506,10 +527,45 @@ def _wiersz_ekstrakcji(decyzja: "Decyzja", identyfikator: str) -> dict[str, obje
     return classifier.wiersz_do_zapisu(decyzja.wynik_ai, identyfikator)
 
 
+def _pusto(wiersz: dict[str, object], kolumny: tuple[str, ...]) -> bool:
+    """Czy w `wierszu` nie ma ANI JEDNEGO pola ekstrakcji.
+
+    PUSTA LISTA KOLUMN TO TAKŻE PUSTKA, i to najgorszego rodzaju: znaczy, że
+    zapis nie miał czego wpisać, bo warstwa SQL nie zna ani jednej kolumny
+    ekstrakcji. Wiersz wychodzi wtedy z samym werdyktem, wygląda poprawnie
+    i nie ma jak tego zgłosić — dlatego `not kolumny` jest tu równoznaczne
+    z utratą, a nie ze stanem neutralnym.
+
+    `is None`, nie fałszywość: `stan_po_wypadku=False`, `pewnosc=0` i `powod=""`
+    są POPRAWNYMI wartościami.
+    """
+    return not kolumny or all(wiersz.get(k) is None for k in kolumny)
+
+
+@dataclass(frozen=True)
+class Zapis:
+    """Co po zapisie NAPRAWDĘ stoi w wierszu — odczytane z bazy, nie z pamięci.
+
+    `bez_ekstrakcji` liczy się z `wiersz`, czyli z tego, co zwróciła baza. To
+    jest cała różnica między tą wersją a poprzednią: tamta pytała słownik
+    zbudowany w Pythonie („czy mam co zapisać"), a nie tabelę („czy się
+    zapisało"). Słownik był pełny w KAŻDYM zgłoszonym przypadku — także wtedy,
+    gdy INSERT nie wymieniał kolumn ekstrakcji i gdy ON CONFLICT odmówił
+    aktualizacji. Ostrzeżenie stało więc na warunku, którego produkcja nie
+    potrafiła spełnić, i milczało przy 27 wierszach z kompletem NULL-i.
+
+    `wiersz` idzie dalej do powiadomienia: alert budujemy z tego, co jest
+    w bazie, a nie z tego, co mieliśmy nadzieję tam wpisać.
+    """
+
+    bez_ekstrakcji: bool
+    wiersz: dict[str, object]
+
+
 def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
-                 log=print) -> bool:
-    """Zapis jednego posta — WRAZ z kompletem pól z ekstrakcji. Zwraca True,
-    gdy zapis poszedł z werdyktem modelu, ale bez ani jednego pola ekstrakcji.
+                 log=print) -> Zapis:
+    """Zapis jednego posta — WRAZ z kompletem pól z ekstrakcji, ze SPRAWDZENIEM
+    w bazie, że komplet tam dojechał.
 
     JEDEN INSERT NA POST, nie insert + update. Post trafiający do bazy PRZED
     klasyfikacją i dopisywany drugim zapytaniem to klasyczna pułapka: drugie
@@ -526,8 +582,17 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     w którym API padło), zostawałby bez klasyfikacji na zawsze, mimo że przy
     kolejnym podejściu za nią zapłaciliśmy. `DO NOTHING` w tym miejscu jest tym
     samym błędem co brak kolumn w INSERT-cie, tylko trudniejszym do zauważenia.
-    Wiersza z gotowym werdyktem modelu NIE ruszamy (`posty.zrodlo_decyzji IS
-    DISTINCT FROM 'ai'`), a statusu nie cofamy, gdy operator już go przestawił.
+
+    „GOTOWY WERDYKT" TO WERDYKT Z EKSTRAKCJĄ, nie samo `zrodlo_decyzji='ai'`.
+    Poprzedni warunek (`posty.zrodlo_decyzji IS DISTINCT FROM 'ai'`) chronił
+    także wiersze, które NIE MIAŁY CZEGO CHRONIĆ: 27 postów z pierwszych
+    przebiegów stoi w bazie z werdyktem modelu i kompletem NULL-i, więc ten
+    warunek zamroził je na zawsze — ponowny zapis tego samego posta, z pełnym
+    wynikiem w ręku, odbijał się od bazy bez śladu w logu (dowód:
+    `test_integracja_wiersz_z_werdyktem_bez_ekstrakcji_daje_sie_naprawic`
+    w tests/test_zapis_klasyfikacji.py). Dlatego aktualizujemy również wiersz
+    z werdyktem, w którym ekstrakcja jest PUSTA. Wiersz z realną ekstrakcją
+    zostaje nietknięty, a statusu nie cofamy, gdy operator już go przestawił.
 
     Do bazy idzie `werdykt`, a NIE `przepusc` — to jest sedno trybu cienia:
     w cieniu `przepusc` jest zawsze prawdziwe, więc zapisanie go dawałoby same
@@ -544,7 +609,8 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
                      "autor", "opublikowany_at",
                      "zrodlo_decyzji", "czy_zlecenie", "status", "stale",
                      "gate_werdykt", "gate_punkty", "gate_powod",
-                     "gate_trafienia", "gate_tryb", "gate_jezyk")
+                     "gate_trafienia", "gate_tryb", "gate_jezyk",
+                     "kategoria_ladunku")
     wartosci = [
         identyfikator, post["tresc"], post.get("post_url") or None,
         post.get("group_url") or None, post.get("group_name") or None,
@@ -552,6 +618,11 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
         decyzja.zrodlo, decyzja.czy_zlecenie, decyzja.status, decyzja.stale,
         decyzja.gate_werdykt, decyzja.gate_punkty, decyzja.gate_powod,
         list(decyzja.gate_trafienia), decyzja.gate_tryb, decyzja.jezyk or None,
+        # Kategoria ładunku jedzie tym samym INSERT-em co werdykt bramki — to ta
+        # sama decyzja, podjęta w tym samym momencie i przez ten sam moduł.
+        # Dopisywanie jej drugim zapytaniem byłoby drugą okazją do porażki bez
+        # żadnego objawu (patrz nota o jednym INSERT-cie wyżej).
+        decyzja.kategoria_ladunku or None,
     ]
     # Kolumny ekstrakcji lecą ZAWSZE, także gdy modelu nie pytano — wtedy jako
     # NULL-e, czyli dokładnie to, co i tak byłoby w wierszu. Jedna ścieżka SQL
@@ -565,6 +636,12 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     # z werdyktem modelu: pusty znacznik czasu jest tu informacją („nie pytano"),
     # a nie brakiem.
     aktualizowane = (*kolumny_ai, "ai_model", "zrodlo_decyzji", "czy_zlecenie")
+    # Ten sam warunek co `_pusto`, tylko po stronie bazy. Jedno źródło nazw
+    # (`kolumny_ai`), dwa renderowania — inaczej SQL i Python zaczęłyby się
+    # różnić w tym, co uznają za „pusty wynik", a to jest dokładnie ta klasa
+    # rozjazdu, przez którą powstało to zgłoszenie. Bez kolumn ekstrakcji nie
+    # ma czego naprawiać, więc warunek schodzi do `false`.
+    pusta_w_bazie = " AND ".join(f"posty.{k} IS NULL" for k in kolumny_ai) or "false"
     sql = f"""
         INSERT INTO posty ({kolumny})
         VALUES ({znaki}, NOW(), CASE WHEN %s::text = 'ai' THEN NOW() END)
@@ -576,33 +653,51 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
             status = CASE WHEN posty.status IN ('nowe', 'smiec')
                           THEN EXCLUDED.status ELSE posty.status END
         WHERE EXCLUDED.zrodlo_decyzji = 'ai'
-          AND posty.zrodlo_decyzji IS DISTINCT FROM 'ai'
+          AND (posty.zrodlo_decyzji IS DISTINCT FROM 'ai' OR ({pusta_w_bazie}))
+        RETURNING {', '.join(('fb_id', *kolumny_ai))}
     """  # noqa: S608 — nazwy kolumn pochodzą ze stałej w classifier.py, nie z wejścia
     with conn.cursor() as cur:
         cur.execute(sql, (*wartosci, decyzja.zrodlo))
+        zwrocony = cur.fetchone()
+        # BRAK ZWROTU NIE ZNACZY BŁĘDU: `ON CONFLICT DO UPDATE ... WHERE` nie
+        # zwraca wiersza, gdy warunek go nie przepuścił (powtórka posta z gotową
+        # klasyfikacją — stan normalny). Ale nie znaczy też, że jest dobrze:
+        # dokładnie tą drogą uciekał zablokowany zapis. Dlatego wiersz czytamy.
+        if zwrocony is None:
+            cur.execute(
+                f"SELECT {', '.join(('fb_id', *kolumny_ai))} FROM posty "  # noqa: S608
+                f"WHERE fb_id = %s", (identyfikator,))
+            zwrocony = cur.fetchone()
     conn.commit()
+
+    w_bazie = dict(zip(kolumny_ai, (zwrocony or ())[1:]))
+    if decyzja.zrodlo != "ai" or not _pusto(w_bazie, kolumny_ai):
+        return Zapis(bez_ekstrakcji=False, wiersz=w_bazie)
 
     # OSTRZEŻENIE, nie wyjątek: wiersz jest już w bazie i lepiej mieć go bez
     # ekstrakcji niż nie mieć wcale. Ale MUSI być głośno — za ten wynik
-    # zapłaciliśmy tokenami, a cicha strata przeżywa całe przebiegi (ten bug
-    # przeżył pierwszy: 26 postów z `zrodlo_decyzji='ai'` i kompletem NULL-i,
-    # bez jednej linijki w logu).
-    if decyzja.zrodlo == "ai" and (not ekstrakcja or _pusta_ekstrakcja(ekstrakcja)):
-        log(f"[{KTO}] OSTRZEŻENIE: post {identyfikator} zapisany z werdyktem "
-            f"modelu, ale BEZ ANI JEDNEGO pola z ekstrakcji (typ, miejsca, "
-            f"pojazd, stan, pilność, kontakt, pewność — wszystko NULL). "
-            f"Zapłacone tokeny, zerowy zapis. Sprawdź, czy `Decyzja` niesie "
-            f"`wynik_ai` i czy klucze z `classifier.wiersz_do_zapisu` "
-            f"odpowiadają kolumnom z 0004_klasyfikacja.sql.")
-        return True
-    return False
-
-
-def _pusta_ekstrakcja(wiersz: dict[str, object]) -> bool:
-    """Czy w wierszu nie ma ANI JEDNEGO pola ekstrakcji — pytamy klasyfikator."""
-    from laweta_radar.workers import classifier  # noqa: PLC0415
-
-    return classifier.ekstrakcja_pusta(wiersz)
+    # zapłaciliśmy tokenami, a cicha strata przeżywa całe przebiegi (przeżyła
+    # dwa: 27 postów z `zrodlo_decyzji='ai'` i kompletem NULL-i, bez jednej
+    # linijki w logu, bo poprzednia wersja pytała słownik z pamięci zamiast bazy).
+    if not kolumny_ai:
+        powod = ("INSERT nie wymienił ANI JEDNEJ kolumny ekstrakcji — warstwa "
+                 "zapisu nie widzi `workers/classifier.py` (`_kolumny_ekstrakcji` "
+                 "zwróciło pustkę), więc do bazy poszedł sam werdykt")
+    elif zwrocony is None:
+        powod = ("baza nie zwróciła wiersza ani po INSERT-cie, ani po SELECT-cie "
+                 "— zapis nie doszedł do skutku")
+    elif not ekstrakcja:
+        powod = ("`Decyzja` przyszła z `zrodlo='ai'`, ale bez `wynik_ai` — wynik "
+                 "modelu zgubił się przed zapisem")
+    else:
+        powod = ("wynik modelu był w pamięci, a w wierszu po zapisie stoi komplet "
+                 "NULL-i — ON CONFLICT odmówił aktualizacji albo nazwy kolumn "
+                 "rozjechały się z 0004_klasyfikacja.sql")
+    log(f"[{KTO}] OSTRZEŻENIE: post {identyfikator} ma w bazie werdykt modelu "
+        f"i ZERO pól z ekstrakcji (typ, miejsca, pojazd, stan, pilność, kontakt, "
+        f"pewność — wszystko NULL). Zapłacone tokeny, zerowy zapis. Powód: "
+        f"{powod}.")
+    return Zapis(bez_ekstrakcji=True, wiersz=w_bazie)
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +1032,11 @@ class Decyzja:
     gate_powod: str = ""
     gate_trafienia: tuple = ()
     gate_tryb: str = ""
+    # 'pojazd' | 'zwierze' | 'inne' — CO miałoby jechać. Nie zmienia ani
+    # `czy_zlecenie`, ani `status`: post o transporcie konia idzie przez pipeline
+    # normalnie. Zmienia to, co widać w panelu i czy brzęczy telefon
+    # (services/powiadomienia.ocen + ALERT_ZWIERZETA).
+    kategoria_ladunku: str = gate.KAT_INNE
 
 
 def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
@@ -969,6 +1069,7 @@ def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
         "gate_powod": b.powod,
         "gate_trafienia": tuple(b.trafienia),
         "gate_tryb": b.tryb,
+        "kategoria_ladunku": b.kategoria_ladunku,
     }
 
     # `przepusc`, nie `werdykt` — to jest DECYZJA OPERACYJNA i uwzględnia tryb
@@ -1065,6 +1166,9 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     statystyki: dict[str, dict] = {}
     harmonogram: dict[str, dict] = {}
     istniejace: set[str] = set()
+    # Posty z werdyktem modelu i pustą ekstrakcją — dedup ich NIE pomija, bo
+    # inaczej nigdy nie doczekałyby się naprawy (patrz `_istniejace_id`).
+    do_naprawy: set[str] = set()
     baza_gotowa = False
 
     if not settings.DATABASE_URL:
@@ -1103,7 +1207,7 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                         return 0
                 else:
                     baza_gotowa = True
-                    istniejace = _istniejace_id(conn)
+                    istniejace, do_naprawy = _istniejace_id(conn)
                     statystyki = _statystyki_grup(
                         conn, cfg_groups.OKNO_WYDAJNOSCI_DNI, cfg_groups.OKNO_TEMPA_H)
                     harmonogram = _wczytaj_harmonogram(conn, doba)
@@ -1148,6 +1252,11 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     bramka_by_odrzucila = 0
     niezapisane = 0
     bez_ekstrakcji = 0
+    # Ile alertów realnie poszło i ile wierszy uzupełniliśmy o zgubioną wcześniej
+    # ekstrakcję. Obie liczby są tu dlatego, że ich brak wygląda identycznie jak
+    # cicha noc na grupach — a to najdroższa pomyłka w diagnozie tego systemu.
+    wyslane = 0
+    naprawione = 0
     pobrane_lacznie = plan.zuzyte_doba
     klasyfikator_padl = ""
 
@@ -1185,7 +1294,7 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
             if post is None:
                 continue    # brak treści — nie ma czego oceniać
             identyfikator = fb_id(post["tresc"])
-            if identyfikator in istniejace:
+            if identyfikator in istniejace and identyfikator not in do_naprawy:
                 duplikaty += 1
                 continue
 
@@ -1218,7 +1327,8 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                                            klasyfikuj=_bez_klasyfikatora)
 
             try:
-                if _zapis(identyfikator, post, decyzja, log=log):
+                zapis = _zapis(identyfikator, post, decyzja, log=log)
+                if zapis.bez_ekstrakcji:
                     bez_ekstrakcji += 1
             except Exception as e:  # noqa: BLE001 — jeden zły post nie wywala reszty
                 # Post pobrany i opłacony, ale niezapisany — zniknie bez śladu,
@@ -1228,8 +1338,15 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                     log(f"[{KTO}] BŁĄD ZAPISU: {_jedna_linia(e)}")
                 niezapisane += 1
                 continue
+            if identyfikator in do_naprawy:
+                # Wiersz był w bazie z werdyktem i bez ekstrakcji; ten przebieg
+                # go uzupełnił. Nie jest to nowy post i nie wolno go tak liczyć —
+                # inaczej statystyka grupy zaczyna rosnąć od naprawiania.
+                do_naprawy.discard(identyfikator)
+                naprawione += 1
+            else:
+                nowe += 1
             istniejace.add(identyfikator)
-            nowe += 1
             if not decyzja.gate_werdykt:
                 bramka_by_odrzucila += 1
             if decyzja.stale:
@@ -1238,9 +1355,20 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 odsiane += 1
             if decyzja.czy_zlecenie:
                 zlecenia += 1
+                # Znacznik ładunku W LOGU, nie tylko w bazie. Przy
+                # ALERT_ZWIERZETA=0 taki post nie brzęczy telefonem, więc bez tej
+                # linii jedyny ślad po nim byłby w panelu — a cisza, której nie
+                # widać w logu, jest nie do odróżnienia od awarii wysyłki.
+                znacznik = ("  [ZWIERZĘ]"
+                            if decyzja.kategoria_ladunku == gate.KAT_ZWIERZE else "")
                 log(f"[{KTO}] {_skrot(post['tresc'])}: ZLECENIE "
-                    f"[{decyzja.jezyk or '??'}] "
+                    f"[{decyzja.jezyk or '??'}]{znacznik} "
                     f"{post.get('post_url') or '(BRAK LINKU)'}")
+                # Alert idzie TU, a nie „gdzieś dalej w pipelinie" — dalej nie ma
+                # nic. To jest jedyne miejsce w systemie, w którym wiadomo, że
+                # pojawiło się nowe zlecenie i że jest już zapisane.
+                if _powiadom(identyfikator, post, decyzja, zapis, log=log):
+                    wyslane += 1
             elif not decyzja.pytano_model and decyzja.status == "nowe":
                 log(f"[{KTO}] {_skrot(post['tresc'])}: {decyzja.powod}")
 
@@ -1268,9 +1396,23 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 f"przebiegu.")
 
     tryb_bramki = gate.normalizuj_tryb(settings.GATE_TRYB)
-    log(f"[{KTO}] gotowe: {nowe} nowych postów ({zlecenia} zleceń, {odsiane} "
-        f"odsianych przez bramkę, {stare} za starych), {duplikaty} duplikatów; "
-        f"pobrane w tej dobie: {pobrane_lacznie}/{plan.budzet}")
+    log(f"[{KTO}] gotowe: {nowe} nowych postów ({zlecenia} zleceń, {wyslane} "
+        f"wysłanych alertów, {odsiane} odsianych przez bramkę, {stare} za "
+        f"starych), {duplikaty} duplikatów; pobrane w tej dobie: "
+        f"{pobrane_lacznie}/{plan.budzet}")
+    if naprawione:
+        log(f"[{KTO}] uzupełniono ekstrakcję w {naprawione} wierszach, które "
+            f"miały werdykt modelu i komplet NULL-i (posty z przebiegów sprzed "
+            f"poprawki zapisu).")
+    if zlecenia and not wyslane:
+        # NAJWAŻNIEJSZA LINIA W TYM PODSUMOWANIU. Zlecenia w bazie i zero
+        # alertów wygląda z zewnątrz jak spokojny dzień na grupach, a znaczy,
+        # że operator nie dowiedział się o ANI JEDNYM kursie. Powód każdego
+        # pominięcia stoi w liniach `[powiadomienia]` wyżej.
+        log(f"[{KTO}] UWAGA: {zlecenia} zleceń i ANI JEDNEGO wysłanego alertu. "
+            f"Operator o nich nie wie. Sprawdź linie `[powiadomienia]` wyżej "
+            f"(brak TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, pauza po /stop, cisza "
+            f"nocna, limit godzinowy) — zlecenia są w bazie i w panelu.")
     if tryb_bramki == gate.TRYB_CIEN:
         # Bez tej linii tryb cienia wygląda jak brak bramki. Liczba po prawej to
         # dokładnie to, co system zacznie oszczędzać po przełączeniu na
@@ -1302,7 +1444,7 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     return 0
 
 
-def _zapis(identyfikator: str, post: dict, decyzja: Decyzja, log=print) -> bool:
+def _zapis(identyfikator: str, post: dict, decyzja: Decyzja, log=print) -> Zapis:
     """Zapis jednego posta na ŚWIEŻYM połączeniu (patrz komentarz w `run`)."""
     import psycopg2  # noqa: PLC0415 — leniwie, jak wszędzie w tym repo
 
@@ -1311,6 +1453,63 @@ def _zapis(identyfikator: str, post: dict, decyzja: Decyzja, log=print) -> bool:
         return _zapisz_post(conn, identyfikator, post, decyzja, log=log)
     finally:
         conn.close()
+
+
+def zlecenie_do_alertu(identyfikator: str, post: dict, decyzja: Decyzja,
+                       zapis: Zapis) -> dict:
+    """Kontrakt `services/powiadomienia.powiadom_o_zleceniu` — z tego, co W BAZIE.
+
+    Pola ekstrakcji bierzemy z `zapis.wiersz`, czyli z wiersza odczytanego po
+    zapisie, a NIE ze słownika, który szedł do INSERT-a. Różnica jest dokładnie
+    tej samej natury co bug, przez który powstało to zgłoszenie: alert zbudowany
+    z pamięci opisywałby zlecenie, którego w bazie może nie być w tym kształcie
+    — a operator ma dostać to, co panel mu pokaże po kliknięciu.
+
+    Brakujące pola zostają BRAKUJĄCE (None) i to powiadomienie ma je nazwać
+    („pewność nieznana", „trasa nieustalona"). Podstawianie tu wartości
+    domyślnych zamieniłoby brak danych w cichą, wiarygodnie wyglądającą
+    nieprawdę — a to jest gorsze niż pusty nawias w wiadomości.
+    """
+    return {
+        **zapis.wiersz,
+        "fb_id": identyfikator,
+        "tresc": post.get("tresc"),
+        "post_url": post.get("post_url") or None,
+        "grupa_nazwa": post.get("group_name") or None,
+        "opublikowany_at": post.get("post_date"),
+        "jezyk": decyzja.jezyk or "",
+        # Kategoria ładunku decyduje, czy alert w ogóle wyjdzie (ALERT_ZWIERZETA)
+        # i czy dostanie znacznik w treści. Bez tego pola powiadomienie widziałoby
+        # transport konia dokładnie tak samo jak transport golfa.
+        "kategoria_ladunku": decyzja.kategoria_ladunku,
+    }
+
+
+def _powiadom(identyfikator: str, post: dict, decyzja: Decyzja, zapis: Zapis,
+              log=print) -> bool:
+    """Alert o jednym zleceniu. NIGDY nie wywala przebiegu i zawsze zostawia ślad.
+
+    DLACZEGO TO TU JEST. `services/powiadomienia.py` był kompletny — treść,
+    dedup, antyspam, przyciski, podsumowanie nocne — i nie miał ANI JEDNEGO
+    wołającego. Fetcher wypisywał „ZLECENIE" do logu i przechodził do
+    następnego posta, więc tabela `powiadomienia` została pusta przy 15
+    zleceniach w bazie, a system wyglądał jak rynek bez zleceń. Pipeline
+    z README (`fetcher -> gate -> classifier -> geo -> Telegram`) kończył się
+    na klasyfikatorze.
+
+    Wysyłamy PO zapisie i tylko po udanym zapisie: dedup powiadomień stoi na
+    wierszu w bazie, więc alert o poście, którego nie ma w `posty`, poszedłby
+    ponownie przy każdym kolejnym przebiegu.
+    """
+    try:
+        from laweta_radar.services import powiadomienia  # noqa: PLC0415 — leniwie
+    except Exception as e:  # noqa: BLE001 — brak modułu nie może zabić przebiegu
+        log(f"[{KTO}] UWAGA: nie mogę wysłać powiadomienia ({_jedna_linia(e)}) "
+            f"— zlecenie {identyfikator} jest w bazie i w panelu, ale nikt o nim "
+            f"nie wie.")
+        return False
+    return powiadomienia.powiadom_o_zleceniu(
+        zlecenie_do_alertu(identyfikator, post, decyzja, zapis))
 
 
 # ---------------------------------------------------------------------------

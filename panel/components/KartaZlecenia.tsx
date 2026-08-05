@@ -3,13 +3,15 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import {
-  dystansGlowny,
   etykietaPilnosci,
-  km,
+  etykietaTrasy,
   kolorPilnosci,
   lokalizacjaNiepewna,
   pojazdJednymWierszem,
+  transportZwierzat,
   trasa,
+  trasaUstalona,
+  wgAutora,
   wiek,
   zl,
 } from "@/lib/format";
@@ -115,10 +117,27 @@ export default function KartaZlecenia({ zlecenie: z, onZmiana }: Props) {
 
         <div className="min-w-0 flex-1 py-3 pr-3">
           <Link href={`/zlecenie/${encodeURIComponent(z.fb_id)}`} className="block">
-            <div className="flex items-baseline gap-3">
-              <span className="text-liczba">{km(dystansGlowny(z))}</span>
-              <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
-              {lokalizacjaNiepewna(z.lokalizacja_zrodlo) && (
+            {/* PIERWSZA LINIA: DŁUGOŚĆ KURSU I CENA — albo słowna odmowa.
+                Gdy któryś koniec trasy jest nierozpoznany, nie ma tu ŻADNEJ
+                liczby: dojazd z bazy w tym miejscu czytało się jak kurs i tak
+                właśnie kurs Dębica→Turek (490 km) wyglądał na „60 km, ~250 zł".
+                „wg autora" wolno pokazać, bo jest podpisane cudzym nazwiskiem
+                — to liczba z posta, nie nasze wyliczenie. */}
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              {trasaUstalona(z) ? (
+                <>
+                  <span className="text-liczba">{etykietaTrasy(z)}</span>
+                  <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
+                </>
+              ) : (
+                <span className="text-opis font-bold text-ostrzezenie">
+                  {etykietaTrasy(z)}
+                </span>
+              )}
+              {wgAutora(z) && (
+                <span className="text-opis text-tekst-cichy">{wgAutora(z)}</span>
+              )}
+              {lokalizacjaNiepewna(z.lokalizacja_zrodlo) && trasaUstalona(z) && (
                 <span
                   className="text-opis font-bold text-ostrzezenie"
                   title="kilometry orientacyjne"
@@ -131,6 +150,16 @@ export default function KartaZlecenia({ zlecenie: z, onZmiana }: Props) {
             <p className="mt-1 text-xs font-bold uppercase tracking-wide text-tekst-cichy">
               {etykietaPilnosci(z.pilnosc)}
               {z.jezyk && z.jezyk !== "pl" ? ` · ${z.jezyk.toUpperCase()}` : ""}
+              {/* ZNACZNIK, NIE UKRYCIE. Karta zostaje na liście (API stawia ją
+                  tylko niżej) i ma komplet przycisków — operator dziś zwierząt
+                  nie wozi, ale to jego decyzja, nie panelu. Słowem, nie samym
+                  kolorem: kolor jest nieczytelny w słońcu i nie istnieje dla
+                  czytnika ekranu. */}
+              {transportZwierzat(z) && (
+                <span className="ml-2 rounded bg-karta-akcent px-1.5 py-0.5 text-ostrzezenie">
+                  🐴 ZWIERZĘ
+                </span>
+              )}
             </p>
 
             <p className="mt-2 truncate text-opis font-semibold">{trasa(z)}</p>

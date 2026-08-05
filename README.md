@@ -52,7 +52,9 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 - **gate** — darmowy filtr słowny **przed** modelem, po polsku, niemiecku, czesku
   i słowacku. Bez niego płacilibyśmy Claude'owi za każdy post o sprzedaży felg.
   Odrzuca wyłącznie cztery kategorie wymienione wyżej i nic poza nimi; bez
-  wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK.
+  wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK. Obok werdyktu
+  wystawia **kategorię ładunku** (`pojazd` / `zwierze` / `inne`) — transport koni
+  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz.
 - **classifier** — model decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie — **zawsze po polsku**, także z posta
   niemieckiego czy czeskiego. Domyślnie Haiku, ale provider jest wymienny jedną
@@ -61,7 +63,10 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 - **geo** — liczy dystans i trasę, żeby **pokazać** je przy zleceniu. Nie ukrywa
   rekordów: o tym, czy kurs pod Kolonię się opłaca, decyduje kierowca.
 - **Telegram** — jedyny kanał dowozu. Alert niesie link do posta; odpowiada
-  **człowiek**, z własnego konta.
+  **człowiek**, z własnego konta. Wysyła go **fetcher**, zaraz po udanym zapisie
+  posta (`workers/fb_fetcher._powiadom` -> `services/powiadomienia`) — dedup
+  alertów stoi na wierszu w bazie, więc alert o poście, którego w `posty` nie ma,
+  poszedłby ponownie w każdym kolejnym przebiegu.
 
 ### Stan repo
 
@@ -258,6 +263,17 @@ podobnie.
 | `MIN_PEWNOSC` (40) | zlecenie idzie do panelu bez alertu | nie kasuje go |
 | `CISZA_NOCNA` (22-6) | nocne zlecenia idą jednym podsumowaniem rano | nie gubi ich |
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
+| `ALERT_ZWIERZETA` (0) | transport zwierząt czeka w panelu ze znacznikiem, bez alertu | nie odrzuca go i nie przestaje go zbierać |
+
+**BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
+działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
+w kolumnie, pusty string, śmieć) przechodzi próg i idzie na telefon, a alert
+mówi wprost, czego nie wiemy: „⚠️ pewność nieznana · trasa nieustalona".
+Napisane raz wprost, bo najprostsza wersja tego kodu (`int(pewnosc or 0)`)
+zamienia brak danych w zero, zero jest poniżej każdego progu — i tak właśnie
+15 zleceń nie dostało ani jednego powiadomienia, przy zerze w tabeli
+`powiadomienia` i logu bez jednej linijki o pominięciu. Cisza jest tu najgorszym
+trybem awarii: wygląda jak brak zleceń na rynku, a jest utratą wszystkich.
 
 **Nie ma progu na kilometry ani na kierunek.** Trasa Kolonia-Kraków to 1100 km
 i normalny dzień pracy tego operatora. Filtr „do 50 km" istnieje w panelu jako
@@ -286,14 +302,47 @@ i przestanie istnieć — to jest awaria całkowita, tylko rozłożona na dni.
 **muszą** to pokazać, i pokazują:
 
 - w alercie — znak zapytania przy nazwie i jedno słowo ostrzeżenia
-  („Nowa Wies? (niepewne)"), a przy braku dopasowania „(nierozpoznane)" i `? km`;
+  („Nowa Wies? (niepewne)"), a przy braku dopasowania „(nierozpoznane)"
+  i **„trasa nieustalona"** zamiast kilometrów;
 - w panelu — pasek nad kilometrami z **surową treścią miejsca z posta**
   (`odbior_raw`), bo ostrzeżenie bez niej mówi „nie ufaj", nie dając czym to
-  sprawdzić.
+  sprawdzić. Pasek patrzy na **oba końce trasy**, nie tylko na odbiór.
 
 Cicho podana zła liczba kilometrów wysyła lawetę nie tam, a dowiadujesz się
 o tym po godzinie jazdy — dlatego geokoder ma prawo powiedzieć „nie wiem",
 ale nie ma prawa zgadnąć po cichu.
+
+### Dystans i wycena tylko z DWÓCH znanych punktów
+
+`km_trasy` i `szacunek_pln` są **NULL-em**, gdy którykolwiek koniec trasy jest
+nierozpoznany — a panel i alert piszą wtedy „trasa nieustalona", **bez żadnej
+liczby**. Pod brakujący punkt nie podstawia się nic: ani baza operatora, ani
+stawka minimalna.
+
+Skąd ta zasada. Post: „transport mikrosamochodu Aixam z Dębicy do Turku,
+62-700. Trasa ma około 490 km". Dębica rozpoznana, Turku nie ma w bazie — a
+panel pokazał **„60 km, ~250 zł"**, bo w miejsce nieznanej trasy wchodził dojazd
+z bazy operatora (Krosno→Dębica to dokładnie te 60 km), a z niego wycena.
+Kierowca odrzuca wtedy kurs na pół Polski, patrząc na cenę lokalnego skoku.
+Zła liczba jest tu gorsza niż jej brak: brak widać, złej liczby nie.
+
+`km_od_bazy` liczy się dalej — to osobna, prawdziwa liczba (baza→odbiór) i wolno
+ją pokazać **wyłącznie pod własną etykietą** („dojazd z bazy"). Nigdy w miejscu
+długości kursu i nigdy jako podstawa wyceny.
+
+### „wg autora: 490 km"
+
+Gdy autor podaje odległość wprost, wyciągamy ją z treści (`geo.km_wg_autora`)
+i pokazujemy **osobno, z podpisem** — obok naszych kilometrów, nigdy zamiast
+nich i nigdy jako podstawa wyceny. Autor zna trasę lepiej niż nasz geokoder,
+ale to nadal liczba z cudzego posta, której nikt nie sprawdził; rozjazd „60 km"
+vs „490 km" jest przy okazji jedynym sygnałem, że któryś punkt złapaliśmy źle.
+
+Liczba musi mieć obok słowo o trasie („trasa", „dystans", „odległość",
+„w jedną stronę") i nie mieć słowa o przebiegu — inaczej „przebieg 190 tys km"
+z każdego drugiego posta wjechałby na ekran jako długość kursu. Wynik jest
+`int`-em z zakresu realnych tras, więc na ekran nie przechodzi żaden fragment
+cudzego tekstu.
 
 ### API i bot
 
@@ -438,19 +487,25 @@ laweta_radar/
       0007_feedback.sql    # zbiór treningowy do poprawiania promptu
       0008_push.sql        # subskrypcje web push
       0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
+      0010_kategoria_ladunku.sql # co jedzie: pojazd / zwierzę / inne (NIE filtr)
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
     raport_gate.py     # rozliczenie trybu cienia bramki
     raport_feedback.py # co operator odrzucił i co model o tym sądził
+    uzupelnij_klasyfikacje.py # dopisuje ekstrakcję wierszom, które ją zgubiły
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
     odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
-  tests/               # testy offline (bez sieci i bez bazy)
-    test_zapis_klasyfikacji.py  # JEDYNY test dotykający Postgresa; bez
-                                # TEST_DATABASE_URL część integracyjna się pomija
-    dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
+  tests/               # testy offline (bez sieci) + integracyjne (z bazą)
+    test_zapis_klasyfikacji.py  # sam INSERT do `posty`, na prawdziwym Postgresie
+    test_przebieg_do_bazy.py    # CAŁY przebieg: Apify -> model -> baza -> alert
+    test_uzupelnij_klasyfikacje.py # naprawa wierszy z pustą ekstrakcją
+    test_ekstrakcja_referencyjna.py # dana z treści -> jej pole: fallback + walidacja
+    conftest.py                 # krzyczy, gdy testy integracyjne się pominęły —
+                                # bez TEST_DATABASE_URL zielony wynik nic nie znaczy
+    dane/posty_referencyjne.jsonl   # zbiór do porównania modeli i pomiaru ekstrakcji
   .env.example
   requirements.txt
 data/kandydaci_grupy.csv  # lista grup do ręcznego sprawdzenia (kolumna `publiczna`)
@@ -679,6 +734,61 @@ przez bramkę ~300 zł straconego kursu — i nigdy się o nim nie dowiesz, bo p
 trafi nigdzie. Jeden przegapiony kurs miesięcznie kasuje całą oszczędność
 na tokenach.
 
+#### Giełdy transportowe: forma bezokolicznikowa i para kodów
+
+Na giełdach zlecenie zwykle nie zaczyna się od prośby, tylko od rzeczownika
+odczasownikowego: „**Do przywiezienia** Citroen Berlingo z 18556 do 63-505".
+Nie ma tam ani „potrzebuję", ani awarii, ani pary miast w formie „z X do Y" —
+więc taki post trafiał w zero wzorców i wylatywał z zerem punktów, wyglądając
+w logu jak reklama felg. Dlatego:
+
+- **twarde przepuszczenie** (warstwa 2, nie punkty) dla form: *do przywiezienia,
+  do zabrania, do odebrania, do przewiezienia, do ściągnięcia, do podjęcia,
+  szukam wolnego miejsca, szukam miejsca w transporcie, wolne miejsce,
+  kto wraca z…, kto jedzie w kierunku…*. Te zwroty są jednoznaczne po stronie
+  popytu — nikt nie reklamuje własnej lawety zdaniem „do zabrania solówka spod
+  Paryża",
+- **dwa różne kody pocztowe w treści = +4** (dowolne kraje: `38-400`, `64354`,
+  `110 00`, `1234`). Para kodów jest praktycznie definicją trasy i bywa jedynym
+  sygnałem, jaki niesie post telegraficzny,
+- **marka pojazdu = +3** (Citroen, Opel, Iveco, Mercedes, VW, Renault, Ford,
+  Audi, BMW, Skoda, Fiat, Peugeot, Toyota, Nissan) — post mówi „Citroena C5",
+  a nie „samochód osobowy”,
+- **źródło auta = +2** (Copart, Autohaus, komis, aukcja, autobazar).
+
+Marki, źródła i kody pocztowe są **wspólne dla wszystkich czterech słowników** —
+„Citroen" i „Copart" znaczą to samo po polsku, niemiecku, czesku i słowacku,
+a cztery kopie tej samej listy to trzy miejsca do zapomnienia przy dopisaniu marki.
+
+#### Transport zwierząt: znacznik, nie odrzucenie
+
+Te grupy mieszają transport aut z transportem koni i zwierząt gospodarskich.
+Operator zwierząt nie wozi — i to jest dokładnie powód, dla którego bramka takich
+postów **nie odrzuca**: „nie wożę" i „nie chcę o tym wiedzieć" to dwie różne
+rzeczy, a druga należy do kierowcy.
+
+Bramka wystawia kolumnę `kategoria_ladunku` (`pojazd` / `zwierze` / `inne`),
+a system reaguje na nią w trzech miejscach i tylko w trzech:
+
+| gdzie | co robi |
+|---|---|
+| panel | widoczny znacznik „🐴 ZWIERZĘ" na karcie i na ekranie szczegółu |
+| lista | takie zlecenie ląduje **niżej** (sortowanie, nie filtr — nadal je widać) |
+| Telegram | alert idzie **tylko** przy `ALERT_ZWIERZETA=1`; przy `0` (domyślnie) zlecenie czeka w panelu bez brzęczenia |
+
+Dane zbierają się **niezależnie** od tej zmiennej i to jest cały sens braku
+twardego odrzucenia: gdyby doszła przyczepa do koni albo chęć podnajmowania
+takich kursów dalej, historia już czeka w bazie.
+
+```sql
+SELECT count(*) FROM posty WHERE kategoria_ladunku = 'zwierze';
+```
+
+```bash
+python -m laweta_radar.workers.gate "transport busem jednego konia z Gajewnik"
+# ŁADUNEK: zwierze   (idzie do panelu ze znacznikiem i NIŻEJ na liście…)
+```
+
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
 „BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
@@ -707,6 +817,46 @@ w formie oryginalnej, bo idą wprost do geokodera (`docs/WIELOJEZYCZNOSC.md`).
 **Domyślny model to Haiku** (`CLASSIFIER_MODEL`). To zadanie ekstrakcji, nie
 rozumowania — Haiku robi je równie dobrze za ułamek ceny, a liczy się też czas:
 każda sekunda opóźnienia to przewaga konkurencji.
+
+#### Dwie różne pustki w polu
+
+Produkcja na małym modelu (gpt-5.4-nano) pokazała wzorzec, który w bazie wygląda
+jak brak danych, a jest niedoczytaniem: **pole jest wypełniane, gdy dana stoi
+wprost i prosto, a pomijane, gdy wymaga choćby minimalnej interpretacji** —
+nazwa miejscowości zagranicznej („Zulte"), kod pocztowy wśród innych liczb
+(„z kodu 54-100"), marka w środku zdania („transportu dla Renault Trafic").
+Zlecenia były wykrywane poprawnie; ginęła sama trasa.
+
+Odpowiedź jest dwuwarstwowa, bo prompt można wzmocnić, ale nie da się go
+wymusić:
+
+1. **Prompt rozróżnia dwie pustki.** „Tego w poście NIE MA" (null jest wtedy
+   poprawną odpowiedzią i tak ma zostać) oraz „jest, tylko trzeba przeczytać
+   uważniej" (null jest wtedy błędem). Trzy reguły mówią wprost, że **każda**
+   nazwa miejscowości, **każdy** ciąg wyglądający na kod i **każda** marka
+   z treści mają trafić do swojego pola — a zakaz zgadywania zostaje nietknięty,
+   bo to on broni przed wysłaniem człowieka 80 km w złą stronę. Na końcu promptu
+   stoją cztery pary „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta
+   — kiedy zostawić null. Na modelach tej klasy few-shot działa mocniej niż sama
+   instrukcja, a bez tej czwartej pary zestaw uczyłby wypełniania pól za wszelką
+   cenę, czyli halucynacji geo.
+2. **Fallback regexowy działa POZA modelem.** Po klasyfikacji treść idzie przez
+   `geo.znajdz_kody()` i uzupełnia `odbior_kod`/`dostawa_kod`, **wyłącznie gdy
+   pole jest puste** — model ma pierwszeństwo, bo czyta zdanie, a regex kształt
+   cyfr. Kolejność wystąpienia jest jedyną heurystyką kierunku (pierwszy kod to
+   zwykle odbiór). Każde uzupełnienie leci na stderr ze znacznikiem
+   `fallback-kod`, żeby dało się policzyć, jak często model gubi to, co regex
+   znajduje za darmo — bez tej liczby nie da się ocenić kolejnej zmiany promptu:
+
+   ```bash
+   pm2 logs laweta-fetcher --lines 2000 --nostream | grep -c fallback-kod
+   ```
+
+Pilnuje tego `tests/test_ekstrakcja_referencyjna.py` na tym samym zbiorze, na
+którym wybieramy model. Testy nie mierzą jakości modelu (od tego jest
+`porownaj_modele.py`) — sprawdzają, że kod stojący w treści dojeżdża do pola
+także wtedy, gdy model oddał komplet nulli, i że nic z poprawnie przeczytanego
+posta nie ginie po drodze w walidacji.
 
 Model jest jednak **wymienny bez dotykania logiki**. Cała komunikacja z modelem
 przechodzi przez jedną funkcję w `services/llm.py`, a `LLM_PROVIDER` w `.env`
@@ -820,6 +970,9 @@ Trzy rzeczy, które w tym module są decyzją, a nie szczegółem:
   filtruje, a `kalkulacja()` jest etykietą na ekranie, nie bramką i nie wyceną
   (dystans liczymy Haversine razy 1,25 — to szacunek do przesiewu, nie na
   fakturę).
+- **Oba punkty albo nic.** Brakujący koniec trasy zeruje `km_trasy` **i**
+  `szacunek_pln`; `kalkulacja(None)` oddaje dwa NULL-e, a nie stawkę minimalną.
+  Dojazd z bazy nie zastępuje nieznanej trasy — patrz sekcja o dystansie wyżej.
 
 Formaty kodów pocztowych są tu **jednym źródłem prawdy dla całego repo**:
 klasyfikator pyta `geo.czy_kod_pocztowy()`, zamiast trzymać własną listę.
@@ -827,6 +980,13 @@ Kryterium jest proste — kodem jest to, z czego geokoder umie zrobić punkt.
 Własna lista po stronie klasyfikatora wyrzucałaby niemieckie „50667" w dniu,
 w którym bramka wpuściła pierwszą grupę DE, i objawiłaby się jako zlecenia
 bez trasy, bez jednego błędu w logu.
+
+`geo.znajdz_kody()` **skanuje surową treść** i jest źródłem fallbacku
+klasyfikatora, więc fałszywe trafienie kosztuje tu tyle, co zgadnięte miasto.
+Formaty dwuznaczne wymagają kontekstu: czterocyfrowa liczba z przedziału
+roczników (1950–2035) potrzebuje słowa wskazującego kraj albo skrótu kodu przed
+sobą — sama nazwa własna obok nie wystarcza, bo w „Skoda Octavia 2012" jest nią
+model auta, a nie miejscowość.
 
 ## Deploy (VPS + PM2 + nginx)
 
@@ -1018,6 +1178,9 @@ pm2 restart laweta-api laweta-bot
 | jak wygląda alert, bez wysyłania | `python -m laweta_radar.services.powiadomienia --podglad` |
 | czemu to zlecenie pokazuje 900 km | `python -m laweta_radar.services.geo "nazwa z posta"` |
 | czemu ten alert nie przyszedł | log fetchera — `[powiadomienia] <fb_id>: pomijam (...)` |
+| zlecenia są, alertów zero | log fetchera — linia `UWAGA: N zleceń i ANI JEDNEGO wysłanego alertu` |
+| zlecenie bez typu, miasta i telefonu | log fetchera — `OSTRZEŻENIE: post <fb_id> ma w bazie werdykt modelu i ZERO pól z ekstrakcji` |
+| jak odzyskać stare zlecenia bez ekstrakcji | `python laweta_radar/scripts/uzupelnij_klasyfikacje.py --sucho` |
 | czy powiadomienia nie są wyciszone | `/stop` czy `/start` — ostatni wpis w tabeli `powiadomienia` |
 | które grupy wyrzucić z konfiguracji | `curl -s localhost:8002/statystyki` albo `/statystyki` w panelu |
 | co operator odrzucił i czemu model się mylił | `python laweta_radar/scripts/raport_feedback.py` |

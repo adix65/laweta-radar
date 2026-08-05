@@ -95,6 +95,12 @@ from datetime import datetime, timedelta, timezone
 
 from laweta_radar.config import settings
 from laweta_radar.services import geo, telegram_notify
+# Bramka jest modułem CZYSTYM (bez bazy, bez sieci, bez zależności od services),
+# więc import w tę stronę nie robi cyklu. Bierzemy stąd nazwy kategorii ładunku
+# zamiast przepisywać stringi: „zwierze" wpisane z palca w drugim pliku rozjeżdża
+# się przy pierwszej zmianie i nie daje żadnego objawu — alert po prostu
+# przestaje rozpoznawać kategorię i wysyła wszystko.
+from laweta_radar.workers import gate
 
 KTO = "powiadomienia"
 
@@ -206,6 +212,34 @@ def _cytat(tresc) -> str:
     return tekst
 
 
+def pewnosc_liczbowo(zlecenie: dict) -> int | None:
+    """Pewność jako liczba albo None = NIEZNANA. NIGDY nie rzuca.
+
+    BRAK PEWNOŚCI ZNACZY „WYŚLIJ I OZNACZ JAKO NIEPEWNE", NIGDY „PRZEMILCZ".
+    Ta funkcja istnieje po to, żeby ta zasada miała jedno miejsce, w którym da
+    się ją złamać — i żeby było widać, że jej nie łamiemy.
+
+    Dlaczego nie `int(zlecenie.get("pewnosc") or 0)`, czyli wersja, która sama
+    się prosi o napisanie: `None` zamieniłoby się w zero, zero jest mniejsze od
+    KAŻDEGO progu, więc zlecenie bez pewności nigdy nie brzęczy. Wiersz z NULL-em
+    w tej kolumnie nie jest zleceniem gorszym — jest zleceniem, o którym wiemy
+    mniej, a system, który milczy o tym, czego nie rozumie, wygląda dokładnie
+    tak samo jak system, na którego rynku nic się nie dzieje.
+
+    `bool` odrzucamy jawnie, bo w Pythonie `True` jest liczbą i przeszłoby jako
+    pewność 1 — czyli poniżej każdego sensownego progu.
+    """
+    surowa = zlecenie.get("pewnosc")
+    if surowa is None or isinstance(surowa, bool):
+        return None
+    try:
+        return int(float(str(surowa).strip().replace(",", ".")))
+    except (TypeError, ValueError):
+        # Śmieć w kolumnie to nie jest „pewność 0" — to jest brak pewności.
+        _log(f"pewność {surowa!r} nie jest liczbą — traktuję jak nieznaną")
+        return None
+
+
 def punkty(zlecenie: dict) -> tuple:
     """Odbiór i dostawa jako `geo.Punkt` (albo None). Jedno miejsce, w którym
     ten moduł tłumaczy pola klasyfikatora na geografię — reszta pliku dostaje
@@ -221,19 +255,37 @@ def _linia_pilnosci(zlecenie: dict, pods: dict) -> str:
     DYSTANS TO DŁUGOŚĆ KURSU (odbiór->dostawa), nie odległość od bazy — przy
     transporcie międzynarodowym „ile km od bazy" nie znaczy nic, bo i tak
     trzeba przejechać całą trasę z autem na lawecie. Dojazd z bazy idzie
-    o linijkę niżej, przy trasie, jako liczba pomocnicza. Gdy dostawy nie
-    znamy, w pierwszej linii ląduje dojazd — jest wtedy jedyną liczbą, jaką
-    mamy, a pusta pierwsza linia byłaby gorsza niż niedokładna.
+    o linijkę niżej, przy trasie, jako liczba pomocnicza.
+
+    NIEZNANEJ TRASY NIE ZASTĘPUJE ŻADNA INNA LICZBA — ani dojazd z bazy, ani
+    stawka minimalna. Post „z Dębicy do Turku, trasa ma około 490 km"
+    z nierozpoznanym Turkiem dawał w tej linii „60 km · ~250 zł", czyli wycenę
+    lokalnego skoku pod kursem na pół Polski; kierowca odrzucał go, nie czytając
+    dalej. Zamiast liczby stoi tu teraz „trasa nieustalona": brak widać,
+    a złej liczby nie.
+
+    „wg autora" to jedyna odległość, jaką wolno tu postawić obok naszej — bo
+    jest wyraźnie cudza. Autor zna trasę lepiej niż nasz geokoder, więc idzie
+    na ekran także wtedy, gdy trasę policzyliśmy: rozjazd 60 vs 490 jest
+    sygnałem, że któryś punkt złapaliśmy źle.
     """
     ikona, etykieta = PILNOSC.get(str(zlecenie.get("pilnosc") or "").lower(),
                                   ("🔧", "ZLECENIE"))
     czesci = [f"{ikona} {etykieta}"]
-    km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
-    # „? km" zamiast pominięcia: brak dystansu to informacja, i to ważna —
-    # znaczy, że nie rozpoznaliśmy miejsca i operator ma przeczytać cytat.
-    czesci.append(f"{round(km)} km" if km is not None else "? km")
-    if pods["szacunek_pln"]:
-        czesci.append(f"~{round(pods['szacunek_pln'])} zł")
+    km = pods["km_trasy"]
+    if km is None:
+        czesci.append("trasa nieustalona")
+    else:
+        czesci.append(f"{round(km)} km")
+        # Cena tylko przy znanej trasie — `geo.kalkulacja` oddaje wtedy None
+        # i ta linia nie ma czego pokazać.
+        if pods["szacunek_pln"]:
+            czesci.append(f"~{round(pods['szacunek_pln'])} zł")
+    # `.get`, bo `pods` bywa podany z zewnątrz (`zbuduj_tresc(zlecenie, pods)`)
+    # — alert bez jednej liczby jest gorszy niż alert, ale alert, który nie
+    # poszedł przez KeyError, jest gorszy od obu.
+    if pods.get("km_wg_autora") is not None:
+        czesci.append(f"wg autora: {pods['km_wg_autora']} km")
     return " · ".join(czesci)
 
 
@@ -267,6 +319,14 @@ def _linia_trasy(zlecenie: dict, odbior, dostawa, pods: dict) -> str:
     liczby i ani jednej więcej — a jednocześnie „ile mam do nich jechać" jest
     pytaniem, które pada zaraz po „ile to warte".
     """
+    # Ani nazwy, ani kodu, ani surowego tekstu z posta — nie ma z czego zrobić
+    # linii trasy. Pusty string, a nie „⚠️ ? (nierozpoznane) → ": brak trasy
+    # nazywa `_linia_brakow` jednym zrozumiałym zwrotem, a dwa komunikaty o tym
+    # samym braku uczą operatora przewijać ostrzeżenia.
+    if not any(zlecenie.get(k) for k in ("odbior_miasto", "odbior_raw", "odbior_kod",
+                                         "dostawa_miasto", "dostawa_raw", "dostawa_kod")):
+        return ""
+
     skad = _miejsce(zlecenie.get("odbior_miasto") or zlecenie.get("odbior_raw"),
                     zlecenie.get("odbior_kod"), odbior)
     dokad = _miejsce(zlecenie.get("dostawa_miasto") or zlecenie.get("dostawa_raw"),
@@ -302,6 +362,39 @@ def _linia_pojazdu(zlecenie: dict) -> str:
     return " · ".join(c for c in czesci if c)
 
 
+def _linia_brakow(zlecenie: dict, odbior, dostawa) -> str:
+    """Czego o tym zleceniu NIE WIEMY — jedną linią, nazwane po imieniu.
+
+    To jest druga połowa zasady „brak danych nie wycisza alertu". Pierwsza
+    (`ocen`) mówi, że zlecenie z dziurami i tak jedzie na telefon; ta mówi
+    operatorowi, GDZIE są dziury, zanim ten zacznie planować dzień na podstawie
+    liczb, których nie ma. Alert bez tej linii wygląda tak samo jak alert
+    kompletny — a „? km" w pierwszej linii łatwo przeczytać jako drobiazg
+    formatowania, nie jako brak trasy.
+
+    Linia pojawia się TYLKO, gdy naprawdę czegoś brakuje. Ostrzeżenie, które
+    wisi pod każdą wiadomością, przestaje być czytane po trzech dniach.
+    """
+    braki = []
+    if pewnosc_liczbowo(zlecenie) is None:
+        braki.append("pewność nieznana")
+    # Trasa: KAŻDY BRAK NAZWANY DOKŁADNIE RAZ. Pierwsza linia mówi, że
+    # kilometrów nie ma („trasa nieustalona"), linia trasy oznacza miejsce,
+    # którego nie rozpoznaliśmy, choć autor je podał („⚠️ Turek
+    # (nierozpoznane)"), a tutaj zostaje to, czego w poście NIE BYŁO w ogóle.
+    # Różnica jest praktyczna: nierozpoznaną nazwę operator rozstrzyga cytatem
+    # w dwie sekundy, brakującego celu — tylko telefonem.
+    for punkt, w_poscie, nazwa in (
+        (odbior, ("odbior_miasto", "odbior_raw", "odbior_kod"), "odbiór"),
+        (dostawa, ("dostawa_miasto", "dostawa_raw", "dostawa_kod"), "cel"),
+    ):
+        if punkt is None and not any(zlecenie.get(k) for k in w_poscie):
+            braki.append(f"{nazwa} nieznany")
+    if str(zlecenie.get("pilnosc") or "").lower() not in PILNOSC:
+        braki.append("termin nieznany")
+    return f"⚠️ {' · '.join(braki)}" if braki else ""
+
+
 def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
                  teraz: datetime | None = None) -> str:
     """Cała wiadomość jako tekst. Funkcja CZYSTA — bez bazy, bez sieci.
@@ -312,14 +405,33 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     obejrzeć bez produkcji, poprawia się na ślepo.
     """
     odbior, dostawa = punkty(zlecenie)
-    pods = pods or geo.podsumowanie(odbior, dostawa)
+    # Treść posta idzie do `podsumowanie` po jedną rzecz: odległość podaną przez
+    # autora wprost („trasa ma około 490 km"). Wraca z niej LICZBA, nie tekst,
+    # więc do wiadomości nie ma czym wstrzyknąć znaczników Markdowna.
+    pods = pods or geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
     esc = telegram_notify._escape_md
 
-    linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*", ""]
-    linie.append(esc(_linia_trasy(zlecenie, odbior, dostawa, pods)))
+    linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*"]
+    # ZNACZNIK ŁADUNKU tuż pod nagłówkiem, nie w stopce. Alert o transporcie
+    # konia dociera tylko przy ALERT_ZWIERZETA=1 — czyli wtedy, gdy operator
+    # świadomie takich kursów szuka. Ale nawet wtedy musi POZNAĆ go w pierwszym
+    # rzucie oka: linia kilometrów i złotówek wygląda identycznie dla golfa
+    # i dla wałacha, a to są dwa zupełnie różne telefony.
+    if str(zlecenie.get("kategoria_ladunku") or "") == gate.KAT_ZWIERZE:
+        linie.append(esc("🐴 TRANSPORT ZWIERZĄT — poza standardową ofertą"))
+    linie.append("")
+    trasa = _linia_trasy(zlecenie, odbior, dostawa, pods)
+    if trasa:
+        linie.append(esc(trasa))
     pojazd = _linia_pojazdu(zlecenie)
     if pojazd:
         linie.append(esc(pojazd))
+    # Zaraz pod danymi, nad cytatem: braki mają być widoczne w tym samym rzucie
+    # oka, co liczby, których dotyczą. Na dole wiadomości czytałby je ktoś, kto
+    # już zdążył uwierzyć pierwszej linii.
+    braki = _linia_brakow(zlecenie, odbior, dostawa)
+    if braki:
+        linie.append(esc(braki))
 
     cytat = _cytat(zlecenie.get("tresc"))
     if cytat:
@@ -355,7 +467,7 @@ def zbuduj_przyciski(zlecenie: dict, pods: dict | None = None) -> list[list[dict
     """
     if pods is None:
         odbior, dostawa = punkty(zlecenie)
-        pods = geo.podsumowanie(odbior, dostawa)
+        pods = geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
     fb_id = str(zlecenie.get("fb_id") or "")
     post_url = str(zlecenie.get("post_url") or "").strip()
 
@@ -444,7 +556,8 @@ class Decyzja:
     """
 
     wysylac: bool
-    kod: str      # '' | 'pewnosc' | 'cisza_nocna' | 'duplikat' | 'crosspost' | 'limit'
+    kod: str      # '' | 'pewnosc' | 'cisza_nocna' | 'duplikat' | 'crosspost'
+                  # | 'limit' | 'pauza' | 'zwierze'
     powod: str
 
 
@@ -476,8 +589,34 @@ def ocen(zlecenie: dict, *, juz_wyslane: bool, crosspost_id: int | None,
         return Decyzja(False, "pauza", "powiadomienia wyciszone przez /stop "
                                        "— zlecenia lecą do panelu bez brzęczenia")
 
-    pewnosc = zlecenie.get("pewnosc")
-    if pewnosc is not None and int(pewnosc) < settings.MIN_PEWNOSC:
+    # TRANSPORT ZWIERZĄT — kurs spoza oferty tego operatora, a nie śmieć.
+    # Bramka takich postów NIE odrzuca (patrz workers/gate.py), więc zlecenie
+    # JEST w bazie i JEST w panelu — ze znacznikiem i niżej na liście. Tutaj
+    # rozstrzyga się wyłącznie jedno: czy o nim brzęczeć.
+    #
+    # Obok pauzy i przed progiem pewności, bo to jest ta sama klasa decyzji:
+    # stała preferencja operatora, a nie ocena jakości posta. Model może być
+    # w 100% pewny, że to zlecenie — i mieć rację; koń dalej nie wjedzie
+    # na lawetę do aut.
+    #
+    # ALERT_ZWIERZETA=1 znosi tę regułę w całości, bez żadnej innej zmiany
+    # w systemie: dane są zbierane niezależnie od wartości tej zmiennej,
+    # więc przełączenie jej działa od następnego posta i wstecz niczego nie psuje.
+    if (not settings.ALERT_ZWIERZETA
+            and str(zlecenie.get("kategoria_ladunku") or "") == gate.KAT_ZWIERZE):
+        return Decyzja(False, "zwierze",
+                       "transport zwierząt — poza ofertą (ALERT_ZWIERZETA=0). "
+                       "Zlecenie JEST w panelu, tylko bez brzęczenia")
+
+    # PRÓG DZIAŁA TYLKO NA ZNANEJ LICZBIE. Nieznana pewność (NULL w bazie, pusty
+    # string, śmieć) NIE jest niską pewnością i nie ma prawa wyciszyć alertu:
+    # przy 15 zleceniach z `pewnosc IS NULL` porównanie `pewnosc >= MIN_PEWNOSC`
+    # nie przepuściło ANI JEDNEGO, a operator zobaczył ciszę nie do odróżnienia
+    # od braku zleceń na rynku. Zlecenie z nieznaną pewnością idzie więc dalej,
+    # a `zbuduj_tresc` dopisuje do wiadomości „pewność nieznana" — brak danych
+    # opisujemy w treści, nie pomijaniem kursu.
+    pewnosc = pewnosc_liczbowo(zlecenie)
+    if pewnosc is not None and pewnosc < settings.MIN_PEWNOSC:
         return Decyzja(False, "pewnosc",
                        f"pewność {pewnosc} < {settings.MIN_PEWNOSC} — "
                        "zlecenie JEST w panelu, tylko bez brzęczenia")
@@ -485,7 +624,15 @@ def ocen(zlecenie: dict, *, juz_wyslane: bool, crosspost_id: int | None,
         return Decyzja(False, "cisza_nocna",
                        f"cisza nocna {settings.CISZA_NOCNA_OD}-{settings.CISZA_NOCNA_DO} "
                        "— pójdzie w podsumowaniu rannym")
-    if w_ostatniej_godzinie >= settings.MAX_POWIADOMIEN_H:
+    # Limit ma chronić przed lawiną, a nie kasować kanał. `MAX_POWIADOMIEN_H=0`
+    # (literówka w .env, pusta wartość zinterpretowana jako zero) wyciszyłby
+    # KAŻDY alert na zawsze i wyglądał jak brak zleceń — czyli ta sama awaria,
+    # co NULL w pewności, tylko wpisana ręcznie. Przy wartości bez sensu
+    # przepuszczamy i mówimy o tym w logu.
+    if settings.MAX_POWIADOMIEN_H <= 0:
+        _log(f"MAX_POWIADOMIEN_H={settings.MAX_POWIADOMIEN_H} wyciszyłby wszystko "
+             f"— ignoruję ten limit i wysyłam. Popraw .env.")
+    elif w_ostatniej_godzinie >= settings.MAX_POWIADOMIEN_H:
         return Decyzja(False, "limit",
                        f"limit {settings.MAX_POWIADOMIEN_H}/h przekroczony "
                        f"({w_ostatniej_godzinie}) — prawdopodobnie coś zepsute "
@@ -642,10 +789,13 @@ def powiadom_o_zleceniu(zlecenie: dict) -> bool:
         kontakt_wartosc  numer w dowolnym formacie, normalizujemy sami
         pewnosc          0-100 z klasyfikatora — próg MIN_PEWNOSC
         jezyk            'pl'|'de'|'cs'|'sk' z bramki
+        kategoria_ladunku 'pojazd'|'zwierze'|'inne' z bramki — 'zwierze' dokłada
+                         znacznik do treści i (przy ALERT_ZWIERZETA=0) wycisza alert
 
     False znaczy „nie wysłano" i NIE jest zaproszeniem do ponowienia. Powodów
-    jest sześć i wszystkie są normalne: duplikat, crosspost, niska pewność, cisza
-    nocna, przekroczony limit, awaria transportu. Każdy stoi w logu z nazwą.
+    jest osiem i wszystkie są normalne: duplikat, crosspost, pauza z `/stop`,
+    transport zwierząt, niska pewność, cisza nocna, przekroczony limit, awaria
+    transportu. Każdy stoi w logu z nazwą.
 
     ŻADNA ze ścieżek tej funkcji nie usuwa niczego z bazy ani z panelu.
     """
@@ -690,7 +840,7 @@ def _powiadom(zlecenie: dict) -> bool:
             return False
 
         odbior, dostawa = punkty(zlecenie)
-        pods = geo.podsumowanie(odbior, dostawa)
+        pods = geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
         tresc = zbuduj_tresc(zlecenie, pods)
         message_id = telegram_notify.wyslij(tresc, zbuduj_przyciski(zlecenie, pods))
         if message_id is None:
@@ -734,6 +884,20 @@ def _obsluz_pominiecie(conn, fb_id: str, decyzja: Decyzja,
         _zapisz(conn, fb_id=fb_id, kanal="pominiete_limit",
                 tresc=decyzja.powod, message_id=None)
         _zbiorcze_o_limicie(conn)
+        return
+
+    if decyzja.kod == "zwierze":
+        # Wiersz z kanałem 'pominiete_zwierze' zamyka sprawę TAK SAMO jak przy
+        # limicie, i to jest tu konieczne, a nie kosmetyczne: podsumowanie ranne
+        # szuka zleceń BEZ wiersza w `powiadomienia` (patrz `podsumowanie_nocne`),
+        # więc bez tego zapisu transport konia i tak przyszedłby o świcie —
+        # czyli ALERT_ZWIERZETA=0 opóźniałby alert zamiast go wyłączać.
+        #
+        # Wiersz jest przy okazji jedyną odpowiedzią na pytanie „ile takich
+        # kursów przeszło obok" — a to jest dokładnie ta liczba, od której zależy
+        # decyzja o przyczepie do koni albo o podnajmowaniu ich dalej.
+        _zapisz(conn, fb_id=fb_id, kanal="pominiete_zwierze",
+                tresc=decyzja.powod, message_id=None)
         return
 
     # 'pewnosc' i 'cisza_nocna' NIE zostawiają wiersza. Pierwszy dlatego, że
@@ -876,7 +1040,7 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
                 """
                 SELECT p.fb_id, p.grupa_nazwa, p.opublikowany_at,
                        p.odbior_kod, p.odbior_miasto,
-                       p.dostawa_kod, p.dostawa_miasto
+                       p.dostawa_kod, p.dostawa_miasto, p.tresc
                   FROM posty p
                   LEFT JOIN powiadomienia w ON w.fb_id = p.fb_id
                  WHERE p.czy_zlecenie
@@ -895,15 +1059,25 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
             return False
 
         linie = [f"🌅 *W nocy przyszło {len(wiersze)} zleceń*", ""]
-        for fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto in wiersze:
+        for (fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto,
+             tresc_posta) in wiersze:
             pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                    geo.geokoduj(d_kod, d_miasto))
-            km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
+                                    geo.geokoduj(d_kod, d_miasto), tresc_posta)
             trasa = str(o_miasto or o_kod or "?")
             if d_miasto or d_kod:
                 trasa += f" → {d_miasto or d_kod}"
+            # Ta sama zasada co w alercie pojedynczym: bez obu punktów nie ma
+            # kilometrów i nie podstawiamy pod nie dojazdu z bazy. Lista, na
+            # której „60 km" znaczy raz kurs, a raz dojazd, jest gorsza niż
+            # lista, która w jednym wierszu przyznaje się do braku.
+            if pods["km_trasy"] is not None:
+                dystans = f"{round(pods['km_trasy'])} km"
+            elif pods["km_wg_autora"] is not None:
+                dystans = f"wg autora: {pods['km_wg_autora']} km"
+            else:
+                dystans = "trasa nieustalona"
             linie.append(telegram_notify._escape_md(
-                f"• {trasa} · {round(km) if km is not None else '?'} km "
+                f"• {trasa} · {dystans} "
                 f"· {wiek_posta(opublikowany, teraz)} · {grupa or '?'}"))
         linie += ["", "Szczegóły i przyciski — w panelu."]
         tresc = "\n".join(linie)

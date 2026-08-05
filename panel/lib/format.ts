@@ -62,17 +62,36 @@ export function etykietaPilnosci(pilnosc?: Pilnosc | null): string {
   }
 }
 
-/** Dystans na pierwszy plan: DŁUGOŚĆ KURSU, a gdy dostawy nie znamy — dojazd.
- *  Ta sama reguła co w powiadomieniu na Telegramie; rozjazd między alertem
- *  a panelem znaczy, że operator przestaje ufać obu. */
-export function dystansGlowny(z: Zlecenie): number | null {
-  return z.km_trasy ?? z.km_od_bazy;
+/** Dystans na pierwszy plan: DŁUGOŚĆ KURSU odbiór→dostawa i nic innego.
+ *
+ *  `null` to „trasa nieustalona" — i tak ma zostać. Dojazd z bazy NIE JEST
+ *  zamiennikiem: kurs Dębica→Turek (490 km wg autora, Turek nierozpoznany)
+ *  pokazywał się przez taki fallback jako „60 km", czyli jako lokalny skok,
+ *  i kierowca odrzucał go bez czytania. Funkcji „weź km_trasy, a jak nie ma,
+ *  to cokolwiek innego" nie ma tu celowo — pierwszą linię wolno zbudować
+ *  wyłącznie z `etykietaTrasy`. Ta sama reguła obowiązuje w powiadomieniu na
+ *  Telegramie; rozjazd między alertem a panelem znaczy, że operator przestaje
+ *  ufać obu. */
+export function trasaUstalona(z: Zlecenie): boolean {
+  return z.km_trasy != null;
 }
 
-/** Kilometry na ekran. `null` to „nie wiemy" i tak ma być napisane —
- *  zero zamiast pustki wygląda jak zlecenie tuż za rogiem. */
+/** Pierwsza linia karty: kilometry kursu albo słowna odmowa. Nigdy liczba,
+ *  której nie wyliczyliśmy z dwóch znanych punktów. */
+export function etykietaTrasy(z: Zlecenie): string {
+  return z.km_trasy == null ? "trasa nieustalona" : `${z.km_trasy} km`;
+}
+
+/** Odległość podana przez autora posta — zawsze z podpisem, kto ją podał.
+ *  `null`, gdy w treści jej nie było. */
+export function wgAutora(z: Zlecenie): string | null {
+  return z.km_wg_autora == null ? null : `wg autora: ${z.km_wg_autora} km`;
+}
+
+/** Kilometry na ekran, w polu z własną etykietą. `null` to „nie wiemy" i tak
+ *  ma być napisane — zero zamiast pustki wygląda jak zlecenie tuż za rogiem. */
 export function km(wartosc: number | null): string {
-  return wartosc == null ? "? km" : `${wartosc} km`;
+  return wartosc == null ? "nie wiadomo" : `${wartosc} km`;
 }
 
 export function zl(wartosc: number | null): string {
@@ -123,4 +142,68 @@ export function opisZrodla(zrodlo: ZrodloLokalizacji): string {
     default:
       return "";
   }
+}
+
+/** Czy to zlecenie na transport zwierząt.
+ *
+ *  Jedno miejsce na to pytanie, bo odpowiada na nie i karta na liście, i ekran
+ *  szczegółu, i obie muszą pokazywać ten sam znacznik. `null` (bramka nie
+ *  orzekała, rekordy sprzed migracji 0010) to NIE jest zwierzę. */
+export function transportZwierzat(z: Zlecenie): boolean {
+  return z.kategoria_ladunku === "zwierze";
+}
+
+/** Jedno ostrzeżenie o jednym końcu trasy — tyle, ile trzeba, żeby je narysować. */
+export interface OstrzezenieLokalizacji {
+  /** Klucz Reacta i zarazem nazwa końca trasy: „Odbiór" / „Dostawa". */
+  koniec: string;
+  tytul: string;
+  opis: string;
+  /** To, co REALNIE stało w poście. Bez tego ostrzeżenie mówi „nie ufaj",
+   *  nie dając czym to sprawdzić. */
+  surowa: string | null;
+}
+
+/** Ostrzeżenia o OBU końcach trasy.
+ *
+ *  Wcześniej pasek patrzył wyłącznie na punkt odbioru — więc zlecenie
+ *  z rozpoznaną Dębicą i nierozpoznanym Turkiem nie dostawało w panelu
+ *  ŻADNEGO ostrzeżenia, mimo że to właśnie ten drugi koniec kasował kilometry.
+ *  Brak celu, którego autor w ogóle nie podał, jest osobnym przypadkiem: nie
+ *  ma czego nie rozpoznać, a operator ma zadzwonić i spytać. */
+export function ostrzezeniaLokalizacji(z: Zlecenie): OstrzezenieLokalizacji[] {
+  const wynik: OstrzezenieLokalizacji[] = [];
+  const surowa = (...pola: (string | null | undefined)[]) =>
+    pola.find((p) => p && p.trim()) ?? null;
+
+  const odbiorSurowa = surowa(z.odbior_raw, z.odbior_miasto, z.odbior_kod);
+  if (lokalizacjaNiepewna(z.lokalizacja_zrodlo)) {
+    wynik.push({
+      koniec: "Odbiór",
+      tytul:
+        z.lokalizacja_zrodlo === "brak"
+          ? "Nie rozpoznaliśmy miejsca odbioru"
+          : "Miejsce odbioru niepewne",
+      opis: opisZrodla(z.lokalizacja_zrodlo),
+      surowa: odbiorSurowa,
+    });
+  }
+
+  const dostawaSurowa = surowa(z.dostawa_raw, z.dostawa_miasto, z.dostawa_kod);
+  if (lokalizacjaNiepewna(z.dostawa_zrodlo)) {
+    const bezCelu = z.dostawa_zrodlo === "brak" && !dostawaSurowa;
+    wynik.push({
+      koniec: "Dostawa",
+      tytul: bezCelu
+        ? "Autor nie podał celu"
+        : z.dostawa_zrodlo === "brak"
+          ? "Nie rozpoznaliśmy celu"
+          : "Cel niepewny",
+      opis: bezCelu
+        ? "W poście nie ma dokąd. Bez celu nie ma długości kursu — spytaj przez telefon."
+        : opisZrodla(z.dostawa_zrodlo),
+      surowa: dostawaSurowa,
+    });
+  }
+  return wynik;
 }

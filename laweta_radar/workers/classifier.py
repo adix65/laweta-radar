@@ -15,9 +15,13 @@ TRZY RZECZY, KTÓRE TU DECYDUJĄ O WSZYSTKIM:
    które jej nie zna, i znika z raportu bez śladu. Ta warstwa wygląda na
    formalność i nią NIE JEST.
 
-2. NULL JEST LEPSZY NIŻ ZŁA WSPÓŁRZĘDNA. Zgadnięte miasto wysyła człowieka
-   80 km w złą stronę; puste pole każe mu przeczytać post. Dlatego prompt
-   zabrania zgadywania, a `kod`/`miasto` wypełniamy tylko przy jednoznaczności.
+2. NULL JEST LEPSZY NIŻ ZŁA WSPÓŁRZĘDNA — ALE TYLKO WTEDY, GDY DANEJ NAPRAWDĘ
+   NIE MA. Zgadnięte miasto wysyła człowieka 80 km w złą stronę; puste pole każe
+   mu przeczytać post. Dlatego prompt zabrania zgadywania. Drugą stroną tej samej
+   monety jest pole puste MIMO ŻE dana stoi w treści — to nie ostrożność, tylko
+   niedoczytanie, i kosztuje tyle samo. Prompt nazywa obie sytuacje wprost
+   i pokazuje je na przykładach, a kody pocztowe ma jeszcze `uzupelnij_kody`:
+   warstwę regexową POZA modelem, która dokłada to, co model przeoczył.
 
 3. AWARIA API NIE MOŻE KASOWAĆ POSTA. Każdy błąd wołania i każda nieczytelna
    odpowiedź kończy się `ClassifierUnavailable` — wołający zostawia post
@@ -131,6 +135,22 @@ def _log(msg: str) -> None:
 # Zasady ekstrakcji są tu WPISANE DOSŁOWNIE, razem z uzasadnieniem („zła
 # współrzędna wyśle człowieka 80 km w złą stronę"). Model, który wie DLACZEGO
 # ma zostawić null, zostawia null częściej niż model, któremu tylko kazano.
+#
+# DWIE RÓŻNE PUSTKI. Produkcja pokazała, że mały model wypełnia pole, gdy dana
+# jest podana wprost i prosto, a pomija je, gdy wymaga choćby minimalnej
+# interpretacji: nazwa miejscowości zagranicznej („Zulte"), kod pocztowy wśród
+# innych liczb („z kodu 54-100"), marka w środku zdania („transportu dla Renault
+# Trafic"). Efekt wygląda w bazie jak brak danych, a jest niedoczytaniem. Dlatego
+# prompt rozróżnia dwie sytuacje NAZWANE WPROST: „tego w poście NIE MA" (null
+# jest poprawną odpowiedzią i tak ma zostać) oraz „jest, tylko trzeba przeczytać
+# uważniej" (null jest wtedy błędem). Zakaz zgadywania zostaje bez zmian — to on
+# broni przed wysłaniem człowieka 80 km w złą stronę.
+#
+# PRZYKŁADY NA KOŃCU SĄ CZĘŚCIĄ MECHANIZMU, nie ilustracją. Na modelach tej klasy
+# (gpt-5.4-nano i podobne) para „post -> oczekiwany JSON" działa mocniej niż sama
+# instrukcja, bo pokazuje decyzję zamiast ją opisywać. Trzy przykłady uczą, co
+# WYCIĄGNĄĆ, czwarty — kiedy zostawić null; bez tego czwartego zestaw uczyłby
+# wypełniania pól za wszelką cenę, czyli halucynacji geo.
 # ---------------------------------------------------------------------------
 SYSTEM = """Jesteś analitykiem zgłoszeń dla firmy lawetowej z Podkarpacia. Czytasz posty
 z grup na Facebooku i wyciągasz z nich dane o zleceniu.
@@ -161,15 +181,46 @@ ZASADY EKSTRAKCJI:
 
   ODBIÓR i DOSTAWA. Post rzadko mówi wprost "z X do Y". Częściej: "spod Biedronki
   na Podkarpackiej do warsztatu w Rzeszowie". Wyciągnij co się da do `raw`, a `kod`
-  i `miasto` wypełnij TYLKO gdy są jednoznaczne. Kod pocztowy przepisuj DOKŁADNIE
-  tak, jak stoi w poście — polski to dwie cyfry-myślnik-trzy cyfry ("38-400"),
-  ale post bywa obcojęzyczny i wtedy kod wygląda inaczej: niemiecki, francuski
-  i włoski to pięć cyfr ("50667"), czeski i słowacki trzy cyfry, spacja, dwie
-  ("110 00"), holenderski cztery cyfry i dwie litery ("1012 AB"), austriacki
-  i belgijski cztery cyfry ("1010"). Zgadywanie miasta z kontekstu jest zabronione: null
-  jest lepszy niż zła współrzędna, bo zła współrzędna wyśle człowieka 80 km w złą
-  stronę. Gdy jest tylko jedno miejsce (np. "zdechłem w Sanoku"), wypełnij `odbior`,
-  a `dostawa` zostaw z samymi nullami.
+  i `miasto` wypełnij zawsze, gdy STOJĄ W TREŚCI.
+
+  KAŻDA NAZWA MIEJSCOWOŚCI, KTÓRA PADA W POŚCIE, MA TRAFIĆ DO `miasto` — również
+  zagraniczna ("Venlo", "Gent", "Zwickau", "Wien"), również taka, której nie znasz,
+  również nieodmieniona, napisana z małej litery albo bez ogonków. To, że nazwa
+  brzmi obco i nic ci nie mówi, NIE jest powodem do zostawienia nulla: skoro stoi
+  w treści, jest daną. Nazwę zapisz w MIANOWNIKU ("z Dębicy" -> "Dębica", "pod
+  Krosnem" -> "Krosno"), ale NIE TŁUMACZ jej na inny język. Kierunek czytasz
+  z przyimków — "z", "ze", "spod", "od", "aus", "from" to ODBIÓR, "do", "na",
+  "nach", "to" to DOSTAWA. Gdy obok miejscowości stoi region albo kraj
+  ("z Holandii Venlo", "do Małopolskie Gorlice"), do `miasto` idzie SAMA
+  MIEJSCOWOŚĆ ("Venlo", "Gorlice"), a całość ("Holandia Venlo") do `raw`.
+
+  KAŻDY CIĄG WYGLĄDAJĄCY NA KOD POCZTOWY MA TRAFIĆ DO `kod` — również wtedy, gdy
+  stoi w środku zdania, wśród innych liczb albo bez nazwy miasta obok ("z kodu
+  54-100", "PLZ 50667", "odbiór 110 00 Praha"). Przepisuj DOKŁADNIE tak, jak stoi
+  w poście — polski to dwie cyfry-myślnik-trzy cyfry ("38-400"), ale post bywa
+  obcojęzyczny i wtedy kod wygląda inaczej: niemiecki, francuski i włoski to pięć
+  cyfr ("50667"), czeski i słowacki trzy cyfry, spacja, dwie ("110 00"),
+  holenderski cztery cyfry i dwie litery ("1012 AB"), austriacki i belgijski
+  cztery cyfry ("1010"). Kodem NIE JEST numer telefonu, cena, rocznik, przebieg
+  ani pojemność silnika: "moge dac 2500 zl", "rocznik 2015", "tel 502 33 44 55"
+  zostawiają `kod` nullem.
+
+  NIE ZGADUJESZ. Nie dopisujesz miasta z kodu pocztowego, kodu z miasta ani
+  miejscowości z nazwy kraju czy województwa. Zgadywanie miasta z kontekstu jest
+  zabronione: null jest lepszy niż zła współrzędna, bo zła współrzędna wyśle
+  człowieka 80 km w złą stronę. Cała różnica jest między "TEGO W POŚCIE NIE MA"
+  (wtedy null jest poprawną odpowiedzią i tak ma zostać) a "JEST, tylko trzeba
+  przeczytać uważniej" (wtedy null jest błędem). Gdy jest tylko jedno miejsce
+  (np. "zdechłem w Sanoku"), wypełnij `odbior`, a `dostawa` zostaw z samymi nullami.
+
+  POJAZD. KAŻDA MARKA I KAŻDY MODEL, KTÓRE PADAJĄ W POŚCIE, MAJĄ TRAFIĆ DO
+  `pojazd.opis` — również w środku zdania ("szukam transportu dla Renault Trafic",
+  "przewiezie ktoś mikrosamochodu Aixam"), również sama marka bez modelu, również
+  zapisane z małej litery albo z literówką ("golf 4", "vw t4", "iveco daily").
+  Przepisz markę i model tak, jak stoją w treści, i dołóż rocznik, gdy autor go
+  podał. `kategoria` wybierasz z listy — przy marce, której nie kojarzysz, wpisz
+  "inne", ale `opis` wypełnij mimo to. Gdy pada tylko "auto", "samochód",
+  "osobówka" bez marki, `opis` zostaje nullem, bo marki w poście NIE MA.
 
   STAN POJAZDU. To decyduje o sprzęcie i cenie, więc czytaj uważnie:
   - `toczy_sie` = czy da się je wtoczyć/wciągnąć. "Zablokowana skrzynia", "zatarty
@@ -204,6 +255,67 @@ CZEGO NIE UZNAJEMY ZA ZLECENIE (czy_zlecenie=false):
 
 Posty są pisane na telefonie: bez ogonków, z literówkami, wielkimi literami
 i skrótami drogowymi ("dk28", "s19", "mop"). Traktuj je jak zwykły polski tekst.
+
+PRZYKŁADY. Cztery pary "post -> wynik". To WZORZEC CZYTANIA TREŚCI, a nie posty
+do analizy: nie przepisuj z nich żadnych wartości. Post do analizy przychodzi
+zawsze w wiadomości użytkownika, w znaczniku <post>.
+
+POST: Szukam lawety z Holandii Venlo do Małopolskie Gorlice
+WYNIK: {"czy_zlecenie": true, "typ": "transport",
+  "odbior": {"raw": "Holandia, Venlo", "kod": null, "miasto": "Venlo"},
+  "dostawa": {"raw": "małopolskie, Gorlice", "kod": null, "miasto": "Gorlice"},
+  "pojazd": {"opis": null, "kategoria": "inne"},
+  "stan": {"toczy_sie": true, "ma_kola": true, "po_wypadku": false, "uwagi": null},
+  "pilnosc": "elastycznie", "kontakt": {"typ": "brak", "wartosc": null},
+  "cena_sugerowana": null, "pewnosc": 70,
+  "powod": "autor szuka lawety na trasie Holandia-Polska"}
+DLACZEGO: "Venlo" to obca nazwa, której możesz nie znać, a mimo to jest w treści,
+więc wchodzi do `odbior.miasto`. Przy dostawie stoi region i miejscowość — do
+`miasto` idzie sama miejscowość. Marki nie ma nigdzie, więc `pojazd.opis` = null.
+
+POST: Dzien dobry, Szukam transportu dla Renault Trafic z kodu 54-100 do 38-400
+Krosno, auto nie odpala. Prosze o wycene na priv
+WYNIK: {"czy_zlecenie": true, "typ": "transport",
+  "odbior": {"raw": "54-100", "kod": "54-100", "miasto": null},
+  "dostawa": {"raw": "38-400 Krosno", "kod": "38-400", "miasto": "Krosno"},
+  "pojazd": {"opis": "Renault Trafic", "kategoria": "dostawczy"},
+  "stan": {"toczy_sie": true, "ma_kola": true, "po_wypadku": false,
+           "uwagi": "auto nie odpala"},
+  "pilnosc": "elastycznie", "kontakt": {"typ": "pw", "wartosc": null},
+  "cena_sugerowana": null, "pewnosc": 85,
+  "powod": "autor szuka transportu busa i prosi o wycene"}
+DLACZEGO: marka i model stoją w środku zdania — to nadal `pojazd.opis`. Oba kody
+wchodzą do pól `kod`, choć pierwszy stoi bez nazwy miasta obok. Do `odbior.miasto`
+nie wpisujesz NICZEGO: miasta w treści nie ma, a wyprowadzanie go z kodu to
+zgadywanie.
+
+POST: Przewiezie ktos mikrosamochodu Aixam z Debicy do Rzeszowa? Nie odpala,
+moze byc w tym tygodniu. 601 234 567
+WYNIK: {"czy_zlecenie": true, "typ": "transport",
+  "odbior": {"raw": "Dębica", "kod": null, "miasto": "Dębica"},
+  "dostawa": {"raw": "Rzeszów", "kod": null, "miasto": "Rzeszów"},
+  "pojazd": {"opis": "mikrosamochód Aixam", "kategoria": "osobowy"},
+  "stan": {"toczy_sie": true, "ma_kola": true, "po_wypadku": false,
+           "uwagi": "nie odpala"},
+  "pilnosc": "elastycznie", "kontakt": {"typ": "telefon", "wartosc": "601234567"},
+  "cena_sugerowana": null, "pewnosc": 85,
+  "powod": "autor szuka transportu mikrosamochodu"}
+DLACZEGO: komplet danych jest w treści, więc komplet pól ma być wypełniony.
+Nazwy miejscowości idą w mianowniku, marka razem z określeniem pojazdu.
+
+POST: Zdechl mi akumulator na parkingu pod biedronka, ktos podjedzie odpalic?
+WYNIK: {"czy_zlecenie": true, "typ": "odpalenie",
+  "odbior": {"raw": "parking pod Biedronką", "kod": null, "miasto": null},
+  "dostawa": {"raw": null, "kod": null, "miasto": null},
+  "pojazd": {"opis": null, "kategoria": "inne"},
+  "stan": {"toczy_sie": true, "ma_kola": true, "po_wypadku": false,
+           "uwagi": "zdechl akumulator"},
+  "pilnosc": "teraz", "kontakt": {"typ": "brak", "wartosc": null},
+  "cena_sugerowana": null, "pewnosc": 70,
+  "powod": "autor prosi o odpalenie auta"}
+DLACZEGO: tu null jest POPRAWNĄ odpowiedzią. Żadna miejscowość, żaden kod
+i żadna marka w treści nie padły — nie wolno ich dopisać z kontekstu ani z nazwy
+grupy. To jest różnica między "nie ma" a "jest, tylko trzeba przeczytać uważniej".
 """
 
 
@@ -455,6 +567,76 @@ def zwaliduj(dane: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# FALLBACK REGEXOWY — kody, które model przeoczył
+#
+# PO CO. Prompt można wzmocnić, ale nie da się go wymusić: mały model raz na
+# jakiś czas nie zobaczy kodu stojącego wśród innych liczb („z kodu 54-100"),
+# choć `geo.znajdz_kody` znajduje go trywialnie i bez sieci. Ta warstwa dokłada
+# to, co ZOSTAŁO NA STOLE — działa poza modelem, więc trzyma także wtedy, gdy
+# model odpowie byle jak albo zostanie przejęty treścią posta.
+#
+# TRZY ZASADY, KTÓRE TU OBOWIĄZUJĄ:
+#
+# 1. MODEL MA PIERWSZEŃSTWO. Fallback wypełnia WYŁĄCZNIE puste pola i nigdy nie
+#    nadpisuje tego, co oddał model — model czyta zdanie, regex czyta kształt
+#    cyfr, więc przy konflikcie rację ma model.
+# 2. TA SAMA WALIDACJA. Wartość z regexu przechodzi przez `_kod_pocztowy`,
+#    dokładnie jak wartość od modelu. Druga, „zaufana" ścieżka do bazy z
+#    pominięciem walidatora byłaby dziurą w jedynym miejscu, które pilnuje,
+#    co trafia do geokodera.
+# 3. ŚLAD W LOGU. Każde uzupełnienie leci na stderr ze znacznikiem
+#    `ZNACZNIK_FALLBACK_KOD`, żeby dało się policzyć (`grep`, `pm2 logs`), jak
+#    często model gubi to, co regex znajduje za darmo. Bez tej liczby nie da się
+#    ocenić, czy kolejna zmiana promptu cokolwiek dała.
+#
+# CZEGO TA WARSTWA NIE ROBI: nie zgaduje MIASTA. Nazwa miejscowości wymaga
+# przeczytania zdania, a nie dopasowania kształtu — od tego jest prompt.
+# Kolejność jest jedyną heurystyką kierunku, jaką tu mamy (pierwszy kod w treści
+# to zwykle odbiór), i przy poście z kodem wyłącznie przy dostawie wskaże pole
+# odbioru. Świadomie: kod z posta pod ręką operatora jest wart więcej niż dwa
+# puste pola, a `raw` i treść posta zostają na ekranie obok.
+# ---------------------------------------------------------------------------
+ZNACZNIK_FALLBACK_KOD = "fallback-kod"
+
+
+def uzupelnij_kody(wynik: dict, tresc: str) -> dict:
+    """Dopisz do wyniku kody pocztowe z treści posta, których model nie oddał.
+
+    Bierze `wynik` PO `zwaliduj` (czyli o pewnym kształcie) i zwraca ten sam
+    słownik, uzupełniony w miejscu. Kolejność wystąpienia w treści jest
+    kolejnością pól: pierwszy wolny kod idzie do `odbior`, następny do `dostawa`.
+
+    Kod, który model już wpisał, jest z puli WYKREŚLANY — porównaniem przez
+    `geo.normalizuj_kod`, bo "38-400" i "38400" to ten sam kod zapisany dwoma
+    sposobami, a bez tego ten sam adres wylądowałby drugi raz jako dostawa.
+    """
+    tresc = (tresc or "").strip()
+    if not tresc:
+        return wynik
+
+    puste = [pole for pole in ("odbior", "dostawa") if wynik[pole]["kod"] is None]
+    if not puste:
+        return wynik
+
+    zajete = {geo.normalizuj_kod(wynik[pole]["kod"]) for pole in ("odbior", "dostawa")
+              if wynik[pole]["kod"]}
+    wolne = [(kod, kraj) for kod, kraj in geo.znajdz_kody(tresc)
+             if geo.normalizuj_kod(kod) not in zajete]
+
+    for pole in puste:
+        while wolne:
+            kod, kraj = wolne.pop(0)
+            czysty = _kod_pocztowy(kod)
+            if czysty is None:
+                continue  # odrzucony przez walidację — bierzemy następny
+            wynik[pole]["kod"] = czysty
+            _log(f"{ZNACZNIK_FALLBACK_KOD} {pole}_kod={czysty!r} (kraj {kraj}) "
+                 f"— model oddał null, regex znalazł to w treści")
+            break
+    return wynik
+
+
+# ---------------------------------------------------------------------------
 # WEJŚCIE GŁÓWNE
 # ---------------------------------------------------------------------------
 def rozbierz(surowa_odpowiedz: str) -> dict:
@@ -483,13 +665,19 @@ def klasyfikuj(tresc: str, grupa: str = "", jezyk: str = "") -> dict:
     utrata kursu przy awarii, której nikt by nie zauważył. Fetcher łapie ten
     wyjątek, przestaje pytać model do końca przebiegu i zostawia post
     w kolejce do ponowienia.
+
+    OSTATNIM KROKIEM JEST FALLBACK REGEXOWY (`uzupelnij_kody`) — dokłada kody
+    pocztowe stojące w treści, których model nie oddał. Stoi TUTAJ, a nie
+    w `rozbierz`, bo tamta ścieżka nie zna treści posta i służy porównywarce
+    modeli, która ma mierzyć sam model, a nie model plus nasze łatki.
     """
     tresc = (tresc or "").strip()
     if not tresc:
         # Pusty post to nie awaria: nie ma czego wołać i nie ma za co płacić.
         return zwaliduj({"czy_zlecenie": False, "pewnosc": 0, "powod": "pusta treść posta"})
 
-    return rozbierz(llm.zapytaj(zbuduj_system(grupa, jezyk), zbuduj_user(tresc), MAX_TOKENS))
+    wynik = rozbierz(llm.zapytaj(zbuduj_system(grupa, jezyk), zbuduj_user(tresc), MAX_TOKENS))
+    return uzupelnij_kody(wynik, tresc)
 
 
 def warto_budzic(wynik: dict) -> bool:
@@ -498,8 +686,21 @@ def warto_budzic(wynik: dict) -> bool:
     To decyzja o DOSTARCZENIU, nie o widoczności: post z niską pewnością nadal
     jest w bazie i nadal go widać. Zasada naczelna repo mówi o ukrywaniu
     rekordów, a nie o tym, czy budzimy kogoś w nocy.
+
+    NIEZNANA PEWNOŚĆ BUDZI. `int(pewnosc or 0)` zamieniłoby brak danych w zero,
+    czyli w wartość poniżej każdego progu — i tak właśnie znikło 15 zleceń
+    z `pewnosc IS NULL` po stronie powiadomień. Progiem odsiewamy model, który
+    powiedział „mało pewne", a nie sytuację, w której nie powiedział nic.
     """
-    return bool(wynik.get("czy_zlecenie")) and int(wynik.get("pewnosc") or 0) >= PROG_PEWNOSCI
+    if not bool(wynik.get("czy_zlecenie")):
+        return False
+    surowa = wynik.get("pewnosc")
+    if surowa is None or isinstance(surowa, bool):
+        return True
+    try:
+        return int(surowa) >= PROG_PEWNOSCI
+    except (TypeError, ValueError):
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +869,11 @@ def _main(argv: list[str]) -> int:
     try:
         odp = llm.zapytaj_ze_zuzyciem(zbuduj_system(args.grupa, args.jezyk),
                                       zbuduj_user(tresc), MAX_TOKENS)
-        wynik = rozbierz(odp.tekst)
+        # Fallback też — CLI ma pokazywać to, co realnie trafi do bazy, a nie
+        # samą odpowiedź modelu. Inaczej „sprawdziłem na CLI" znaczy co innego
+        # niż „tak wyszło na produkcji", i to przy polu, którego akurat dotyczy
+        # cała ta warstwa. Uzupełnienia widać w logu na stderr.
+        wynik = uzupelnij_kody(rozbierz(odp.tekst), tresc)
     except ClassifierUnavailable as e:
         _log(f"{e}")
         _log("post zostałby w bazie bez klasyfikacji (zrodlo_decyzji=NULL), do ponowienia")

@@ -43,7 +43,13 @@ Dwie zasady rozstrzygania między słownikami:
   załatwione" przestaje być zleceniem niezależnie od tego, w jakim języku to
   napisano. Samo „weź najlepszy wynik" tu nie wystarcza: słownik, który nie zna
   zwrotu „hat sich erledigt", po prostu milczy — a milczenie wygląda lepiej niż
-  odrzucenie.
+  odrzucenie;
+- **wśród przepuszczeń wygrywa NAZWANA REGUŁA, dopiero potem wyższa punktacja.**
+  Część wzorców jest niezależna od języka (marki aut, kody pocztowe, nazwy domów
+  aukcyjnych) i punktuje w KAŻDYM słowniku, a twarde przepuszczenie ma z definicji
+  zero punktów. Bez tej kolejności polski post „Do zabrania iveco … do 08-110
+  siedlce" wygrywał słownikiem **niemieckim** i dostawał znacznik `de` — czyli
+  podpowiedź, żeby oddzwonić po niemiecku do kogoś, kto pisał po polsku.
 
 Szczegóły warstw, wag i doboru wzorców: docstring `workers/gate.py`.
 
@@ -73,6 +79,13 @@ Mówi ona trzy rzeczy:
    nie znajdzie się w geokoderze, albo znajdzie się w złym miejscu — a zlecenie
    z błędną pozycją jest gorsze niż brak zlecenia, bo zjada uwagę operatora i wysyła
    go nie tam.
+
+Prompt klasyfikatora dokłada do tego jedną zasadę, która NIE JEST tłumaczeniem:
+nazwę zapisuje się w **mianowniku** („z Dębicy" → „Dębica", „pod Krosnem" →
+„Krosno"). Odmiana to końcówka przypadka, a nie inny język — i to na niej wykłada
+się dopasowanie do bazy kodów, bo `geo.normalizuj_nazwe` zdejmuje ogonki
+i wielkość liter, ale nie odmienia. Nazwa zagraniczna zwykle w polskim zdaniu
+i tak stoi nieodmieniona („z Belgii Zulte"), więc obie zasady się nie gryzą.
 
 Kontrakt wywołania (szew w fetcherze: `_klasyfikuj`; wypełniony przez
 `workers/classifier.py`):

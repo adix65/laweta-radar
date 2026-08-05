@@ -6,13 +6,16 @@ import { useEffect, useState } from "react";
 import PasekOstrzegawczy from "@/components/PasekOstrzegawczy";
 import { jednoZlecenie, zmienZlecenie } from "@/lib/api";
 import {
-  dystansGlowny,
   etykietaPilnosci,
+  etykietaTrasy,
   km,
   kolorPilnosci,
   linkTel,
   telefonCzytelnie,
+  transportZwierzat,
   trasa,
+  trasaUstalona,
+  wgAutora,
   wiek,
   zl,
 } from "@/lib/format";
@@ -124,11 +127,20 @@ export default function Szczegol() {
           ostrzeżenie po liczbie przychodzi już po tym, jak liczba została
           zaakceptowana. */}
       <div className="mt-3">
-        <PasekOstrzegawczy
-          zrodlo={z.lokalizacja_zrodlo}
-          surowa={z.odbior_raw ?? z.odbior_miasto}
-        />
+        <PasekOstrzegawczy zlecenie={z} />
       </div>
+
+      {/* Znacznik ładunku NAD liczbami, z tego samego powodu co pasek
+          ostrzegawczy: „1100 km · ~4400 zł" wygląda identycznie dla golfa
+          i dla wałacha, a ostrzeżenie po liczbie przychodzi już po tym, jak
+          liczba została zaakceptowana. Zlecenie zostaje w pełni obsługiwalne —
+          komplet przycisków, pełna treść, zmiana statusu. */}
+      {transportZwierzat(z) && (
+        <p className="mt-3 rounded-xl border border-obrys bg-karta-akcent px-3 py-2 text-opis font-bold text-ostrzezenie">
+          🐴 TRANSPORT ZWIERZĄT — poza standardową ofertą. Zlecenie jest tu w całości;
+          decyzja należy do Ciebie.
+        </p>
+      )}
 
       <section className="mt-3 flex items-center gap-3">
         <div className={`h-14 w-2 rounded-full ${kolorPilnosci(z.pilnosc)}`} />
@@ -137,10 +149,20 @@ export default function Szczegol() {
             {etykietaPilnosci(z.pilnosc)}
             {z.jezyk && z.jezyk !== "pl" ? ` · ${z.jezyk.toUpperCase()}` : ""}
           </p>
-          <p className="flex items-baseline gap-3">
-            <span className="text-liczba">{km(dystansGlowny(z))}</span>
-            <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
-          </p>
+          {/* Bez obu rozpoznanych końców trasy nie ma tu liczby ani ceny —
+              patrz `lib/format.etykietaTrasy`. Odległość od autora posta idzie
+              linijkę niżej, zawsze podpisana. */}
+          {trasaUstalona(z) ? (
+            <p className="flex items-baseline gap-3">
+              <span className="text-liczba">{etykietaTrasy(z)}</span>
+              <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
+            </p>
+          ) : (
+            <p className="text-opis font-bold text-ostrzezenie">{etykietaTrasy(z)}</p>
+          )}
+          {wgAutora(z) && (
+            <p className="text-opis text-tekst-cichy">{wgAutora(z)}</p>
+          )}
         </div>
       </section>
 
@@ -160,8 +182,14 @@ export default function Szczegol() {
                 : "NIE toczy się — potrzebna wyciągarka"
           }
         />
-        <Pole etykieta="Kurs (odbiór → dostawa)" wartosc={km(z.km_trasy)} />
+        <Pole etykieta="Kurs (odbiór → dostawa)" wartosc={etykietaTrasy(z)} />
+        {/* Dojazd z bazy TYLKO pod własną etykietą. To osobna, prawdziwa
+            liczba (baza→odbiór) i nigdy nie zastępuje długości kursu. */}
         <Pole etykieta="Dojazd z bazy" wartosc={km(z.km_od_bazy)} />
+        <Pole
+          etykieta="Odległość wg autora posta"
+          wartosc={z.km_wg_autora != null ? `${z.km_wg_autora} km` : null}
+        />
         <Pole etykieta="Kod odbioru" wartosc={z.odbior_kod} />
         <Pole etykieta="Kod dostawy" wartosc={z.dostawa_kod} />
         <Pole
