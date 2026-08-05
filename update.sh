@@ -22,8 +22,27 @@
 # znaczy 3 minuty przestoju panelu po literówce poprawionej w README.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${_UPDATE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$ROOT_DIR"
+
+# TEN SKRYPT AKTUALIZUJE SAM SIEBIE, i to nie jest drobiazg: `git merge` niżej
+# podmienia update.sh NA DYSKU w trakcie jego wykonywania, a bash doczytuje plik
+# w miarę potrzeby — z przesunięciem policzonym dla pliku, którego już nie ma.
+# Dalsza część przebiegu leci wtedy z mieszanki starej i nowej wersji.
+#
+# Objaw jest mylący do bólu: poprawka w update.sh "nie działa" dokładnie w tym
+# uruchomieniu, które ją ściągnęło, i wygląda na niedziałającą poprawkę zamiast
+# na przeczytany do połowy plik. Kosztowało to trzy rundy zgadywania.
+#
+# Dlatego pracujemy z KOPII w /tmp: plik w repo może się zmieniać do woli.
+if [[ -z "${_UPDATE_KOPIA:-}" ]]; then
+    KOPIA="$(mktemp -t update.sh.XXXXXX)"
+    cat "$ROOT_DIR/update.sh" > "$KOPIA"
+    KOD=0
+    _UPDATE_KOPIA=1 _UPDATE_ROOT="$ROOT_DIR" bash "$KOPIA" "$@" || KOD=$?
+    rm -f "$KOPIA"
+    exit "$KOD"
+fi
 
 FORCE=0
 SUCHO=0
