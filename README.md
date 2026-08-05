@@ -457,6 +457,8 @@ panel/                    # PWA na telefon (Next.js 16 / React 19 / Tailwind 4)
   lib/                    # klient API, formatowanie, polling
   public/                 # manifest, service worker, PRAWDZIWE pliki ikon
   scripts/ikony.py        # generator ikon — odpalany RĘCZNIE, nie w runtime
+ecosystem.config.js       # PM2: laweta-api + laweta-bot (fetcher chodzi z crona)
+update.sh                 # aktualizacja maszyny: git -> pip -> migracje -> build -> restart
 ```
 
 Podział `workers/` vs `scripts/` jest celowy: **worker odpala się sam**, z crona, co
@@ -811,6 +813,39 @@ jest sufitem, którego harmonogram nie przeskoczy.
 
 ### Aktualizacja
 
+Jedno polecenie — ściąga z GitHuba, dokłada zależności, migruje bazę, przebudowuje
+panel i przeładowuje procesy:
+
+```bash
+cd /home/ubuntu/laweta-radar && ./update.sh
+```
+
+```
+./update.sh --sucho        # co przyszło i co się z tego odpali; nic nie rusza
+./update.sh --force        # przebuduj i przeładuj mimo braku nowych commitów
+./update.sh --bez-panelu   # sam API + bot, bez trzyminutowego builda panelu
+```
+
+Skrypt robi **tylko to, co wynika z diffa**: `pip install` przy zmianie
+`requirements.txt`, migracje przy nowym pliku `api/migrations/*.sql`, build panelu
+przy zmianie w `panel/`. Bezwarunkowe robienie wszystkiego znaczyłoby trzy minuty
+przestoju panelu po literówce poprawionej w README.
+
+Restarty idą **na samym końcu**, po wszystkim, co może paść. Inaczej build panelu
+(minuty) trwałby przy API na nowym kodzie, panelu na starym i bazie na starym
+schemacie. Z tego samego powodu nieudane migracje **zatrzymują deploy przed
+restartem** — system zostaje na starym kodzie, czyli w stanie, który działa.
+
+Skrypt pilnuje też `WERSJA` w `panel/public/sw.js`: powłoka panelu zmieniona bez
+podbicia wersji znaczy telefon, na którym raz zainstalowano PWA, zostający ze
+starą wersją na zawsze (cache-first). Ostrzeżenie wypada przed buildem.
+
+Na końcu odpytuje `/health` i port panelu — „gotowe" ma znaczyć, że **wstało**,
+a nie że PM2 przyjął polecenie. Proces wstający i padający w pętli wygląda
+w `pm2 restart` na sukces.
+
+Ręcznie to samo, gdyby skrypt nie wchodził w grę:
+
 ```bash
 cd /home/ubuntu/laweta-radar && git pull
 ./venv/bin/pip install -r laweta_radar/requirements.txt
@@ -818,9 +853,6 @@ bash laweta_radar/scripts/migrate.sh          # migracje są idempotentne (IF NO
 pm2 restart laweta-api laweta-bot
 (cd panel && npm ci && npm run build) && pm2 restart laweta-panel
 ```
-
-Po zmianie powłoki panelu podbij `WERSJA` w `panel/public/sw.js` — bez tego
-telefon, na którym raz zainstalowano PWA, zostaje ze starą wersją na zawsze.
 
 ## Diagnostyka
 
