@@ -24,5 +24,9 @@ cd "$ROOT_DIR"
 # nginx z TLS-em i to on odpowiada za dostęp. Nasłuch na 0.0.0.0 wystawiłby bazę
 # zleceń — łącznie z numerami telefonów obcych ludzi z grup FB — wprost do
 # internetu, niezależnie od tokenu.
+#
+# PORT jest zmienną, host NIE. Port musi dać się przesunąć, żeby instancja
+# testowa stanęła obok produkcyjnej na tym samym VPS-ie (API_PORT w .env).
+# Host zmienną nie jest, bo jedyna jego alternatywa wystawia bazę do internetu.
 PY="${PYTHON_BIN:-$ROOT_DIR/venv/bin/python3}"
-exec "$PY" -m uvicorn laweta_radar.api.main:app --host 127.0.0.1 --port 8002
+exec "$PY" -m uvicorn laweta_radar.api.main:app --host 127.0.0.1 --port "${API_PORT:-8002}"

@@ -22,16 +22,49 @@
 # znaczy 3 minuty przestoju panelu po literówce poprawionej w README.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${_UPDATE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$ROOT_DIR"
+
+# TEN SKRYPT AKTUALIZUJE SAM SIEBIE, i to nie jest drobiazg: `git merge` niżej
+# podmienia update.sh NA DYSKU w trakcie jego wykonywania, a bash doczytuje plik
+# w miarę potrzeby — z przesunięciem policzonym dla pliku, którego już nie ma.
+# Dalsza część przebiegu leci wtedy z mieszanki starej i nowej wersji.
+#
+# Objaw jest mylący do bólu: poprawka w update.sh "nie działa" dokładnie w tym
+# uruchomieniu, które ją ściągnęło, i wygląda na niedziałającą poprawkę zamiast
+# na przeczytany do połowy plik. Kosztowało to trzy rundy zgadywania.
+#
+# Dlatego pracujemy z KOPII w /tmp: plik w repo może się zmieniać do woli.
+if [[ -z "${_UPDATE_KOPIA:-}" ]]; then
+    KOPIA="$(mktemp -t update.sh.XXXXXX)"
+    cat "$ROOT_DIR/update.sh" > "$KOPIA"
+    KOD=0
+    _UPDATE_KOPIA=1 _UPDATE_ROOT="$ROOT_DIR" bash "$KOPIA" "$@" || KOD=$?
+    rm -f "$KOPIA"
+    exit "$KOD"
+fi
 
 FORCE=0
 SUCHO=0
 PANEL=1
 BLEDY=0
 
-API_PORT="${API_PORT:-8002}"       # patrz laweta_radar/scripts/start_api.sh
-PANEL_PORT="${PANEL_PORT:-6200}"   # patrz panel/package.json, skrypt `start`
+# Nazwy procesów i porty biorą się z .env TEJ instancji — inaczej `update.sh`
+# odpalony w /home/ubuntu/laweta-test przeładowałby procesy produkcyjne, bo
+# nazwy PM2 są globalne, a katalog nie ma z nimi nic wspólnego.
+z_env() {   # klucz, wartość domyślna
+    local v=""
+    if [[ -f laweta_radar/.env ]]; then
+        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" laweta_radar/.env \
+             | tail -1 | sed 's/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//')"
+    fi
+    echo "${v:-$2}"
+}
+
+INSTANCJA="${INSTANCJA:-$(z_env INSTANCJA '')}"
+NAZWA="laweta${INSTANCJA:+-$INSTANCJA}"
+API_PORT="${API_PORT:-$(z_env API_PORT 8002)}"       # patrz laweta_radar/scripts/start_api.sh
+PANEL_PORT="${PANEL_PORT:-$(z_env PANEL_PORT 6200)}" # patrz panel/package.json, skrypt `start`
 
 log() { echo "[update] $*"; }
 ostrzez() { echo "[update] !! $*" >&2; }
@@ -135,7 +168,7 @@ if [[ $SUCHO -eq 1 ]]; then
     log "  migracje:      $([[ $MIGRACJE -eq 1 ]] && echo TAK || echo 'nie (brak nowych .sql)')"
     log "  npm ci:        $([[ $NPM_CI -eq 1 ]] && echo TAK || echo nie)"
     log "  build panelu:  $([[ $BUILD -eq 1 ]] && echo TAK || echo nie)"
-    log "  restart:       laweta-api, laweta-bot$([[ $BUILD -eq 1 ]] && echo ', laweta-panel' || true)"
+    log "  restart:       $NAZWA-api, $NAZWA-bot$([[ $BUILD -eq 1 ]] && echo ", $NAZWA-panel" || true)"
     exit 0
 fi
 
@@ -163,6 +196,31 @@ if [[ $PIP -eq 1 ]]; then
         BLEDY=1
     fi
 fi
+
+# SDK providera modelu. requirements.txt trzyma tylko `anthropic` i to jest
+# świadome: krótka lista to mniej rzeczy, które mogą się nie zbudować na świeżym
+# VPS-ie o drugiej w nocy. Ale skoro .env MÓWI, którego providera używamy, deploy
+# ma go dowieźć — brak paczki jest awarią CICHĄ: fetcher wstaje, posty przechodzą
+# przez bramkę i czekają w bazie, a nikt nie dostaje alertu.
+#
+# Sprawdzamy import, nie `pip show`: liczy się to, czy proces zaraz to zaimportuje.
+sdk_providera() {
+    local provider pakiet modul
+    provider="$(z_env LLM_PROVIDER anthropic)"
+    case "$provider" in
+        openai) pakiet="openai>=1.40.0";      modul="openai" ;;
+        gemini) pakiet="google-genai>=1.0.0"; modul="google.genai" ;;
+        *)      return 0 ;;   # anthropic (i nieznane, które do niego degraduje) jest w requirements.txt
+    esac
+    [[ -x "$PY" ]] || return 0
+    "$PY" -c "import $modul" 2>/dev/null && return 0
+    log "LLM_PROVIDER=$provider — brakuje pakietu, dokładam $pakiet"
+    if ! "$PY" -m pip install --quiet "$pakiet"; then
+        ostrzez "nie udało się doinstalować $pakiet — klasyfikator będzie milczeć."
+        BLEDY=1
+    fi
+}
+sdk_providera
 
 # --- 5. Migracje -----------------------------------------------------------
 
@@ -221,19 +279,41 @@ przeladuj() {
         ostrzez "PM2 nie zna procesu '$proc' — pomijam (pierwsze uruchomienie: README, sekcja Deploy)."
         return
     fi
-    if pm2 restart "$proc" >/dev/null 2>&1; then
+    # Wyjście PM2 ląduje w zmiennej, a nie w /dev/null: "nie przeszedł" bez
+    # powodu zostawia operatora z niczym, a powód PM2 podaje wprost.
+    local wyjscie stan
+    if wyjscie="$(pm2 restart "$proc" 2>&1)"; then
         log "przeładowany: $proc"
-    else
-        ostrzez "pm2 restart $proc nie przeszedł — pm2 logs $proc"
-        BLEDY=1
+        return
     fi
+
+    # Proces, który NIE chodził, jest osobnym przypadkiem, a nie awarią
+    # aktualizacji. Bot bez TELEGRAM_BOT_TOKEN kończy CZYSTO (zasada z całego
+    # repo), więc PM2 trzyma go w pętli `waiting restart` i odbija `pm2 restart`
+    # przez "Process not found". Nowy kod podejmie sam przy najbliższym
+    # nawrocie — traktowanie tego jak błędu uczy operatora ignorować błędy.
+    # Wycinamy tablicę od pierwszego [ do ostatniego ], bo `pm2 jlist` potrafi
+    # dokleić na stdout baner (np. "In-memory PM2 is out-of-date"), na którym
+    # JSON.parse całości się wywala — a wtedy stan wychodzi pusty i proces, który
+    # po prostu nie chodził, jest raportowany jako awaria.
+    stan="$(pm2 jlist 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=d.indexOf("["),j=d.lastIndexOf("]");const a=JSON.parse(d.slice(i,j+1)).find(p=>p.name===process.argv[1]);process.stdout.write(a?String(a.pm2_env.status):"")}catch(e){}})' "$proc" 2>/dev/null)"
+    if [[ -n "$stan" && "$stan" != "online" ]]; then
+        log "pominięty: $proc (stan: $stan — nie chodzi, podejmie nowy kod sam)"
+        log "           dlaczego nie chodzi:  pm2 logs $proc --lines 30 --nostream"
+        return
+    fi
+
+    ostrzez "pm2 restart $proc nie przeszedł:"
+    sed 's/^/           /' <<<"$wyjscie" >&2
+    ostrzez "logi procesu:  pm2 logs $proc --lines 30"
+    BLEDY=1
 }
 
-log "Przeładowuję procesy."
-przeladuj laweta-api
-przeladuj laweta-bot
+log "Przeładowuję procesy${INSTANCJA:+ (instancja: $INSTANCJA)}."
+przeladuj "$NAZWA-api"
+przeladuj "$NAZWA-bot"
 if [[ $BUILD -eq 1 ]]; then
-    przeladuj laweta-panel
+    przeladuj "$NAZWA-panel"
 fi
 
 # --- 8. Czy na pewno wstało ------------------------------------------------
@@ -262,7 +342,7 @@ if command -v curl >/dev/null 2>&1; then
             ostrzez "API wstało, ale zgłasza braki: bash laweta_radar/scripts/check_setup.sh"
         fi
     else
-        ostrzez "API nie odpowiada na 127.0.0.1:$API_PORT/health — pm2 logs laweta-api"
+        ostrzez "API nie odpowiada na 127.0.0.1:$API_PORT/health — pm2 logs $NAZWA-api"
         BLEDY=1
     fi
 
@@ -270,7 +350,7 @@ if command -v curl >/dev/null 2>&1; then
         if czekaj_na "http://127.0.0.1:$PANEL_PORT/"; then
             log "Panel: odpowiada na :$PANEL_PORT"
         else
-            ostrzez "panel nie odpowiada na :$PANEL_PORT — pm2 logs laweta-panel"
+            ostrzez "panel nie odpowiada na :$PANEL_PORT — pm2 logs $NAZWA-panel"
             BLEDY=1
         fi
     fi

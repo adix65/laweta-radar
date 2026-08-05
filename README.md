@@ -445,6 +445,7 @@ laweta_radar/
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
+    odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
   tests/               # testy offline (bez sieci i bez bazy)
     dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
   .env.example
@@ -460,7 +461,8 @@ panel/                    # PWA na telefon (Next.js 16 / React 19 / Tailwind 4)
   lib/                    # klient API, formatowanie, polling
   public/                 # manifest, service worker, PRAWDZIWE pliki ikon
   scripts/ikony.py        # generator ikon — odpalany RĘCZNIE, nie w runtime
-ecosystem.config.js       # PM2: laweta-api + laweta-bot (fetcher chodzi z crona)
+ecosystem.config.js       # PM2: api + bot + panel (fetcher chodzi z crona)
+setup.sh                  # PIERWSZE uruchomienie: venv, .env, baza, migracje, build, PM2
 update.sh                 # aktualizacja maszyny: git -> pip -> migracje -> build -> restart
 ```
 
@@ -783,20 +785,50 @@ bez trasy, bez jednego błędu w logu.
 ```bash
 # na VPS-ie, jako użytkownik aplikacji
 git clone <repo> /home/ubuntu/laweta-radar && cd /home/ubuntu/laweta-radar
-python3.11 -m venv venv
-./venv/bin/pip install -r laweta_radar/requirements.txt
-
-cp laweta_radar/.env.example laweta_radar/.env && $EDITOR laweta_radar/.env
-DATABASE_URL_ADMIN="postgresql://postgres@localhost/laweta" \
-  bash laweta_radar/scripts/migrate.sh
-
-pm2 start ecosystem.config.js
-pm2 save && pm2 startup
+./setup.sh                    # venv, zależności, .env, baza, migracje, panel, PM2
+$EDITOR laweta_radar/.env     # klucze: ANTHROPIC_API_KEY, TELEGRAM_*, SHARED_ENV_PATH
+./update.sh --force --bez-panelu   # przeładuj API i bota z uzupełnioną konfiguracją
+pm2 startup                   # żeby wstało po reboocie (pm2 save robi setup.sh)
 ```
 
-`ecosystem.config.js` zakłada `/home/ubuntu/laweta-radar` — podmień, jeśli
-rozpakowujesz gdzie indziej. PM2 startuje procesy ze swojego środowiska, nie
+`setup.sh` **nie instaluje pakietów systemowych** (python3.11, node 20+, psql, pm2)
+— to decyzja o stanie maszyny, nie o tym projekcie. Brakujące wypisze naraz,
+z gotowymi poleceniami. **Nie nadpisuje istniejącego `.env`** i **nie instaluje
+crona fetchera** (kredyt Apify i alerty to świadome włączenie, nie efekt uboczny
+deployu — wpis wypisuje się na końcu do wklejenia).
+
+Wygeneruje za to `API_TOKEN`, hasło do bazy, rolę i bazę w Postgresie, odpali
+migracje i testy offline. Puszczony drugi raz uzupełnia tylko to, czego brakuje.
+
+Ścieżki liczą się z położenia `ecosystem.config.js` (`__dirname`), więc repo
+działa w dowolnym katalogu — `/home/ubuntu/laweta-radar`, `/srv/laweta`, katalog
+domowy innego użytkownika. PM2 startuje procesy ze swojego środowiska, nie
 z powłoki logowania, dlatego `scripts/start_api.sh` wczytuje `.env` jawnie.
+
+### Instancja testowa obok produkcyjnej
+
+```bash
+git clone <repo> /home/ubuntu/laweta-test && cd /home/ubuntu/laweta-test
+./setup.sh --instancja test
+```
+
+`INSTANCJA=test` w `.env` przestawia **wszystko, co jest globalne na maszynie**:
+procesy nazywają się `laweta-test-api`, `laweta-test-bot`, `laweta-test-panel`,
+API stoi na 8012, panel na 6210, baza to `laweta_test`. Bez tego `pm2 restart
+laweta-api` z katalogu testowego ubiłby produkcję — nazwy PM2 są globalne
+i katalog nie ma z nimi nic wspólnego.
+
+Puste `INSTANCJA` (domyślne) = `laweta-api`, porty 8002/6200 — czyli dokładnie
+to, co było. `update.sh` czyta tę samą zmienną, więc przeładowuje procesy TEJ
+instancji, w której stoi.
+
+Instancja testowa **nie ma crona**, więc niczego sama nie zbiera i nic nie
+kosztuje. Do sprawdzenia, co by zrobiła:
+
+```bash
+./venv/bin/python -m laweta_radar.workers.fb_fetcher --sucho   # plan i koszt, bez sieci
+bash laweta_radar/scripts/check_setup.sh                       # czego brakuje
+```
 
 W `.env` **nie wpisujesz kluczy Apify** — ustaw tylko `SHARED_ENV_PATH` na `.env`
 sales-core-engine (domyślna ścieżka `/home/ubuntu/sales-core-engine/.env` zwykle
@@ -804,16 +836,18 @@ wystarcza). Użytkownik, z którego chodzi PM2, musi mieć prawo odczytu tamtego
 pliku — jeśli go nie ma, laweta wstanie i będzie milczeć, bo rotator zobaczy zero
 kluczy. Sprawdzisz to `bash laweta_radar/scripts/check_setup.sh`.
 
-`pm2 start ecosystem.config.js` podnosi **dwa** procesy: `laweta-api` i
-`laweta-bot`. Bot jest osobny, bo wisi na long pollingu i przez 30 sekund nic nie
-robi — wpięcie go w pętlę uvicorna znaczyłoby, że panel czeka na Telegrama.
+`pm2 start ecosystem.config.js` podnosi **trzy** procesy: `laweta-api`,
+`laweta-bot` i `laweta-panel`. Bot jest osobny, bo wisi na long pollingu i przez
+30 sekund nic nie robi — wpięcie go w pętlę uvicorna znaczyłoby, że panel czeka
+na Telegrama. Panel jest w tym samym pliku, a nie dokładany z palca po deployu,
+bo to jedno miejsce musi znać komplet procesów: `update.sh` przeładowuje po
+nazwach, a `pm2 save` zapisuje to, co faktycznie chodzi.
 
-Panel budujemy osobno (Node 20+):
+Panel wymaga Node 20+ i zbudowanej powłoki — `setup.sh` i `update.sh` robią to
+same. Ręcznie:
 
 ```bash
-cd /home/ubuntu/laweta-radar/panel
-npm ci && npm run build
-pm2 start "npm run start" --name laweta-panel --cwd /home/ubuntu/laweta-radar/panel
+cd /home/ubuntu/laweta-radar/panel && npm ci && npm run build
 ```
 
 nginx — API **musi** zostać na loopbacku. Token w nagłówku jest DRUGĄ warstwą,
@@ -910,6 +944,7 @@ pm2 restart laweta-api laweta-bot
 | nic nie przychodzi na Telegram | `python -m laweta_radar.services.telegram_notify` |
 | „brak kluczy Apify", choć są w `.env` | `source laweta_radar/scripts/env-shell.sh` |
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
+| czy darmowe proxy w ogóle dochodzi do Apify | `python laweta_radar/scripts/odswiez_proxy.py` (wymaga sieci) |
 | ile kredytu zostało na kontach | `python -m laweta_radar.workers.apify_credits` (wymaga sieci) |
 | dlaczego bramka przepuściła/odrzuciła post | `python -m laweta_radar.workers.gate "treść"` |
 | czy bramkę można już włączyć | `python laweta_radar/scripts/raport_gate.py` |
