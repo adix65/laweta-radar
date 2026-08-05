@@ -113,7 +113,12 @@ for kandydat in python3.11 python3.12 python3; do
         fi
     fi
 done
-[[ -n "$PY_SYS" ]] || BRAKI+=("python3.11+   ->  sudo apt install -y python3.11 python3.11-venv")
+# Podpowiedź jest DWUCZĘŚCIOWA, bo nazwa pakietu zależy od wydania: na 24.04
+# i nowszych `python3` to już 3.11+, a `python3.11` NIE ISTNIEJE jako pakiet
+# (apt przerywa wtedy całą komendę i nie instaluje też reszty z listy).
+# Na 22.04 domyślny python3 to 3.10 i wtedy trzeba wersji jawnie.
+[[ -n "$PY_SYS" ]] || BRAKI+=("python3.11+   ->  sudo apt install -y python3 python3-venv
+                       (Ubuntu 22.04:  sudo apt install -y python3.11 python3.11-venv)")
 
 command -v git >/dev/null 2>&1 || BRAKI+=("git           ->  sudo apt install -y git")
 command -v psql >/dev/null 2>&1 || BRAKI+=("psql          ->  sudo apt install -y postgresql postgresql-client")
