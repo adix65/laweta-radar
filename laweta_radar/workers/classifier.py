@@ -507,17 +507,45 @@ def warto_budzic(wynik: dict) -> bool:
 #
 # Ta sama zasada co w bramce: moduł nie pisze do bazy (ma zostać wołalny bez
 # DSN-a i testowalny bez bazy), ale to on wie, co znaczą jego pola. Kolumny
-# opisuje api/migrations/0003_klasyfikacja.sql; wołający bierze wartości stąd,
+# opisuje api/migrations/0004_klasyfikacja.sql; wołający bierze wartości stąd,
 # żeby kontrakt nie rozjechał się w dwóch miejscach naraz.
 #
 # `zrodlo_decyzji` mówi, KTO orzekł: "ai" = model odpowiedział, "gate" = bramka
 # odrzuciła post przed modelem, NULL = nikt (awaria API, do ponowienia).
 # Bez tej kolumny post niesklasyfikowany wygląda w zapytaniu identycznie jak
 # post uznany za nie-zlecenie, a to dwie zupełnie różne sytuacje.
+#
+# WERDYKT MODELU MA JEDNO ŹRÓDŁO: para (`zrodlo_decyzji`, `czy_zlecenie`).
+# `czy_zlecenie` mówi CO orzeczono, `zrodlo_decyzji='ai'` mówi, że orzekł to
+# model — razem niosą dokładnie tyle, ile niosła osobna kolumna `ai_zlecenie`
+# (patrz 0009_werdykt_modelu.sql), tylko bez drugiego miejsca do rozjechania.
+# Dwie kolumny na jedną informację żyją zgodnie dokładnie do pierwszej ścieżki
+# zapisu, która wypełni jedną z nich — a taką ścieżką był cały pierwszy przebieg
+# fetchera.
 # ---------------------------------------------------------------------------
+
+# Płaskie kolumny z ekstrakcji, w kolejności z migracji. JEDYNA lista tych nazw
+# w repo: buduje z niej INSERT fetchera (`workers/fb_fetcher._zapisz_post`),
+# UPDATE poniżej i test kompletu pól. Nazwa klucza w `wiersz_do_zapisu` JEST
+# nazwą kolumny — spłaszczanie `odbior.miasto` -> `odbior_miasto` dzieje się
+# w jednym miejscu, więc `.get()` po stronie zapisu nie ma jak trafić w pustkę.
+#
+# CZEGO TU NIE MA: `czy_zlecenie`, `zrodlo_decyzji`, `ai_model`, `ai_at`. To są
+# metadane decyzji, nie wynik ekstrakcji — i to po tej liście poznajemy zapis,
+# w którym model odpowiedział, a mimo to nie wpadło z niego NIC (`ekstrakcja_pusta`).
+KOLUMNY_EKSTRAKCJI = (
+    "typ",
+    "odbior_raw", "odbior_kod", "odbior_miasto",
+    "dostawa_raw", "dostawa_kod", "dostawa_miasto",
+    "pojazd_opis", "pojazd_kategoria",
+    "stan_toczy_sie", "stan_ma_kola", "stan_po_wypadku", "stan_uwagi",
+    "pilnosc", "kontakt_typ", "kontakt_wartosc",
+    "cena_sugerowana", "pewnosc", "powod",
+)
+
 SQL_ZAPIS = """
 UPDATE posty SET
-    ai_zlecenie      = %(ai_zlecenie)s,
+    czy_zlecenie     = %(czy_zlecenie)s,
     typ              = %(typ)s,
     odbior_raw       = %(odbior_raw)s,
     odbior_kod       = %(odbior_kod)s,
@@ -545,10 +573,21 @@ WHERE fb_id = %(fb_id)s
 
 
 def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[str, object]:
-    """Wynik klasyfikacji -> parametry do SQL_ZAPIS."""
+    """Wynik klasyfikacji -> parametry do SQL_ZAPIS ORAZ do INSERT-a fetchera.
+
+    Klucze są NAZWAMI KOLUMN. To jedyne miejsce, w którym zagnieżdżony JSON
+    modelu (`odbior.miasto`, `stan.toczy_sie`) zamienia się w płaskie nazwy
+    z migracji (`odbior_miasto`, `stan_toczy_sie`) — dlatego warstwa zapisu
+    nigdy nie zgaduje i nie ma czego pominąć cichym `.get()`.
+
+    Indeksujemy `wynik[...]`, a NIE `.get()`: wynik zawsze przechodzi przez
+    `zwaliduj`, więc brak klucza znaczy, że ktoś podał tu coś innego niż wynik
+    klasyfikatora. Wtedy `KeyError` jest właściwą odpowiedzią — None wpisany
+    po cichu do bazy to ta sama utrata, tylko odkryta miesiąc później.
+    """
     return {
         "fb_id": fb_id,
-        "ai_zlecenie": wynik["czy_zlecenie"],
+        "czy_zlecenie": wynik["czy_zlecenie"],
         "typ": wynik["typ"],
         "odbior_raw": wynik["odbior"]["raw"],
         "odbior_kod": wynik["odbior"]["kod"],
@@ -571,6 +610,25 @@ def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[
         "ai_model": model or llm.model_domyslny(),
         "zrodlo_decyzji": "ai",
     }
+
+
+def ekstrakcja_pusta(wiersz: dict[str, object]) -> bool:
+    """Czy w wierszu do zapisu NIE MA ANI JEDNEGO pola z ekstrakcji.
+
+    To jest detektor cichej utraty wyniku, za który zapłaciliśmy tokenami.
+    Realna odpowiedź modelu NIGDY nie daje samych NULL-i: `zwaliduj` wypełnia
+    `typ`, `pilnosc`, `pojazd_kategoria`, trzy boole stanu i `pewnosc`
+    wartościami domyślnymi nawet dla posta, z którego nic nie wynikło. Komplet
+    NULL-i przy `zrodlo_decyzji='ai'` znaczy więc jedno: wynik zgubił się
+    MIĘDZY klasyfikatorem a bazą — dokładnie tak, jak w pierwszym przebiegu
+    fetchera, gdzie `Decyzja` niosła sam werdykt, a reszta pól nie miała jak
+    dojechać do INSERT-a.
+
+    Sprawdzamy `is None`, a nie fałszywość: `stan_po_wypadku=False`,
+    `pewnosc=0` i `powod=""` są POPRAWNYMI wartościami i nie mogą uchodzić
+    za brak danych.
+    """
+    return all(wiersz.get(kolumna) is None for kolumna in KOLUMNY_EKSTRAKCJI)
 
 
 # ---------------------------------------------------------------------------

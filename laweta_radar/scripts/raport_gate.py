@@ -40,10 +40,22 @@ from laweta_radar.workers import gate as gate_mod  # noqa: E402
 
 KTO = "raport-gate"
 
-# Domyślna nazwa kolumny z werdyktem modelu. Kolumny jeszcze nie ma — dokłada ją
-# migracja klasyfikatora (prompt 3). Do tego czasu raport działa w okrojonej
-# formie i mówi o tym wprost, zamiast pokazywać puste zera jako "zero pomyłek".
-KOLUMNA_AI_DOMYSLNA = "ai_zlecenie"
+# JEDNO ŹRÓDŁO PRAWDY O WERDYKCIE MODELU: para (`zrodlo_decyzji`, `czy_zlecenie`).
+#
+# `czy_zlecenie` mówi, co orzeczono; `zrodlo_decyzji` mówi, KTO — 'ai' znaczy,
+# że odpowiedział model, 'gate' że post nie doszedł do modelu. Dopiero razem
+# odróżniają „model powiedział: to nie zlecenie" od „modelu nie pytano", czyli
+# jedyne rozróżnienie, na którym stoi ta macierz. Wiersz bez `zrodlo_decyzji='ai'`
+# NIE WCHODZI do macierzy w ogóle — wliczony jako „model też by odrzucił" pokazałby
+# zero fałszywych odrzuceń i wystawił zgodę na włączenie bramki, która gubi kursy.
+#
+# Wcześniej raport czytał osobną kolumnę `ai_zlecenie`. Miała nieść to samo,
+# a nie niosła nic: żadna ścieżka zapisu jej nie wypełniała, więc macierz
+# w KAŻDYM przebiegu mówiła „BRAK DANYCH" i nikt nie wiedział, czy bramka gubi
+# zlecenia. Dwie kolumny na jedną informację to jedna kolumna prawdziwa i jedna
+# cicho pusta — patrz api/migrations/0009_werdykt_modelu.sql.
+KOLUMNY_WERDYKTU = ("zrodlo_decyzji", "czy_zlecenie")
+ZRODLO_WERDYKTU = "czy_zlecenie przy zrodlo_decyzji='ai'"
 
 # Poniżej tylu sklasyfikowanych postów "zero fałszywych odrzuceń" nie znaczy nic.
 # Przy pięćdziesięciu postach zero jest wynikiem najbardziej prawdopodobnym także
@@ -69,18 +81,25 @@ def _kolumny(cur, tabela: str = "posty") -> set[str]:
     return {r[0] for r in cur.fetchall()}
 
 
-def _pobierz(cur, dni: int, kolumna_ai: str | None) -> list[dict]:
-    """Posty z okna wraz z decyzją bramki i (jeśli kolumna istnieje) werdyktem AI."""
-    ai_select = f", {kolumna_ai}" if kolumna_ai else ", NULL"
+def _pobierz(cur, dni: int, ma_werdykt: bool) -> list[dict]:
+    """Posty z okna wraz z decyzją bramki i (jeśli są kolumny) werdyktem modelu.
+
+    Werdykt składamy w SQL-u, nie w Pythonie: `CASE` przy `zrodlo_decyzji='ai'`
+    daje NULL dla wszystkiego, czego model nie widział, więc reszta raportu
+    dostaje dokładnie jedno pole `ai` o trzech stanach (True/False/nie pytano)
+    i nie ma jak pomylić „odrzucone przez bramkę" z „odrzucone przez model".
+    """
+    ai_select = ("CASE WHEN zrodlo_decyzji = 'ai' THEN czy_zlecenie END"
+                 if ma_werdykt else "NULL")
     cur.execute(
         f"""
         SELECT fb_id, tresc, post_url, grupa_nazwa,
-               gate_werdykt, gate_punkty, gate_powod, gate_tryb
+               gate_werdykt, gate_punkty, gate_powod, gate_tryb,
                {ai_select}
         FROM posty
         WHERE pobrany_at > NOW() - make_interval(days => %s)
         ORDER BY pobrany_at DESC
-        """,
+        """,  # noqa: S608 — `ai_select` to jedna z dwóch stałych powyżej
         (dni,),
     )
     out = []
@@ -186,7 +205,7 @@ def _naglowek(tytul: str) -> None:
     print(f"\n=== {tytul} " + "=" * max(0, 72 - len(tytul)))
 
 
-def _raport(wiersze: list[dict], prog: int, kolumna_ai: str | None, limit: int) -> int:
+def _raport(wiersze: list[dict], prog: int, ma_werdykt: bool, limit: int) -> int:
     z_bramka = [w for w in wiersze if w["werdykt"] is not None]
     z_ai = [w for w in z_bramka if w["ai"] is not None]
 
@@ -223,14 +242,13 @@ def _raport(wiersze: list[dict], prog: int, kolumna_ai: str | None, limit: int) 
         for p, n in sorted(powody.items(), key=lambda kv: -kv[1]):
             print(f"    {p:<20} {n}")
 
-    if not kolumna_ai:
+    if not ma_werdykt:
         _naglowek("MACIERZ POMYŁEK — NIEDOSTĘPNA")
-        print(f"  Tabela `posty` nie ma kolumny z werdyktem modelu"
-              f" (szukałem: {KOLUMNA_AI_DOMYSLNA}).")
-        print("  Dokłada ją migracja klasyfikatora — patrz prompt 3 i komentarz")
-        print("  na końcu api/migrations/0002_gate.sql. Bez niej NIE DA SIĘ policzyć")
-        print("  fałszywych odrzuceń, czyli jedynej liczby, która tu ma znaczenie.")
-        print("  Inna nazwa kolumny: --kolumna-ai <nazwa>.")
+        print(f"  Tabela `posty` nie ma kolumn z werdyktem modelu"
+              f" (szukałem: {', '.join(KOLUMNY_WERDYKTU)}).")
+        print("  Dokłada je migracja fetchera — bash laweta_radar/scripts/migrate.sh")
+        print("  (0003_fetcher.sql). Bez nich NIE DA SIĘ policzyć fałszywych")
+        print("  odrzuceń, czyli jedynej liczby, która tu ma znaczenie.")
         _naglowek("ROZKŁAD PUNKTÓW (bez podziału — brak werdyktów AI)")
         print(_histogram([w["punkty"] for w in z_bramka
                           if w["powod"].startswith("punktacja") and w["punkty"] is not None]))
@@ -239,8 +257,12 @@ def _raport(wiersze: list[dict], prog: int, kolumna_ai: str | None, limit: int) 
 
     if not z_ai:
         _naglowek("MACIERZ POMYŁEK — BRAK DANYCH")
-        print(f"  Kolumna `{kolumna_ai}` istnieje, ale żaden post w oknie jej nie ma.")
-        print("  Klasyfikator jeszcze nie przeszedł po tych postach.")
+        print(f"  Kolumny są, ale żaden post w oknie nie ma "
+              f"`zrodlo_decyzji='ai'` — czyli model nie orzekł o żadnym z nich.")
+        print("  Dwie możliwe przyczyny, obie do sprawdzenia w logu fetchera:")
+        print("    • klasyfikator jeszcze nie przeszedł po tych postach;")
+        print("    • przechodził, ale jego wynik nie dojechał do bazy — wtedy")
+        print("      w logu stoi linia OSTRZEŻENIE z fb_id (workers/fb_fetcher).")
         return 0
 
     m = _macierz(z_ai, prog)
@@ -315,8 +337,6 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--przelicz", action="store_true",
                     help="przepuść ZAPISANE treści przez AKTUALNY słownik zamiast "
                          "czytać stare decyzje — do sprawdzania poprawek")
-    ap.add_argument("--kolumna-ai", default=KOLUMNA_AI_DOMYSLNA,
-                    help=f"kolumna z werdyktem modelu (domyślnie {KOLUMNA_AI_DOMYSLNA})")
     ap.add_argument("--limit", type=int, default=50,
                     help="ile fałszywych odrzuceń wypisać w całości (domyślnie 50)")
     args = ap.parse_args(argv[1:])
@@ -344,16 +364,17 @@ def main(argv: list[str]) -> int:
                     "Tabela `posty` nie ma kolumn bramki — odpal migrację: "
                     "bash laweta_radar/scripts/migrate.sh (0002_gate.sql)"
                 )
-            kolumna_ai = args.kolumna_ai if args.kolumna_ai in kolumny else None
-            wiersze = _pobierz(cur, args.dni, kolumna_ai)
+            ma_werdykt = set(KOLUMNY_WERDYKTU) <= kolumny
+            wiersze = _pobierz(cur, args.dni, ma_werdykt)
     finally:
         conn.close()
 
     print(f"[{KTO}] okno: {args.dni} dni | prog: {prog}"
+          f" | werdykt modelu z: {ZRODLO_WERDYKTU}"
           + ("  | PRZELICZONE aktualnym słownikiem" if args.przelicz else ""))
     if args.przelicz:
         _przelicz(wiersze, prog)
-    return _raport(wiersze, prog, kolumna_ai, args.limit)
+    return _raport(wiersze, prog, ma_werdykt, args.limit)
 
 
 if __name__ == "__main__":
