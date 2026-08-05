@@ -237,15 +237,28 @@ przeladuj() {
     fi
     # Wyjście PM2 ląduje w zmiennej, a nie w /dev/null: "nie przeszedł" bez
     # powodu zostawia operatora z niczym, a powód PM2 podaje wprost.
-    local wyjscie
+    local wyjscie stan
     if wyjscie="$(pm2 restart "$proc" 2>&1)"; then
         log "przeładowany: $proc"
-    else
-        ostrzez "pm2 restart $proc nie przeszedł:"
-        sed 's/^/           /' <<<"$wyjscie" >&2
-        ostrzez "logi procesu:  pm2 logs $proc --lines 30"
-        BLEDY=1
+        return
     fi
+
+    # Proces, który NIE chodził, jest osobnym przypadkiem, a nie awarią
+    # aktualizacji. Bot bez TELEGRAM_BOT_TOKEN kończy CZYSTO (zasada z całego
+    # repo), więc PM2 trzyma go w pętli `waiting restart` i odbija `pm2 restart`
+    # przez "Process not found". Nowy kod podejmie sam przy najbliższym
+    # nawrocie — traktowanie tego jak błędu uczy operatora ignorować błędy.
+    stan="$(pm2 jlist 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const a=JSON.parse(d).find(p=>p.name===process.argv[1]);process.stdout.write(a?String(a.pm2_env.status):"")}catch(e){}})' "$proc" 2>/dev/null)"
+    if [[ -n "$stan" && "$stan" != "online" ]]; then
+        log "pominięty: $proc (stan: $stan — nie chodzi, podejmie nowy kod sam)"
+        log "           dlaczego nie chodzi:  pm2 logs $proc --lines 30 --nostream"
+        return
+    fi
+
+    ostrzez "pm2 restart $proc nie przeszedł:"
+    sed 's/^/           /' <<<"$wyjscie" >&2
+    ostrzez "logi procesu:  pm2 logs $proc --lines 30"
+    BLEDY=1
 }
 
 log "Przeładowuję procesy${INSTANCJA:+ (instancja: $INSTANCJA)}."
