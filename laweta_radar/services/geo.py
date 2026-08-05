@@ -15,6 +15,15 @@ na ekranie; dystans od bazy do odbioru idzie obok, jako druga, pomocnicza.
 zlecenia, decyduje kierowca — o tym, czy kurs pod Kolonię się opłaca, decyduje
 człowiek patrzący na trasę, a nie kod porównujący kilometry z progiem.
 
+DYSTANS I WYCENA TYLKO Z DWÓCH ZNANYCH PUNKTÓW. Gdy którykolwiek koniec trasy
+jest nierozpoznany, `km_trasy` i `szacunek_pln` są NULL-em — i tak zostaje na
+ekranie („trasa nieustalona"), zamiast liczby wziętej z czegokolwiek innego.
+BAZA OPERATORA NIE ZASTĘPUJE BRAKUJĄCEGO PUNKTU: post „transport z Dębicy do
+Turku, trasa ma około 490 km" z nierozpoznanym Turkiem pokazywał „60 km,
+~250 zł" — czyli dojazd Krosno->Dębica podstawiony pod długość kursu. Kierowca
+odrzuca wtedy kurs na 490 km, patrząc na wycenę lokalnego skoku. Zła liczba
+jest gorsza niż jej brak: brak widać, złej liczby nie.
+
 `zrodlo` W KAŻDYM PUNKCIE JEST CZĘŚCIĄ PRODUKTU, nie diagnostyką. Wartość
 "miasto_niepewne" znaczy „w Polsce jest kilkanaście miejscowości o tej nazwie
 i wybraliśmy największą". To MUSI trafić do interfejsu: operator ma zobaczyć,
@@ -26,6 +35,7 @@ i dalej działa z pamięci. Bazę pobiera osobno `scripts/pobierz_geo.py`.
 CLI:
     python -m laweta_radar.services.geo "Krosno" "Rzeszow"
     python -m laweta_radar.services.geo --kody "auto stoi w 50667 Koln, cena 2500 zl"
+    python -m laweta_radar.services.geo "Debica" "Turek" --tresc "trasa ma okolo 490 km"
 """
 from __future__ import annotations
 
@@ -201,11 +211,17 @@ def czy_kod_pocztowy(kod: str | None) -> bool:
     return any(w.match(s) for w in FORMATY_KODU.values())
 
 
-def _normalizuj_kod(kod: str) -> str:
+def normalizuj_kod(kod: str | None) -> str:
     """Kod do postaci indeksowanej: wielkie litery, bez spacji i myślników.
 
     "110 00", "11000" i "110-00" to ten sam czeski kod; "38-400" i "38400" to
     ten sam polski. Indeksujemy formę bez separatorów, a wyświetlamy oryginalną.
+
+    PUBLICZNE, bo pyta o to także klasyfikator: fallback regexowy musi wiedzieć,
+    czy kod znaleziony w treści to TEN SAM kod, który oddał model — inaczej
+    "38-400" od nas i "38400" od modelu wyglądają jak dwa różne miejsca i drugie
+    z nich ląduje w polu dostawy. Druga implementacja tej normalizacji po stronie
+    klasyfikatora rozjechałaby się przy pierwszym dołożonym formacie.
     """
     return re.sub(r"[\s.-]", "", (kod or "")).upper()
 
@@ -242,7 +258,7 @@ def _wczytaj(sciezka: Path | None = None) -> tuple[dict, dict]:
                 "lng": lng,
             }
             if rekord["kod"]:
-                po_kodzie.setdefault(_normalizuj_kod(rekord["kod"]), []).append(rekord)
+                po_kodzie.setdefault(normalizuj_kod(rekord["kod"]), []).append(rekord)
             if rekord["miejscowosc"]:
                 po_nazwie.setdefault(normalizuj_nazwe(rekord["miejscowosc"]), []).append(rekord)
     return po_kodzie, po_nazwie
@@ -299,7 +315,7 @@ def geokoduj(kod: str | None, miasto: str | None) -> Punkt | None:
     po_kodzie, po_nazwie = _indeksy()
 
     # --- 1. kod pocztowy ---
-    klucz = _normalizuj_kod(kod or "")
+    klucz = normalizuj_kod(kod)
     if klucz and klucz in po_kodzie:
         trafienia = po_kodzie[klucz]
         # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne: "39200" to polska
@@ -434,15 +450,23 @@ def link_do_nawigacji(cel: Punkt) -> str:
 # ---------------------------------------------------------------------------
 # KALKULACJA
 # ---------------------------------------------------------------------------
-def kalkulacja(km: float) -> dict:
-    """Prosty szacunek ze stawek z .env.
+def kalkulacja(km: float | None) -> dict:
+    """Prosty szacunek ze stawek z .env. `km=None` -> obie wartości NULL.
 
     TO JEST ETYKIETA NA EKRANIE, NIE BRAMKA. Nic się na jej podstawie nie
     ukrywa ani nie odrzuca — kierowca patrzy na liczbę i sam decyduje, czy
     kurs mu się opłaca. Zna swój sprzęt, swój kalendarz i swoją cenę lepiej
     niż ten wzór.
+
+    NIEZNANY DYSTANS NIE MA CENY i ta reguła mieszka TUTAJ, a nie tylko
+    u wołającego. Wcześniej `None` wchodziło przez `km or 0.0` w stawkę
+    minimalną, więc zlecenie bez trasy dostawało „~250 zł" — liczbę, która
+    wygląda jak wyliczenie, a jest wartością domyślną. Warstwa wyżej ma
+    prawo nie mieć dystansu; nie ma prawa dostać za niego ceny.
     """
-    km = max(0.0, float(km or 0.0))
+    if km is None:
+        return {"km_trasy": None, "szacunek_pln": None}
+    km = max(0.0, float(km))
     return {
         "km_trasy": round(km, 1),
         "szacunek_pln": round(max(settings.STAWKA_MINIMALNA, km * settings.STAWKA_ZA_KM), 2),
@@ -477,6 +501,13 @@ _WZORCE = [
 # Słowa, które przesądzają kraj. Szukane w oknie wokół kodu, po normalizacji.
 # Zapisane jako RDZENIE, nie pełne formy: post odmienia ("w Wiedniu", "z Niemiec",
 # "pod Kolonią"), więc "wieden" nie trafiłoby w "wiedniu", a "praga" w "pradze".
+# Rdzeń dopasowujemy od POCZĄTKU SŁOWA (`_sygnal_w_oknie`), bo odmienia się
+# końcówka, nie początek.
+#
+# SYGNAŁY ZE SPACJAMI (" de ", " cz ", " sk ") to skróty krajów i znaczą coś
+# WYŁĄCZNIE jako całe słowo. To nie jest kosmetyka zapisu: "sk" wyszukiwane jako
+# fragment siedzi w „Skodzie", a "cz" w „częściach" — czyli w dwóch
+# najczęstszych słowach w tych grupach.
 _SYGNALY_KRAJU: dict[str, tuple[str, ...]] = {
     "DE": ("niemiec", "niemczech", "niemieck", "deutschland", "aus ", " de ", "germany",
            "koln", "kolon", "hamburg", "berlin", "monachium", "munchen", "drezn", "dresden"),
@@ -507,6 +538,40 @@ _PRZED_LICZBA_TO_KOD = re.compile(
 # Nazwa miejscowości obok kodu: słowo z wielkiej litery, min. 3 znaki.
 _NAZWA_OBOK = re.compile(r"(?:^|\s)([A-ZÄÖÜŚŻŹĆŃŁÓĄĘ][\wäöüßśżźćńłóąę-]{2,})")
 
+# Przedział, w którym czterocyfrowa liczba jest w tych postach rocznikiem auta
+# częściej niż kodem. Co z tego wynika i dlaczego nie wykluczamy jej twardo —
+# patrz `_wykluczone`. Słowo „rocznik" obok liczby łapie osobno
+# `_PRZED_LICZBA_NIE_KOD`, ale w realnym poście prawie nigdy nie pada.
+_ROCZNIKI = range(1950, 2036)
+
+# Granica słowa w oknie wokół kodu. Okno jest już po `normalizuj_nazwe`, więc
+# zostają w nim tylko małe litery bez ogonków, cyfry i interpunkcja.
+_NIE_ALFANUM = re.compile(r"[^0-9a-z]+")
+
+
+def _czy_rocznik(dopasowanie: str) -> bool:
+    return dopasowanie.isdigit() and len(dopasowanie) == 4 and int(dopasowanie) in _ROCZNIKI
+
+
+def _sygnal_w_oknie(sygnal: str, okno: str) -> bool:
+    """Czy sygnał kraju pada w oknie (już znormalizowanym) wokół kodu.
+
+    Dwie klasy sygnałów, dwie różne reguły — patrz komentarz przy
+    `_SYGNALY_KRAJU`:
+      • otoczony spacjami (" sk ") to skrót kraju i liczy się TYLKO jako całe
+        słowo, inaczej „Skoda" robi ze Słowacji sygnał kraju;
+      • bez spacji ("wiedn", "bratislav") to rdzeń, który ma trafiać w odmienione
+        formy — dopasowujemy go od POCZĄTKU słowa, bo odmienia się końcówka.
+    """
+    rdzen = sygnal.strip()
+    # Dzielimy po ZNAKACH NIEALFANUMERYCZNYCH, nie po spacjach: „SK," na końcu
+    # zdania to nadal skrót kraju, a przy podziale po spacjach zostaje z przecinkiem
+    # i nie pasuje do niczego.
+    slowa = [s for s in _NIE_ALFANUM.split(okno) if s]
+    if sygnal != rdzen:
+        return rdzen in slowa
+    return any(slowo.startswith(rdzen) for slowo in slowa)
+
 
 def _dlugosc_ciagu_cyfr(tekst: str, start: int, koniec: int) -> int:
     """Ile cyfr ma CAŁY ciąg, którego częścią jest dopasowanie.
@@ -529,13 +594,41 @@ def _dlugosc_ciagu_cyfr(tekst: str, start: int, koniec: int) -> int:
     return sum(1 for c in tekst[lewy:prawy] if c.isdigit())
 
 
+def _mocny_sygnal_kodu(tekst: str, start: int, koniec: int) -> bool:
+    """Przesłanki NIEZALEŻNE od nazwy własnej stojącej obok liczby.
+
+    Osobne od reszty kontekstu, bo w tych postach obok liczby równie często stoi
+    marka auta („Skoda Octavia 2012"), co miejscowość („Köln 50667") — a jedno
+    i drugie jest słowem z wielkiej litery. Tam, gdzie pomyłka jest realna
+    (rocznik), żądamy właśnie tych mocniejszych przesłanek:
+      • przyimek albo skrót kodu bezpośrednio przed liczbą („z 50667", „PLZ 50667");
+      • słowo wskazujące kraj w oknie wokół niej.
+    """
+    przed = tekst[max(0, start - 30):start]
+    po = tekst[koniec:koniec + 30]
+    if _PRZED_LICZBA_TO_KOD.search(przed):
+        return True
+    okno = normalizuj_nazwe(przed + " " + po)
+    return any(_sygnal_w_oknie(s, okno) for sygnaly in _SYGNALY_KRAJU.values() for s in sygnaly)
+
+
 def _wykluczone(tekst: str, start: int, koniec: int, koniec_cyfr: int) -> bool:
     """Twarde wykluczenia — sprawdzane dla KAŻDEGO wzorca, także bezkontekstowego.
 
-    Trzy sytuacje, w których ciąg cyfr na pewno nie jest kodem:
+    Cztery sytuacje, w których ciąg cyfr na pewno nie jest kodem:
       • jednostka albo waluta zaraz po cyfrach ("2500 zł", "180 km");
       • słowo ceny/telefonu przed nimi ("cena 2500", "tel 502");
-      • cyfry są fragmentem dłuższego numeru (dziewięć cyfr i więcej).
+      • cyfry są fragmentem dłuższego numeru (dziewięć cyfr i więcej);
+      • wyglądają na ROCZNIK POJAZDU i nic mocniejszego za nimi nie stoi.
+
+    Rocznik jest tu osobnym przypadkiem, bo trafia w DWA wzorce naraz: „2012"
+    wygląda jak kod austriacki albo belgijski, a „2015 po stluczce" — jak
+    holenderski (cztery cyfry i dwie litery, gdzie literami jest polski
+    przyimek). Kolizja jest realna w obie strony (2000 to Antwerpia), więc nie
+    wykluczamy tych liczb bezwarunkowo: przepuszczamy je, gdy obok pada słowo
+    wskazujące kraj albo skrót kodu. Bez tego rocznik z opisu auta wchodzi do
+    pola kodu — a zła współrzędna wysyła człowieka 80 km w złą stronę i wygląda
+    przy tym dokładnie tak samo jak trafiona.
 
     `koniec_cyfr` to koniec SAMYCH CYFR, nie całego dopasowania — inaczej
     holenderskie "cztery cyfry + dwie litery" zjadłoby "2500 zl" i sprawdzało
@@ -546,7 +639,10 @@ def _wykluczone(tekst: str, start: int, koniec: int, koniec_cyfr: int) -> bool:
         return True
     if _PRZED_LICZBA_NIE_KOD.search(przed):
         return True
-    return _dlugosc_ciagu_cyfr(tekst, start, koniec) >= 9
+    if _dlugosc_ciagu_cyfr(tekst, start, koniec) >= 9:
+        return True
+    return (_czy_rocznik(tekst[start:koniec_cyfr])
+            and not _mocny_sygnal_kodu(tekst, start, koniec))
 
 
 def _kontekst_wskazuje_kod(tekst: str, start: int, koniec: int) -> bool:
@@ -554,21 +650,16 @@ def _kontekst_wskazuje_kod(tekst: str, start: int, koniec: int) -> bool:
 
     Trzy niezależne przesłanki, wystarczy jedna:
       • przyimek albo skrót kodu bezpośrednio przed ("z 50667", "PLZ 50667");
-      • nazwa miejscowości z wielkiej litery tuż obok ("50667 Köln", "Köln 50667");
-      • słowo wskazujące kraj w oknie.
+      • słowo wskazujące kraj w oknie;
+      • nazwa miejscowości z wielkiej litery tuż obok ("50667 Köln", "Köln 50667").
     Wykluczenia (`_wykluczone`) są sprawdzane WCZEŚNIEJ i osobno, bo "2500 zł"
     ma obok siebie i przyimek, i nazwę własną, a kodem nie jest.
     """
+    if _mocny_sygnal_kodu(tekst, start, koniec):
+        return True
     przed = tekst[max(0, start - 30):start]
     po = tekst[koniec:koniec + 30]
-
-    if _PRZED_LICZBA_TO_KOD.search(przed):
-        return True
-    if _NAZWA_OBOK.search(po[:20]) or _NAZWA_OBOK.search(" " + przed[-20:]):
-        return True
-
-    okno = normalizuj_nazwe(przed + " " + po)
-    return any(s.strip() in okno for sygnaly in _SYGNALY_KRAJU.values() for s in sygnaly)
+    return bool(_NAZWA_OBOK.search(po[:20]) or _NAZWA_OBOK.search(" " + przed[-20:]))
 
 
 def _kraj_z_kontekstu(tekst: str, start: int, koniec: int,
@@ -576,7 +667,7 @@ def _kraj_z_kontekstu(tekst: str, start: int, koniec: int,
     """Który z `dozwolone` krajów wskazuje otoczenie kodu. None = żaden."""
     okno = normalizuj_nazwe(tekst[max(0, start - 40):koniec + 40])
     for kraj in dozwolone:
-        if any(s.strip() in okno for s in _SYGNALY_KRAJU.get(kraj, ())):
+        if any(_sygnal_w_oknie(s, okno) for s in _SYGNALY_KRAJU.get(kraj, ())):
             return kraj
     return None
 
@@ -634,27 +725,119 @@ def znajdz_kody(tekst: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# ODLEGŁOŚĆ PODANA WPROST PRZEZ AUTORA POSTA
+#
+# „Trasa ma około 490 km" to liczba od człowieka, który tę trasę zna — i bywa
+# JEDYNĄ, jaką mamy, bo geokoder nie rozpoznał celu. Pokazujemy ją zawsze jako
+# CYTAT („wg autora: 490 km"), nigdy jako nasz wynik i NIGDY nie liczymy z niej
+# wyceny: to treść cudzego posta, a nie pomiar.
+#
+# Zwracamy LICZBĘ, nie fragment tekstu, i to jest decyzja o bezpieczeństwie,
+# nie o formacie. Post jest wejściem od nieznanej osoby; przez tę funkcję na
+# ekran operatora i do wiadomości na Telegramie idzie wyłącznie `int` z zakresu
+# tras — nie ma czym wstrzyknąć ani znaczników Markdowna, ani instrukcji.
+#
+# NAJWIĘKSZE RYZYKO TO PRZEBIEG AUTA. W tych grupach każdy post ma kilometry:
+# „przebieg 190 tys km", „przejechane 245 000 km". Wzięcie ich za długość trasy
+# byłoby dokładnie tym błędem, który ten moduł ma przestać popełniać — dlatego
+# liczba musi mieć OBOK słowo o trasie i NIE MIEĆ słowa o przebiegu, a wynik
+# poza zakresem realnego kursu odrzucamy.
+# ---------------------------------------------------------------------------
+# Realny kurs lawetą: od kilku kilometrów po transport z Hiszpanii. Powyżej
+# 5000 km to już nie trasa, tylko licznik albo literówka.
+ZAKRES_KM_TRASY = (1, 5000)
+
+# Liczba tuż przed „km"/„kilometrami". `(?![\w/])` po jednostce wycina „km/h"
+# i „kmh", a lookbehind — „8l/100km" i ogon dłuższej liczby („45000 km" nie ma
+# dać 5000). Grupa tysięcy jest zapisywana i spacją, i kropką, i przecinkiem
+# („1 200", „2.500", „2,500") — bez niej „2.500 km" dałoby „2 km", czyli
+# dokładnie ten rodzaj cichej pomyłki, którą ten moduł ma eliminować.
+# Ułamek („490,5 km") ucinamy: pełne kilometry wystarczą.
+_LICZBA_PRZED_KM = re.compile(
+    r"(?<![\w,./-])(\d{1,4}(?:[ \u00a0.,]\d{3})?)(?:[.,]\d{1,2})?"
+    r"\s*(?:km|kilometr\w*)(?![\w/])",
+    re.IGNORECASE)
+
+# Słowa, po których liczba przy „km" jest DŁUGOŚCIĄ TRASY. Bez któregoś z nich
+# w oknie liczby nie bierzemy — „jakieś 500 km" bez kontekstu równie dobrze
+# opisuje zasięg auta, a milczenie jest tu tańsze niż zła liczba.
+# Formy zapisane PO NORMALIZACJI (`normalizuj_nazwe`): bez ogonków, małymi.
+_SYGNALY_TRASY = (
+    "trasa", "trase", "trasy", "trasie",
+    "dystans", "odleglosc", "odleglosci",
+    "przejechac", "przejazd", "do przejechania",
+    "w jedna strone", "w obie strony", "tam i z powrotem",
+    "kurs", "kursu",
+)
+
+# Słowa, które przesądzają, że kilometry dotyczą PRZEBIEGU, a nie trasy.
+# Sprawdzane w wąskim oknie przy samej liczbie, bo „przebieg" z drugiego końca
+# zdania nie unieważnia poprawnie podanej trasy.
+_SYGNALY_PRZEBIEGU = (
+    "przebieg", "licznik", "tys", "mln", "spalanie", "zasieg", "gwarancj",
+)
+
+
+def km_wg_autora(tresc: str | None) -> int | None:
+    """Odległość, którą autor posta podał wprost. Brak takiej liczby -> None.
+
+    Bierzemy PIERWSZE trafienie, bo tak pisze się posty: najpierw trasa, potem
+    ewentualnie wariant („490 km w jedną stronę, 980 tam i z powrotem") —
+    a liczba w jedną stronę jest tą, o którą operator pyta.
+
+    Ta wartość NIE WCHODZI DO ŻADNEGO RACHUNKU. Jest cytatem obok naszych
+    kilometrów i tylko tak wolno ją pokazać: autor zna trasę lepiej niż nasz
+    geokoder, ale to nadal jest liczba z cudzego posta i nikt jej nie sprawdził.
+    """
+    tekst = tresc or ""
+    for m in _LICZBA_PRZED_KM.finditer(tekst):
+        start, koniec = m.span()
+        wartosc = int(re.sub(r"[^\d]", "", m.group(1)))
+        if not (ZAKRES_KM_TRASY[0] <= wartosc <= ZAKRES_KM_TRASY[1]):
+            continue
+        # Okno przebiegu jest wąskie i przesunięte w lewo: „przebieg 190 tys km"
+        # i „245 000 km przebiegu" — kwalifikator stoi tuż przy liczbie.
+        przy_liczbie = normalizuj_nazwe(tekst[max(0, start - 25):koniec + 15])
+        if any(s in przy_liczbie for s in _SYGNALY_PRZEBIEGU):
+            continue
+        # Okno trasy jest szersze i sięga do poprzedniego zdania, bo „Trasa
+        # Dębica-Turek. Około 490 km." to jedna myśl zapisana dwoma zdaniami.
+        okno = normalizuj_nazwe(tekst[max(0, start - 80):koniec + 40])
+        if any(s in okno for s in _SYGNALY_TRASY):
+            return wartosc
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ZŁOŻENIE DLA WARSTWY WYŻEJ
 # ---------------------------------------------------------------------------
-def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None) -> dict:
+def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None,
+                 tresc: str | None = None) -> dict:
     """Komplet liczb i linków dla jednego zlecenia — to, co idzie na ekran.
 
     `km_trasy` (odbiór->dostawa) jest liczbą PIERWSZĄ, bo to ona mówi, ile
     realnie trzeba przejechać z autem na lawecie. `km_od_bazy` idzie obok, jako
     druga i pomocnicza — przy transporcie międzynarodowym sama nic nie znaczy.
     Żadna z nich niczego nie filtruje.
+
+    OBA PUNKTY ALBO NIC. Brakujący koniec trasy zeruje `km_trasy` I
+    `szacunek_pln` — nie ma podstawiania `km_od_bazy` ani stawki minimalnej pod
+    nieznany dystans. `km_od_bazy` zostaje policzony, bo to osobna, prawdziwa
+    liczba (baza->odbiór) i wyłącznie pod taką etykietą wolno ją pokazać; do
+    pierwszej linii alertu ani do wyceny nie wchodzi NIGDY.
+
+    `km_wg_autora` to odległość z treści posta — cytat obok naszych liczb,
+    liczony osobno i osobno oznaczany na ekranie.
     """
     b = baza()
     km_od_bazy = dystans_km(b, odbior) if odbior else None
     km_trasy = dystans_km(odbior, dostawa) if (odbior and dostawa) else None
-    # Szacunek liczymy z DŁUGOŚCI KURSU, a gdy znamy tylko jeden punkt — z drogi
-    # od bazy. `km_trasy` w wyniku zostaje wtedy None, bo jego brak jest
-    # informacją: nie wiemy, dokąd auto ma jechać.
-    podstawa = km_trasy if km_trasy is not None else (km_od_bazy or 0.0)
     return {
         "km_trasy": km_trasy,
         "km_od_bazy": km_od_bazy,
-        "szacunek_pln": kalkulacja(podstawa)["szacunek_pln"],
+        # `kalkulacja(None)` oddaje None — brak trasy nie ma ceny.
+        "szacunek_pln": kalkulacja(km_trasy)["szacunek_pln"],
+        "km_wg_autora": km_wg_autora(tresc),
         "niepewne": [p.nazwa for p in (odbior, dostawa) if p and p.niepewny],
         "link_trasa": link_do_map(b, odbior, dostawa),
         "link_nawigacja": link_do_nawigacji(odbior) if odbior else "",
@@ -674,6 +857,8 @@ def _main(argv: list[str]) -> int:
     ap.add_argument("miejsca", nargs="*", help="odbiór [dostawa] — nazwa miasta albo kod")
     ap.add_argument("--kody", metavar="TEKST",
                     help="wyłuskaj kody pocztowe z surowego tekstu i zakończ")
+    ap.add_argument("--tresc", metavar="TEKST",
+                    help="treść posta — do odległości podanej przez autora wprost")
     args = ap.parse_args(argv[1:])
 
     print(stan_bazy(), file=sys.stderr)
@@ -684,6 +869,8 @@ def _main(argv: list[str]) -> int:
         for kod, kraj in znalezione:
             p = geokoduj(kod, None)
             print(f"  {kod} [{kraj}] -> {p.nazwa if p else 'brak w bazie'}")
+        wg_autora = km_wg_autora(args.kody)
+        print(f"WG AUTORA: {f'{wg_autora} km' if wg_autora else '(nie podał)'}")
         return 0
 
     if not args.miejsca:
@@ -703,7 +890,8 @@ def _main(argv: list[str]) -> int:
             print(f"{etykieta}:  {p.nazwa}  [{p.zrodlo}]  {p.wspolrzedne()}"
                   + ("   <-- LOKALIZACJA ZGADYWANA" if p.niepewny else ""))
     print()
-    print(_json.dumps(podsumowanie(odbior, dostawa), ensure_ascii=False, indent=2))
+    print(_json.dumps(podsumowanie(odbior, dostawa, args.tresc),
+                      ensure_ascii=False, indent=2))
     return 0
 
 

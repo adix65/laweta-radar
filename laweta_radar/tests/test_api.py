@@ -318,6 +318,56 @@ def test_nieznane_kilometry_zostaja_przy_filtrze(monkeypatch):
     assert "nieznane" in [z["fb_id"] for z in dane["zlecenia"]]
 
 
+def test_nierozpoznany_cel_nie_dostaje_km_ani_wyceny(monkeypatch):
+    """REALNY PRZYPADEK Z PRODUKCJI: „transport Aixam z Dębicy do Turku,
+    62-700. Trasa ma około 490 km". Dębica rozpoznana, Turek nie — a panel
+    pokazywał „60 km, ~250 zł", bo pod brakujący koniec trasy podstawiał się
+    dojazd z bazy operatora. Kierowca odrzuca wtedy kurs na 490 km, widząc
+    wycenę lokalnego skoku."""
+    wiersz = _wiersz("aixam", odbior_miasto="Krosno", odbior_kod="38-400",
+                     dostawa_miasto="Turek", dostawa_kod="62-700",
+                     tresc="transport Aixam z Krosna do Turku, 62-700. "
+                           "Trasa ma okolo 490 km")
+    _podepnij_baze(monkeypatch, [wiersz])
+    z = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()["zlecenia"][0]
+
+    assert z["km_trasy"] is None
+    assert z["szacunek_pln"] is None
+    # Dojazd z bazy nadal jest policzony — ale jako OSOBNA liczba, pod własną
+    # etykietą. Gdyby przeciekał na miejsce trasy, pola wyżej byłyby liczbami.
+    assert z["km_od_bazy"] is not None
+    # Odbiór rozpoznany, cel nie — panel musi wiedzieć o OBU końcach, inaczej
+    # zlecenie idzie na ekran bez jednego ostrzeżenia.
+    assert z["lokalizacja_zrodlo"] == "kod"
+    assert z["dostawa_zrodlo"] == "brak"
+    # Odległość od autora posta: jedyna liczba, jaką tu mamy, i wyraźnie cudza.
+    assert z["km_wg_autora"] == 490
+    # Treść posta służyła do jej wyciągnięcia, ale nie jedzie na listę —
+    # sto pełnych postów przez LTE co 30 sekund nie ma po co lecieć.
+    assert "tresc" not in z
+
+
+def test_szczegol_oddaje_tresc_i_odleglosc_autora(monkeypatch):
+    """Na ekranie szczegółu oryginał posta JEST — to jedyne miejsce, w którym
+    da się sprawdzić, czy klasyfikator czegoś nie przekręcił."""
+    wiersz = _wiersz("aixam", odbior_miasto="Krosno", odbior_kod="38-400",
+                     tresc="z Krosna gdzies dalej, trasa ma okolo 490 km")
+    _podepnij_baze(monkeypatch, [wiersz])
+    z = klient.get("/zlecenia/aixam", headers={"X-Token": TOKEN}).json()
+    assert z["tresc"].startswith("z Krosna")
+    assert z["km_wg_autora"] == 490
+    assert z["km_trasy"] is None and z["szacunek_pln"] is None
+
+
+def test_przebieg_auta_nie_udaje_odleglosci_wg_autora(monkeypatch):
+    """Każdy post w tych grupach ma kilometry, bo każdy ma przebieg."""
+    wiersz = _wiersz("golf", odbior_miasto="Krosno", odbior_kod="38-400",
+                     tresc="Golf 1.9 TDI, przebieg 245 000 km, nie odpala")
+    _podepnij_baze(monkeypatch, [wiersz])
+    z = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()["zlecenia"][0]
+    assert z["km_wg_autora"] is None
+
+
 def test_nierozpoznane_miejsce_bez_pinezki(monkeypatch):
     """Pinezka postawiona „gdzieś" wygląda tak samo jak pinezka pewna."""
     _podepnij_baze(monkeypatch, WIERSZE)

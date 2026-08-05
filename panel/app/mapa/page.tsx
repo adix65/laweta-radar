@@ -3,7 +3,15 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { listaZlecen } from "@/lib/api";
-import { dystansGlowny, etykietaPilnosci, km, trasa, wiek, zl } from "@/lib/format";
+import {
+  etykietaPilnosci,
+  etykietaTrasy,
+  trasa,
+  trasaUstalona,
+  wgAutora,
+  wiek,
+  zl,
+} from "@/lib/format";
 import type { Zlecenie } from "@/lib/typy";
 
 /**
@@ -123,12 +131,23 @@ export default function Mapa() {
           href={`/zlecenie/${encodeURIComponent(wybrane.fb_id)}`}
           className="mt-3 block rounded-2xl border border-obrys bg-karta p-4"
         >
-          <p className="flex items-baseline gap-3">
-            <span className="text-liczba">{km(dystansGlowny(wybrane))}</span>
-            <span className="text-liczba text-tekst-cichy">
-              {zl(wybrane.szacunek_pln)}
-            </span>
-          </p>
+          {/* Ta sama zasada co na karcie i w alercie: bez obu końców trasy nie
+              ma tu liczby. Dojazd z bazy nie zastępuje długości kursu. */}
+          {trasaUstalona(wybrane) ? (
+            <p className="flex items-baseline gap-3">
+              <span className="text-liczba">{etykietaTrasy(wybrane)}</span>
+              <span className="text-liczba text-tekst-cichy">
+                {zl(wybrane.szacunek_pln)}
+              </span>
+            </p>
+          ) : (
+            <p className="text-opis font-bold text-ostrzezenie">
+              {etykietaTrasy(wybrane)}
+            </p>
+          )}
+          {wgAutora(wybrane) && (
+            <p className="text-opis text-tekst-cichy">{wgAutora(wybrane)}</p>
+          )}
           <p className="mt-1 text-xs font-bold uppercase tracking-wide text-tekst-cichy">
             {etykietaPilnosci(wybrane.pilnosc)}
           </p>

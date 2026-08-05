@@ -184,7 +184,8 @@ def _ostatnie(conn, ile: int) -> str:
         cur.execute(
             """
             SELECT fb_id, grupa_nazwa, opublikowany_at, status,
-                   odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto
+                   odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto,
+                   tresc
               FROM posty
              WHERE czy_zlecenie
              ORDER BY opublikowany_at DESC NULLS LAST, pobrany_at DESC
@@ -199,14 +200,23 @@ def _ostatnie(conn, ile: int) -> str:
                  "przegrane": "✖", "smiec": "🗑"}
     teraz = datetime.now(timezone.utc)
     linie = [f"*🕘 Ostatnie {len(wiersze)} zleceń*", ""]
-    for fb_id, grupa, opublikowany, status, o_kod, o_miasto, d_kod, d_miasto in wiersze:
+    for (fb_id, grupa, opublikowany, status, o_kod, o_miasto, d_kod, d_miasto,
+         tresc_posta) in wiersze:
         pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                geo.geokoduj(d_kod, d_miasto))
+                                geo.geokoduj(d_kod, d_miasto), tresc_posta)
         trasa = str(o_miasto or o_kod or "?")
         if d_miasto or d_kod:
             trasa += f" → {d_miasto or d_kod}"
-        dystans = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
-        km = f"{round(dystans)} km" if dystans is not None else "? km"
+        # Bez obu rozpoznanych końców trasy nie ma kilometrów i NIE podstawiamy
+        # pod nie dojazdu z bazy — lista, w której „60 km" znaczy raz długość
+        # kursu, a raz drogę do odbioru, jest gorsza niż lista przyznająca się
+        # do braku. Ta sama reguła co w alercie i w panelu (`services/geo.py`).
+        if pods["km_trasy"] is not None:
+            km = f"{round(pods['km_trasy'])} km"
+        elif pods["km_wg_autora"] is not None:
+            km = f"wg autora: {pods['km_wg_autora']} km"
+        else:
+            km = "trasa nieustalona"
         linie.append(telegram_notify._escape_md(
             f"{znaczniki.get(status, '•')} {trasa} · {km} · "
             f"{powiadomienia.wiek_posta(opublikowany, teraz)} · {grupa or '?'}"))

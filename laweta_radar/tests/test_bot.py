@@ -188,6 +188,41 @@ def test_ostatnie_domyslna_liczba(monkeypatch):
     assert zapamietane == [bot.DOMYSLNIE_OSTATNICH, 5, bot.DOMYSLNIE_OSTATNICH]
 
 
+@pytest.fixture
+def geo_pod_krosnem(tmp_path):
+    """Mikro-baza geo: Krosno jest, Turku nie ma. Dokładnie ten układ, przy
+    którym `/ostatnie` pokazywało dojazd z bazy zamiast długości kursu."""
+    plik = tmp_path / "kody.csv"
+    plik.write_text("kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+                    "PL,38-400,Krosno,podkarpackie,49.6886,21.7706\n",
+                    encoding="utf-8")
+    bot.geo.zaladuj(plik)
+    yield
+    bot.geo.zaladuj()
+
+
+def _wiersz_ostatnich(tresc: str) -> tuple:
+    return ("fb1", "Podkarpacie", None, "nowe", "38-400", "Krosno",
+            "62-700", "Turek", tresc)
+
+
+def test_ostatnie_nie_podstawia_dojazdu_pod_nieznana_trase(geo_pod_krosnem):
+    """Ta sama zasada co w alercie i w panelu: bez obu rozpoznanych końców
+    trasy nie ma kilometrów. Lista, w której „60 km" znaczy raz długość kursu,
+    a raz drogę z bazy do odbioru, uczy operatora nie ufać żadnej z nich."""
+    tekst = bot._ostatnie(_Polaczenie([_wiersz_ostatnich("laweta z Krosna")]), 5)
+    assert "trasa nieustalona" in tekst
+    assert "km" not in tekst.split("trasa nieustalona")[0]
+
+
+def test_ostatnie_pokazuje_odleglosc_autora_gdy_trasy_nie_znamy(geo_pod_krosnem):
+    """Autor podał 490 km wprost — to jedyna liczba, jaką tu mamy, i jedyna,
+    którą wolno pokazać: podpisaną jako cudza."""
+    tekst = bot._ostatnie(
+        _Polaczenie([_wiersz_ostatnich("z Krosna do Turku, trasa ma okolo 490 km")]), 5)
+    assert "wg autora: 490 km" in tekst
+
+
 def test_stop_wlacza_pauze():
     conn = _Polaczenie([None])           # brak wpisu = pauza nieaktywna
     odp = bot.obsluz_komende(conn, "/stop")

@@ -255,24 +255,37 @@ def _linia_pilnosci(zlecenie: dict, pods: dict) -> str:
     DYSTANS TO DŁUGOŚĆ KURSU (odbiór->dostawa), nie odległość od bazy — przy
     transporcie międzynarodowym „ile km od bazy" nie znaczy nic, bo i tak
     trzeba przejechać całą trasę z autem na lawecie. Dojazd z bazy idzie
-    o linijkę niżej, przy trasie, jako liczba pomocnicza. Gdy dostawy nie
-    znamy, w pierwszej linii ląduje dojazd — jest wtedy jedyną liczbą, jaką
-    mamy, a pusta pierwsza linia byłaby gorsza niż niedokładna.
+    o linijkę niżej, przy trasie, jako liczba pomocnicza.
+
+    NIEZNANEJ TRASY NIE ZASTĘPUJE ŻADNA INNA LICZBA — ani dojazd z bazy, ani
+    stawka minimalna. Post „z Dębicy do Turku, trasa ma około 490 km"
+    z nierozpoznanym Turkiem dawał w tej linii „60 km · ~250 zł", czyli wycenę
+    lokalnego skoku pod kursem na pół Polski; kierowca odrzucał go, nie czytając
+    dalej. Zamiast liczby stoi tu teraz „trasa nieustalona": brak widać,
+    a złej liczby nie.
+
+    „wg autora" to jedyna odległość, jaką wolno tu postawić obok naszej — bo
+    jest wyraźnie cudza. Autor zna trasę lepiej niż nasz geokoder, więc idzie
+    na ekran także wtedy, gdy trasę policzyliśmy: rozjazd 60 vs 490 jest
+    sygnałem, że któryś punkt złapaliśmy źle.
     """
     ikona, etykieta = PILNOSC.get(str(zlecenie.get("pilnosc") or "").lower(),
                                   ("🔧", "ZLECENIE"))
     czesci = [f"{ikona} {etykieta}"]
-    km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
-    # „? km" zamiast pominięcia: brak dystansu to informacja, i to ważna —
-    # znaczy, że nie rozpoznaliśmy miejsca i operator ma przeczytać cytat.
-    czesci.append(f"{round(km)} km" if km is not None else "? km")
-    # CENA TYLKO PRZY ZNANYM DYSTANSIE. `geo.podsumowanie` liczy szacunek także
-    # z zerowej podstawy (stawka minimalna), więc zlecenie bez rozpoznanego
-    # miejsca pokazywało „? km · ~250 zł" — liczbę wziętą znikąd, postawioną
-    # obok znaku zapytania. Brak danych wolno NAZWAĆ (patrz `_linia_brakow`),
-    # nie wolno go zastąpić czymś, co wygląda na wyliczenie.
-    if pods["szacunek_pln"] and km is not None:
-        czesci.append(f"~{round(pods['szacunek_pln'])} zł")
+    km = pods["km_trasy"]
+    if km is None:
+        czesci.append("trasa nieustalona")
+    else:
+        czesci.append(f"{round(km)} km")
+        # Cena tylko przy znanej trasie — `geo.kalkulacja` oddaje wtedy None
+        # i ta linia nie ma czego pokazać.
+        if pods["szacunek_pln"]:
+            czesci.append(f"~{round(pods['szacunek_pln'])} zł")
+    # `.get`, bo `pods` bywa podany z zewnątrz (`zbuduj_tresc(zlecenie, pods)`)
+    # — alert bez jednej liczby jest gorszy niż alert, ale alert, który nie
+    # poszedł przez KeyError, jest gorszy od obu.
+    if pods.get("km_wg_autora") is not None:
+        czesci.append(f"wg autora: {pods['km_wg_autora']} km")
     return " · ".join(czesci)
 
 
@@ -365,13 +378,18 @@ def _linia_brakow(zlecenie: dict, odbior, dostawa) -> str:
     braki = []
     if pewnosc_liczbowo(zlecenie) is None:
         braki.append("pewność nieznana")
-    # Trasa: liczy się to, czy DA SIĘ z niej cokolwiek policzyć. Sam tekst
-    # z posta bez rozpoznanego punktu nie daje ani kilometrów, ani kierunku.
-    if odbior is None and dostawa is None:
-        braki.append("trasa nieustalona")
-    elif dostawa is None and not (zlecenie.get("dostawa_miasto")
-                                  or zlecenie.get("dostawa_raw")):
-        braki.append("cel nieznany")
+    # Trasa: KAŻDY BRAK NAZWANY DOKŁADNIE RAZ. Pierwsza linia mówi, że
+    # kilometrów nie ma („trasa nieustalona"), linia trasy oznacza miejsce,
+    # którego nie rozpoznaliśmy, choć autor je podał („⚠️ Turek
+    # (nierozpoznane)"), a tutaj zostaje to, czego w poście NIE BYŁO w ogóle.
+    # Różnica jest praktyczna: nierozpoznaną nazwę operator rozstrzyga cytatem
+    # w dwie sekundy, brakującego celu — tylko telefonem.
+    for punkt, w_poscie, nazwa in (
+        (odbior, ("odbior_miasto", "odbior_raw", "odbior_kod"), "odbiór"),
+        (dostawa, ("dostawa_miasto", "dostawa_raw", "dostawa_kod"), "cel"),
+    ):
+        if punkt is None and not any(zlecenie.get(k) for k in w_poscie):
+            braki.append(f"{nazwa} nieznany")
     if str(zlecenie.get("pilnosc") or "").lower() not in PILNOSC:
         braki.append("termin nieznany")
     return f"⚠️ {' · '.join(braki)}" if braki else ""
@@ -387,7 +405,10 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     obejrzeć bez produkcji, poprawia się na ślepo.
     """
     odbior, dostawa = punkty(zlecenie)
-    pods = pods or geo.podsumowanie(odbior, dostawa)
+    # Treść posta idzie do `podsumowanie` po jedną rzecz: odległość podaną przez
+    # autora wprost („trasa ma około 490 km"). Wraca z niej LICZBA, nie tekst,
+    # więc do wiadomości nie ma czym wstrzyknąć znaczników Markdowna.
+    pods = pods or geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
     esc = telegram_notify._escape_md
 
     linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*"]
@@ -446,7 +467,7 @@ def zbuduj_przyciski(zlecenie: dict, pods: dict | None = None) -> list[list[dict
     """
     if pods is None:
         odbior, dostawa = punkty(zlecenie)
-        pods = geo.podsumowanie(odbior, dostawa)
+        pods = geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
     fb_id = str(zlecenie.get("fb_id") or "")
     post_url = str(zlecenie.get("post_url") or "").strip()
 
@@ -819,7 +840,7 @@ def _powiadom(zlecenie: dict) -> bool:
             return False
 
         odbior, dostawa = punkty(zlecenie)
-        pods = geo.podsumowanie(odbior, dostawa)
+        pods = geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
         tresc = zbuduj_tresc(zlecenie, pods)
         message_id = telegram_notify.wyslij(tresc, zbuduj_przyciski(zlecenie, pods))
         if message_id is None:
@@ -1019,7 +1040,7 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
                 """
                 SELECT p.fb_id, p.grupa_nazwa, p.opublikowany_at,
                        p.odbior_kod, p.odbior_miasto,
-                       p.dostawa_kod, p.dostawa_miasto
+                       p.dostawa_kod, p.dostawa_miasto, p.tresc
                   FROM posty p
                   LEFT JOIN powiadomienia w ON w.fb_id = p.fb_id
                  WHERE p.czy_zlecenie
@@ -1038,15 +1059,25 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
             return False
 
         linie = [f"🌅 *W nocy przyszło {len(wiersze)} zleceń*", ""]
-        for fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto in wiersze:
+        for (fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto,
+             tresc_posta) in wiersze:
             pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                    geo.geokoduj(d_kod, d_miasto))
-            km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
+                                    geo.geokoduj(d_kod, d_miasto), tresc_posta)
             trasa = str(o_miasto or o_kod or "?")
             if d_miasto or d_kod:
                 trasa += f" → {d_miasto or d_kod}"
+            # Ta sama zasada co w alercie pojedynczym: bez obu punktów nie ma
+            # kilometrów i nie podstawiamy pod nie dojazdu z bazy. Lista, na
+            # której „60 km" znaczy raz kurs, a raz dojazd, jest gorsza niż
+            # lista, która w jednym wierszu przyznaje się do braku.
+            if pods["km_trasy"] is not None:
+                dystans = f"{round(pods['km_trasy'])} km"
+            elif pods["km_wg_autora"] is not None:
+                dystans = f"wg autora: {pods['km_wg_autora']} km"
+            else:
+                dystans = "trasa nieustalona"
             linie.append(telegram_notify._escape_md(
-                f"• {trasa} · {round(km) if km is not None else '?'} km "
+                f"• {trasa} · {dystans} "
                 f"· {wiek_posta(opublikowany, teraz)} · {grupa or '?'}"))
         linie += ["", "Szczegóły i przyciski — w panelu."]
         tresc = "\n".join(linie)
