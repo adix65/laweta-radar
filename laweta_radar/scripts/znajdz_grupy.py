@@ -52,9 +52,20 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from laweta_radar.config import frazy_grup as cfg
-from laweta_radar.workers import apify_proxy, apify_run
-from laweta_radar.workers.apify_keys import AllKeysExhausted, KeyRotator, load_apify_tokens
+try:                               # pakiet widoczny: -m, import pakietowy, testy
+    from laweta_radar.scripts._sciezka import dodaj_repo_do_sciezki
+except ImportError:                # uruchomienie po ścieżce do pliku
+    from _sciezka import dodaj_repo_do_sciezki
+
+dodaj_repo_do_sciezki()
+
+from laweta_radar.config import frazy_grup as cfg  # noqa: E402
+from laweta_radar.workers import apify_proxy, apify_run  # noqa: E402
+from laweta_radar.workers.apify_keys import (  # noqa: E402
+    AllKeysExhausted,
+    KeyRotator,
+    load_apify_tokens,
+)
 
 KTO = "znajdz-grupy"
 ROOT = Path(__file__).resolve().parent.parent.parent
