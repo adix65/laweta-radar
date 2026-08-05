@@ -30,8 +30,22 @@ SUCHO=0
 PANEL=1
 BLEDY=0
 
-API_PORT="${API_PORT:-8002}"       # patrz laweta_radar/scripts/start_api.sh
-PANEL_PORT="${PANEL_PORT:-6200}"   # patrz panel/package.json, skrypt `start`
+# Nazwy procesów i porty biorą się z .env TEJ instancji — inaczej `update.sh`
+# odpalony w /home/ubuntu/laweta-test przeładowałby procesy produkcyjne, bo
+# nazwy PM2 są globalne, a katalog nie ma z nimi nic wspólnego.
+z_env() {   # klucz, wartość domyślna
+    local v=""
+    if [[ -f laweta_radar/.env ]]; then
+        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" laweta_radar/.env \
+             | tail -1 | sed 's/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//')"
+    fi
+    echo "${v:-$2}"
+}
+
+INSTANCJA="${INSTANCJA:-$(z_env INSTANCJA '')}"
+NAZWA="laweta${INSTANCJA:+-$INSTANCJA}"
+API_PORT="${API_PORT:-$(z_env API_PORT 8002)}"       # patrz laweta_radar/scripts/start_api.sh
+PANEL_PORT="${PANEL_PORT:-$(z_env PANEL_PORT 6200)}" # patrz panel/package.json, skrypt `start`
 
 log() { echo "[update] $*"; }
 ostrzez() { echo "[update] !! $*" >&2; }
@@ -135,7 +149,7 @@ if [[ $SUCHO -eq 1 ]]; then
     log "  migracje:      $([[ $MIGRACJE -eq 1 ]] && echo TAK || echo 'nie (brak nowych .sql)')"
     log "  npm ci:        $([[ $NPM_CI -eq 1 ]] && echo TAK || echo nie)"
     log "  build panelu:  $([[ $BUILD -eq 1 ]] && echo TAK || echo nie)"
-    log "  restart:       laweta-api, laweta-bot$([[ $BUILD -eq 1 ]] && echo ', laweta-panel' || true)"
+    log "  restart:       $NAZWA-api, $NAZWA-bot$([[ $BUILD -eq 1 ]] && echo ", $NAZWA-panel" || true)"
     exit 0
 fi
 
@@ -229,11 +243,11 @@ przeladuj() {
     fi
 }
 
-log "Przeładowuję procesy."
-przeladuj laweta-api
-przeladuj laweta-bot
+log "Przeładowuję procesy${INSTANCJA:+ (instancja: $INSTANCJA)}."
+przeladuj "$NAZWA-api"
+przeladuj "$NAZWA-bot"
 if [[ $BUILD -eq 1 ]]; then
-    przeladuj laweta-panel
+    przeladuj "$NAZWA-panel"
 fi
 
 # --- 8. Czy na pewno wstało ------------------------------------------------
@@ -262,7 +276,7 @@ if command -v curl >/dev/null 2>&1; then
             ostrzez "API wstało, ale zgłasza braki: bash laweta_radar/scripts/check_setup.sh"
         fi
     else
-        ostrzez "API nie odpowiada na 127.0.0.1:$API_PORT/health — pm2 logs laweta-api"
+        ostrzez "API nie odpowiada na 127.0.0.1:$API_PORT/health — pm2 logs $NAZWA-api"
         BLEDY=1
     fi
 
@@ -270,7 +284,7 @@ if command -v curl >/dev/null 2>&1; then
         if czekaj_na "http://127.0.0.1:$PANEL_PORT/"; then
             log "Panel: odpowiada na :$PANEL_PORT"
         else
-            ostrzez "panel nie odpowiada na :$PANEL_PORT — pm2 logs laweta-panel"
+            ostrzez "panel nie odpowiada na :$PANEL_PORT — pm2 logs $NAZWA-panel"
             BLEDY=1
         fi
     fi
