@@ -52,7 +52,9 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 - **gate** — darmowy filtr słowny **przed** modelem, po polsku, niemiecku, czesku
   i słowacku. Bez niego płacilibyśmy Claude'owi za każdy post o sprzedaży felg.
   Odrzuca wyłącznie cztery kategorie wymienione wyżej i nic poza nimi; bez
-  wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK.
+  wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK. Obok werdyktu
+  wystawia **kategorię ładunku** (`pojazd` / `zwierze` / `inne`) — transport koni
+  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz.
 - **classifier** — model decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie — **zawsze po polsku**, także z posta
   niemieckiego czy czeskiego. Domyślnie Haiku, ale provider jest wymienny jedną
@@ -261,6 +263,7 @@ podobnie.
 | `MIN_PEWNOSC` (40) | zlecenie idzie do panelu bez alertu | nie kasuje go |
 | `CISZA_NOCNA` (22-6) | nocne zlecenia idą jednym podsumowaniem rano | nie gubi ich |
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
+| `ALERT_ZWIERZETA` (0) | transport zwierząt czeka w panelu ze znacznikiem, bez alertu | nie odrzuca go i nie przestaje go zbierać |
 
 **BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
 działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
@@ -451,6 +454,7 @@ laweta_radar/
       0007_feedback.sql    # zbiór treningowy do poprawiania promptu
       0008_push.sql        # subskrypcje web push
       0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
+      0010_kategoria_ladunku.sql # co jedzie: pojazd / zwierzę / inne (NIE filtr)
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
@@ -695,6 +699,61 @@ w porządku: śmieć przepuszczony do modelu kosztuje ~0,002 zł, a zlecenie odr
 przez bramkę ~300 zł straconego kursu — i nigdy się o nim nie dowiesz, bo post nie
 trafi nigdzie. Jeden przegapiony kurs miesięcznie kasuje całą oszczędność
 na tokenach.
+
+#### Giełdy transportowe: forma bezokolicznikowa i para kodów
+
+Na giełdach zlecenie zwykle nie zaczyna się od prośby, tylko od rzeczownika
+odczasownikowego: „**Do przywiezienia** Citroen Berlingo z 18556 do 63-505".
+Nie ma tam ani „potrzebuję", ani awarii, ani pary miast w formie „z X do Y" —
+więc taki post trafiał w zero wzorców i wylatywał z zerem punktów, wyglądając
+w logu jak reklama felg. Dlatego:
+
+- **twarde przepuszczenie** (warstwa 2, nie punkty) dla form: *do przywiezienia,
+  do zabrania, do odebrania, do przewiezienia, do ściągnięcia, do podjęcia,
+  szukam wolnego miejsca, szukam miejsca w transporcie, wolne miejsce,
+  kto wraca z…, kto jedzie w kierunku…*. Te zwroty są jednoznaczne po stronie
+  popytu — nikt nie reklamuje własnej lawety zdaniem „do zabrania solówka spod
+  Paryża",
+- **dwa różne kody pocztowe w treści = +4** (dowolne kraje: `38-400`, `64354`,
+  `110 00`, `1234`). Para kodów jest praktycznie definicją trasy i bywa jedynym
+  sygnałem, jaki niesie post telegraficzny,
+- **marka pojazdu = +3** (Citroen, Opel, Iveco, Mercedes, VW, Renault, Ford,
+  Audi, BMW, Skoda, Fiat, Peugeot, Toyota, Nissan) — post mówi „Citroena C5",
+  a nie „samochód osobowy”,
+- **źródło auta = +2** (Copart, Autohaus, komis, aukcja, autobazar).
+
+Marki, źródła i kody pocztowe są **wspólne dla wszystkich czterech słowników** —
+„Citroen" i „Copart" znaczą to samo po polsku, niemiecku, czesku i słowacku,
+a cztery kopie tej samej listy to trzy miejsca do zapomnienia przy dopisaniu marki.
+
+#### Transport zwierząt: znacznik, nie odrzucenie
+
+Te grupy mieszają transport aut z transportem koni i zwierząt gospodarskich.
+Operator zwierząt nie wozi — i to jest dokładnie powód, dla którego bramka takich
+postów **nie odrzuca**: „nie wożę" i „nie chcę o tym wiedzieć" to dwie różne
+rzeczy, a druga należy do kierowcy.
+
+Bramka wystawia kolumnę `kategoria_ladunku` (`pojazd` / `zwierze` / `inne`),
+a system reaguje na nią w trzech miejscach i tylko w trzech:
+
+| gdzie | co robi |
+|---|---|
+| panel | widoczny znacznik „🐴 ZWIERZĘ" na karcie i na ekranie szczegółu |
+| lista | takie zlecenie ląduje **niżej** (sortowanie, nie filtr — nadal je widać) |
+| Telegram | alert idzie **tylko** przy `ALERT_ZWIERZETA=1`; przy `0` (domyślnie) zlecenie czeka w panelu bez brzęczenia |
+
+Dane zbierają się **niezależnie** od tej zmiennej i to jest cały sens braku
+twardego odrzucenia: gdyby doszła przyczepa do koni albo chęć podnajmowania
+takich kursów dalej, historia już czeka w bazie.
+
+```sql
+SELECT count(*) FROM posty WHERE kategoria_ladunku = 'zwierze';
+```
+
+```bash
+python -m laweta_radar.workers.gate "transport busem jednego konia z Gajewnik"
+# ŁADUNEK: zwierze   (idzie do panelu ze znacznikiem i NIŻEJ na liście…)
+```
 
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje

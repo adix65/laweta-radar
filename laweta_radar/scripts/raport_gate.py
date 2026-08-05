@@ -242,6 +242,24 @@ def _raport(wiersze: list[dict], prog: int, ma_werdykt: bool, limit: int) -> int
         for p, n in sorted(powody.items(), key=lambda kv: -kv[1]):
             print(f"    {p:<20} {n}")
 
+    # TRANSPORT ZWIERZĄT — liczba, dla której w ogóle warto było NIE odrzucać.
+    # Liczona z TREŚCI, nie z kolumny `kategoria_ladunku`: działa wtedy także na
+    # wierszach sprzed migracji 0010 i pokazuje wynik AKTUALNEGO słownika, tak
+    # samo jak `--przelicz`. Raport ma odpowiadać na pytanie „ile takich kursów
+    # przechodzi obok", a nie „ile ich zdążyliśmy oznaczyć".
+    zwierzeta = [w for w in z_bramka
+                 if gate_mod.kategoria_ladunku(w["tresc"]) == gate_mod.KAT_ZWIERZE]
+    if zwierzeta:
+        _naglowek("TRANSPORT ZWIERZĄT (kategoria ładunku, NIE odrzucenie)")
+        print(f"  postów w oknie:              {len(zwierzeta)} z {len(z_bramka)}")
+        przepuszczone = sum(1 for w in zwierzeta
+                            if _werdykt_przy_progu(w, prog) is not False)
+        print(f"  z tego przez bramkę:         {przepuszczone}"
+              "   (kategoria niczego nie odrzuca)")
+        print("  Alert na Telegram: tylko przy ALERT_ZWIERZETA=1. Niezależnie od")
+        print("  tej zmiennej zlecenia są w bazie i w panelu — to jest ta liczba,")
+        print("  od której zależy decyzja o przyczepie do koni.")
+
     if not ma_werdykt:
         _naglowek("MACIERZ POMYŁEK — NIEDOSTĘPNA")
         print(f"  Tabela `posty` nie ma kolumn z werdyktem modelu"

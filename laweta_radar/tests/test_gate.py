@@ -296,8 +296,11 @@ def test_hamulec_czasowy_nie_dziala_przy_pilnosci():
 
 
 def test_numer_telefonu_daje_punkt():
-    bez = w("Osobówka do zabrania z podwórka, szczegóły w komentarzach")
-    z_nr = w("Osobówka do zabrania z podwórka, dzwońcie 601 234 567")
+    # Treść MUSI omijać warstwę 2 — inaczej post nigdy nie dochodzi do punktacji
+    # i test mierzy zero wobec zera. „Osobówka do zabrania" tego nie omijała:
+    # „do zabrania" jest twardym przepuszczeniem (forma bezokolicznikowa z giełd).
+    bez = w("Osobówka po stłuczce stoi na parkingu, szczegóły w komentarzach")
+    z_nr = w("Osobówka po stłuczce stoi na parkingu, dzwońcie 601 234 567")
     assert z_nr.punkty == bez.punkty + 1 + 1  # telefon (+1) i słowo "dzwonic" (+1)
 
 
@@ -310,6 +313,200 @@ def test_trafienia_niosa_wagi_do_kalibracji():
 def test_powod_mowi_o_ile_zabraklo():
     wynik = w("Ładny ten passat na zdjęciu, gratuluję zakupu kolego", prog=5)
     assert "punktacja" in wynik.powod and "prog 5" in wynik.powod
+
+
+# ===========================================================================
+# GIEŁDY TRANSPORTOWE — POSTY, KTÓRE BRAMKA REALNIE ZGUBIŁA
+#
+# Wszystkie sześć poniżej to PRODUKCJA: `czy_zlecenie=true` w tabeli `posty`,
+# a bramka je odrzuciła. Cztery są tu z nazwiskami, bo to wzorcowe kursy tego
+# operatora — a jeden dostał ZERO punktów, czyli wyglądał w logu dokładnie tak
+# samo jak reklama felg.
+#
+# Każdy z tych testów jest wart ~300 zł. Jeżeli któryś pada, ktoś właśnie
+# przywrócił dziurę, przez którą wyleciało sześć kursów.
+# ===========================================================================
+GIELDA_ZGUBIONE = [
+    # 3 pkt przy progu 5 — sam „transportu", bez trasy i bez pojazdu.
+    "Witam wszystkich. Szukam wolnego jednego miejsca do transportu Citroena C5 "
+    "z 64354 Reinheim Niemcy do Polski 97-400 Belchatow",
+    # 3 pkt — „odebrania" trafiało w AKCJĘ, reszta posta w nic.
+    "Do odebrania Opel Meriva 2009 Frankfurt (Copart Buddingen) - Wroclaw",
+    # 3 pkt — j.w., „zabrania".
+    "Do zabrania iveco solowka okolice paryza do 08-110 siedlce",
+    # ZERO punktów. Najpoważniejsza dziura: komplet zlecenia (pojazd, dwa kody,
+    # kierunek) i ani jednego trafienia w słowniku.
+    "Do przywiezienia Citroen Berlingo z kodu 18556 Wiek Do Doruchow 63-505",
+]
+
+
+def test_gielda_wszystkie_zgubione_posty_przechodza_przy_progu_3():
+    for tresc in GIELDA_ZGUBIONE:
+        assert przepuszcza(tresc, prog=3), tresc
+
+
+def test_gielda_forma_bezokolicznikowa_to_TWARDE_przepuszczenie():
+    """Nie punkty, tylko warstwa 2 — post z giełdy bywa telegraficzny i drugiego
+    sygnału po prostu nie ma. Próg absurdalnie wysoki, żeby punktacja nie mogła
+    tego przypadkiem uratować."""
+    for tresc in ("Do przywiezienia Citroen Berlingo z kodu 18556 Do Doruchow 63-505",
+                  "Do zabrania solowka spod Paryza",
+                  "Do odebrania auto po aukcji",
+                  "Do sciagniecia spod Berlina",
+                  "Do podjecia bus z Hamburga",
+                  "Szukam wolnego jednego miejsca do transportu",
+                  "Szukam miejsca w transporcie na przyszly tydzien",
+                  "Wolne miejsce w ten piatek?",
+                  "Kto wraca z Holandii?",
+                  "Kto jedzie w kierunku Wroclawia?"):
+        wynik = w(tresc, prog=99)
+        assert wynik.werdykt, tresc
+        assert wynik.powod == "zgloszenie z gieldy", (tresc, wynik.powod)
+
+
+def test_dwa_kody_pocztowe_to_trasa():
+    """Para kodów bywa JEDYNYM sygnałem trasy — słownika miejscowości nie mamy."""
+    jeden = w("Berlingo z kodu 18556, odbior po poludniu")
+    dwa = w("Berlingo z kodu 18556 do Doruchow 63-505, odbior po poludniu")
+    assert dwa.punkty == jeden.punkty + g.WAGA_DWA_KODY
+    assert any("dwa kody pocztowe" in t for t in dwa.trafienia)
+
+
+def test_ten_sam_kod_dwa_razy_to_nie_trasa():
+    """„97-400" i „97400" to jeden adres zapisany dwa razy, a nie kurs."""
+    assert g.kody_pocztowe(g.normalizuj("Odbior 97-400 Belchatow, kod 97400")) == ["97-400"]
+
+
+def test_kody_pocztowe_czterech_rynkow():
+    kody = g.kody_pocztowe(g.normalizuj(
+        "z 38-400 przez 64354 i 110 00 do 1234, tel 601 234 567"))
+    assert "38-400" in kody and "64354" in kody and "110 00" in kody and "1234" in kody
+
+
+def test_marka_pojazdu_punktuje():
+    """Post z giełdy mówi „Citroena C5", nie „samochód osobowy"."""
+    for marka in ("Citroen", "Opel", "Iveco", "Mercedes", "VW", "Renault", "Ford",
+                  "Audi", "BMW", "Skoda", "Fiat", "Peugeot", "Toyota", "Nissan"):
+        wynik = w(f"{marka} stoi na parkingu od tygodnia, wlasciciel nie odbiera")
+        assert any("POJAZD:" in t and "+3" in t for t in wynik.trafienia), marka
+
+
+def test_marki_widza_wszystkie_slowniki():
+    """Marka nie jest polskim słowem — niemiecki post ma za nią dostać tyle samo."""
+    for jezyk in ("pl", "de", "cs"):
+        wynik = g.gate("Peugeot Boxer, Autohaus", prog=5, tryb=g.TRYB_AKTYWNY,
+                       jezyk=jezyk)
+        assert wynik.punkty >= 5, jezyk
+
+
+def test_zrodlo_auta_punktuje():
+    for zrodlo in ("Copart", "Autohaus Muller", "komis", "aukcja"):
+        wynik = w(f"Opel Meriva 2009 Frankfurt ({zrodlo}) - Wroclaw")
+        assert any("ZRODLO:" in t and "+2" in t for t in wynik.trafienia), zrodlo
+
+
+def test_polski_post_nie_dostaje_flagi_niemieckiej_przez_marke():
+    """Wzorce niezależne od języka (marki, kody) punktują w KAŻDYM słowniku,
+    a polskie twarde przepuszczenie ma z definicji zero punktów. Bez preferencji
+    dla nazwanej reguły „Do zabrania iveco … do 08-110 siedlce" wygrywał
+    słownikiem NIEMIECKIM — i operator dostawał w alercie flagę 🇩🇪, czyli
+    podpowiedź, żeby zadzwonić po niemiecku (docs/WIELOJEZYCZNOSC.md)."""
+    for tresc in GIELDA_ZGUBIONE:
+        wynik = w(tresc, prog=3)
+        assert wynik.jezyk == "pl", (tresc, wynik.jezyk)
+        assert wynik.powod == "zgloszenie z gieldy", (tresc, wynik.powod)
+
+
+def test_obcy_post_nadal_dostaje_swoj_znacznik():
+    """Poprawka wyżej nie może przechylić WSZYSTKIEGO na polski — niemieckie
+    i czeskie zgłoszenie mają dalej trafiać w swój słownik."""
+    assert w("Suche Autotransport von Munchen nach Krakau, Fahrzeug fahrt nicht").jezyk == "de"
+    assert w("Hledam odtah auta z Prahy do Brna, nenastartuje").jezyk == "cs"
+
+
+# ===========================================================================
+# KATEGORIA ŁADUNKU — ZWIERZĘTA
+#
+# Te giełdy mieszają transport aut z transportem koni. Operator zwierząt NIE
+# wozi — i to jest dokładnie powód, dla którego bramka NIE MA prawa ich
+# odrzucać: „nie wożę" i „nie chcę o tym wiedzieć" to dwie różne rzeczy, a druga
+# należy do kierowcy. Post przechodzi, dostaje znacznik i ląduje niżej.
+#
+# Test na odrzucenie (`przepuszcza(...) is True`) jest tu WAŻNIEJSZY niż test
+# na samą kategorię: pomyłka w kategorii wycisza jeden alert, a twarde
+# odrzucenie kasuje zlecenie bez śladu.
+# ===========================================================================
+ZWIERZETA_Z_PRODUKCJI = [
+    "Szukam transportu dla walacha: Kebliny -> stado ogierow Boguslawice",
+    "Poszukuje transportu dla 8 mc osiolka z 42-262 Nowa Wies do 33-100 Tarnow",
+    "Potrzebny transport busem jednego konia (+duzo sprzetu) z Gajewnik",
+]
+
+
+def test_zwierzeta_przechodza_bramke_przy_progu_3():
+    for tresc in ZWIERZETA_Z_PRODUKCJI:
+        assert przepuszcza(tresc, prog=3), tresc
+
+
+def test_zwierzeta_dostaja_kategorie():
+    for tresc in ZWIERZETA_Z_PRODUKCJI:
+        assert w(tresc, prog=3).kategoria_ladunku == g.KAT_ZWIERZE, tresc
+
+
+def test_zwierzeta_zostawiaja_slad_w_trafieniach():
+    """Znacznik bez powodu wygląda na awarię — operator ma widzieć, KTÓRE słowo."""
+    wynik = w("Potrzebny transport busem jednego konia z Gajewnik")
+    assert any(t.startswith("ZWIERZE:") for t in wynik.trafienia), wynik.trafienia
+
+
+def test_zwierze_bije_pojazd_bo_bus_jest_srodkiem_a_nie_ladunkiem():
+    assert g.kategoria_ladunku("transport busem jednego konia") == g.KAT_ZWIERZE
+
+
+def test_slownik_zwierzat_z_zadania_w_komplecie():
+    for slowo in ("kon", "konia", "koni", "koniowoz", "walach", "klacz", "ogier",
+                  "zrebak", "kucyk", "osiolek", "osiol", "krowa", "byk", "ciele",
+                  "owca", "koza", "transport zwierzat", "przewoz zwierzat", "stado"):
+        assert g.kategoria_ladunku(f"Potrzebny transport, {slowo}, plac gotowka") \
+            == g.KAT_ZWIERZE, slowo
+
+
+def test_zwierzeta_nie_lapia_czestych_slow_z_postow_o_lawetach():
+    """„kon" bez granicy słowa oznaczyłoby jako konia połowę grupy: kontakt,
+    konkurencję, koniec, konserwację. To jest test na tę granicę."""
+    for tresc in ("Kontakt na priv, konieczna laweta, koniec tematu",
+                  "Konkurencja wozi taniej, ale konserwacja podwozia u mnie",
+                  "Potrzebuje lawety, golf nie odpala, dzwonic po 16",
+                  "Do przywiezienia Citroen Berlingo z kodu 18556 do 63-505"):
+        assert g.kategoria_ladunku(tresc) != g.KAT_ZWIERZE, tresc
+
+
+def test_kategoria_pojazdu_i_inne():
+    assert g.kategoria_ladunku("Potrzebuje lawety, golf nie odpala") == g.KAT_POJAZD
+    assert g.kategoria_ladunku("Dzien dobry wszystkim, pozdrawiam") == g.KAT_INNE
+
+
+def test_kategoria_nie_zmienia_werdyktu_ani_punktow():
+    """Zwierzę to ETYKIETA, nie warstwa. Gdyby zaczęła cokolwiek odejmować,
+    stałaby się cichym odrzuceniem — czyli tym, czego ten moduł nie robi."""
+    auto = w("Potrzebny transport busem jednego przyczepy z Gajewnik")
+    kon = w("Potrzebny transport busem jednego konia z Gajewnik")
+    assert kon.werdykt == auto.werdykt
+    assert kon.punkty == auto.punkty
+
+
+def test_kategoria_dziala_takze_przy_twardym_przepuszczeniu():
+    """Warstwa 2 kończy pracę przed punktacją — kategoria musi być liczona osobno,
+    inaczej najkrótsza ścieżka nigdy by jej nie ustaliła."""
+    wynik = w("Szukam transportu dla walacha do stada ogierow", prog=99)
+    assert wynik.powod == "prosba wprost"          # rozstrzygnęła warstwa 2
+    assert wynik.kategoria_ladunku == g.KAT_ZWIERZE
+
+
+def test_kategoria_jedzie_do_bazy():
+    wiersz = g.wiersz_do_zapisu(w("transport konia z Gajewnik"), "fb-1")
+    assert wiersz["kategoria_ladunku"] == g.KAT_ZWIERZE
+    assert "kategoria_ladunku" in g.SQL_ZAPIS
 
 
 # ===========================================================================

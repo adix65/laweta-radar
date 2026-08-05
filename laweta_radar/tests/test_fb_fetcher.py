@@ -465,6 +465,36 @@ def test_znacznik_jezyka_wedruje_z_bramki_do_zapisu():
     assert decyzja.status == "nowe", "niemiecki post MA przechodzić przez bramkę"
 
 
+def test_transport_zwierzat_przechodzi_pipeline_normalnie():
+    """Kategoria ładunku NIE jest odrzuceniem: post o koniu idzie do modelu,
+    do bazy i do panelu jak każdy inny. Wycisza go dopiero (i wyłącznie)
+    `services/powiadomienia`, i tylko przy ALERT_ZWIERZETA=0."""
+    kon = _post("Potrzebny transport busem jednego konia z Gajewnik")
+    decyzja = f.decyzja_o_poscie(kon, PROG,
+                                 klasyfikuj=lambda *a: {"czy_zlecenie": True})
+    assert decyzja.kategoria_ladunku == "zwierze"
+    assert decyzja.pytano_model is True, "model MA być pytany także o zwierzęta"
+    assert decyzja.czy_zlecenie is True
+    assert decyzja.status == "nowe"
+
+
+def test_kategoria_ladunku_jedzie_do_powiadomienia():
+    """Bez tego pola alert widziałby transport konia dokładnie tak samo jak
+    transport golfa — czyli obudziłby operatora kursem spoza jego oferty."""
+    kon = _post("Potrzebny transport busem jednego konia z Gajewnik")
+    decyzja = f.decyzja_o_poscie(kon, PROG,
+                                 klasyfikuj=lambda *a: {"czy_zlecenie": True})
+    zlecenie = f.zlecenie_do_alertu("fb-1", kon, decyzja,
+                                    f.Zapis(bez_ekstrakcji=False, wiersz={}))
+    assert zlecenie["kategoria_ladunku"] == "zwierze"
+
+
+def test_kolumna_kategorii_jest_w_insercie():
+    """Kategoria jedzie tym samym INSERT-em co werdykt bramki. Dopisywanie jej
+    drugim zapytaniem byłoby drugą okazją do porażki bez żadnego objawu."""
+    assert ("kategoria_ladunku", "0010_kategoria_ladunku.sql") in f.KOLUMNY_SWIADKOWIE
+
+
 # ---------------------------------------------------------------------------
 # 7. Wyciąganie pól — amortyzator zmian actora
 # ---------------------------------------------------------------------------

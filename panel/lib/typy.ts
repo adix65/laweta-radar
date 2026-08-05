@@ -24,6 +24,16 @@ export type ZrodloLokalizacji =
 /** Wartości z `workers/classifier.py` — nie wymyślamy własnych. */
 export type Pilnosc = "teraz" | "dzis" | "jutro" | "elastycznie";
 
+/** Co miałoby jechać — z bramki (`workers/gate.py`, kolumna `kategoria_ladunku`).
+ *
+ *  „zwierze" NIE ukrywa zlecenia i nie ma prawa zacząć: te giełdy mieszają
+ *  transport aut z transportem koni, operator zwierząt nie wozi — ale „nie wożę"
+ *  i „nie pokazuj mi tego" to dwie różne rzeczy. Taki rekord dostaje widoczny
+ *  znacznik i ląduje NIŻEJ na liście (sortuje API), a decyzję podejmuje kierowca.
+ *  `null` = bramka nie orzekała (rekordy sprzed migracji 0010) i zachowuje się
+ *  dokładnie jak „pojazd". */
+export type KategoriaLadunku = "pojazd" | "zwierze" | "inne";
+
 export interface Zlecenie {
   fb_id: string;
   status: Status;
@@ -73,6 +83,8 @@ export interface Zlecenie {
   powod?: string | null;
   /** Dwuliterowy znacznik z bramki. Decyduje, w jakim języku operator oddzwoni. */
   jezyk?: string | null;
+  /** Z bramki. „zwierze" = znacznik na karcie i miejsce niżej na liście. */
+  kategoria_ladunku?: KategoriaLadunku | null;
 
   // --- z posta ------------------------------------------------------------
   /** Pełna, oryginalna treść. Jest TYLKO w odpowiedzi szczegółu — lista

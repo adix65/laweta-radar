@@ -124,3 +124,12 @@ export function opisZrodla(zrodlo: ZrodloLokalizacji): string {
       return "";
   }
 }
+
+/** Czy to zlecenie na transport zwierząt.
+ *
+ *  Jedno miejsce na to pytanie, bo odpowiada na nie i karta na liście, i ekran
+ *  szczegółu, i obie muszą pokazywać ten sam znacznik. `null` (bramka nie
+ *  orzekała, rekordy sprzed migracji 0010) to NIE jest zwierzę. */
+export function transportZwierzat(z: Zlecenie): boolean {
+  return z.kategoria_ladunku === "zwierze";
+}

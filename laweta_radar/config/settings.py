@@ -276,6 +276,20 @@ SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 GATE_PROG = _int("GATE_PROG", 5)
 GATE_TRYB = _txt("GATE_TRYB", "cien")
 
+# TRANSPORT ZWIERZĄT — czy o takim zleceniu ma brzęczeć telefon.
+#
+# 0 (domyślnie) = post z `kategoria_ladunku='zwierze'` trafia do panelu BEZ
+#                 powiadomienia na Telegramie. Jest w bazie, jest na liście
+#                 (ze znacznikiem i niżej), tylko nie budzi.
+# 1             = alertuje normalnie, jak każde inne zlecenie.
+#
+# TO NIE JEST BRAMKA i nie wolno jej nią zrobić. Bramka takich postów NIE
+# odrzuca — operator nie wozi zwierząt, ale „nie wozi" i „nie chcę wiedzieć"
+# to dwie różne rzeczy, a tylko o pierwszej wolno rozstrzygać kodowi. Gdyby
+# doszła przyczepa do koni albo chęć podnajmowania takich kursów dalej, dane
+# już są zebrane; twarde odrzucenie kasowałoby je bezpowrotnie i bez śladu.
+ALERT_ZWIERZETA = _int("ALERT_ZWIERZETA", 0)
+
 # ---------------------------------------------------------------------------
 # POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
 # brzęczy telefon. ŻADEN z nich nie usuwa zlecenia z bazy ani z panelu; to jest
@@ -602,6 +616,10 @@ def opis_srodowiska() -> str:
          f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
          f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
+         # Widoczne w linii startowej, bo „czemu nie przyszedł alert o tym
+         # koniu" jest pytaniem, na które inaczej nie ma odpowiedzi bez czytania
+         # kodu. Zlecenie JEST w panelu niezależnie od tej wartości.
+         f", alert_zwierzeta={'tak' if ALERT_ZWIERZETA else 'nie (tylko panel)'}"
          f", llm={provider}/{model_llm}"
          + (f"(json={OPENAI_JSON_MODE})" if provider == "openai" else "")
          # Literówka w LLM_PROVIDER degraduje po cichu do domyślnego — ma być

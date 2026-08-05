@@ -108,7 +108,8 @@ class _FalszywePolaczenie:
 
 
 KOMPLET_KOLUMN = {"odbior_miasto", "pojazd_opis", "pewnosc",
-                  "notatka", "cena_koncowa", "status_at"}
+                  "notatka", "cena_koncowa", "status_at",
+                  "kategoria_ladunku"}
 
 
 @pytest.fixture(autouse=True)
@@ -341,6 +342,33 @@ def test_status_wszystkie_znosi_filtr(monkeypatch):
     klient.get("/zlecenia?status=wszystkie", headers={"X-Token": TOKEN})
     sql, parametry = polaczenie.kursor.zapytania[0]
     assert "status = %s" not in sql
+
+
+# ---------------------------------------------------------------------------
+# TRANSPORT ZWIERZĄT — niżej na liście, ale NA LIŚCIE
+# ---------------------------------------------------------------------------
+def test_zwierzeta_sortuja_sie_nizej_ale_nie_znikaja(monkeypatch):
+    """Sortowanie jest podpowiedzią, nie filtrem: gdyby stało się warunkiem
+    w WHERE, zlecenie zniknęłoby operatorowi z oczu — a to już nie jest decyzja
+    kierowcy, tylko decyzja panelu."""
+    polaczenie = _podepnij_baze(monkeypatch, WIERSZE)
+    klient.get("/zlecenia", headers={"X-Token": TOKEN})
+    sql, _ = polaczenie.kursor.zapytania[0]
+    warunek = sql.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+    sortowanie = sql.split("ORDER BY", 1)[1]
+    assert "kategoria_ladunku" not in warunek     # nie filtrujemy
+    assert "'zwierze') ASC" in sortowanie          # tylko przesuwamy na dół
+    # COALESCE, bo NULL (wiersze sprzed migracji 0010) w ORDER BY ASC idzie na
+    # KONIEC — cała historia wylądowałaby pod zwierzętami.
+    assert "COALESCE(kategoria_ladunku" in sortowanie
+
+
+def test_kategoria_ladunku_dojezdza_do_panelu(monkeypatch):
+    """Panel rysuje z tego znacznik na karcie — pole musi być w odpowiedzi."""
+    _podepnij_baze(monkeypatch, [_wiersz("kon", kategoria_ladunku="zwierze",
+                                         odbior_miasto="Krosno")])
+    dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
+    assert dane["zlecenia"][0]["kategoria_ladunku"] == "zwierze"
 
 
 # ---------------------------------------------------------------------------
