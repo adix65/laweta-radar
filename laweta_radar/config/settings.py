@@ -217,6 +217,80 @@ GATE_PROG = _int("GATE_PROG", 5)
 GATE_TRYB = _txt("GATE_TRYB", "cien")
 
 # ---------------------------------------------------------------------------
+# POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
+# brzęczy telefon. ŻADEN z nich nie usuwa zlecenia z bazy ani z panelu; to jest
+# zasada naczelna repo i najłatwiejsza tutaj do złamania, bo „nie wysyłaj" i
+# „ukryj" wyglądają w kodzie podobnie.
+# ---------------------------------------------------------------------------
+# Poniżej tej pewności klasyfikatora zlecenie trafia do panelu BEZ powiadomienia.
+# Nie do kosza — do panelu. Czterdziestka jest niska celowo: alert o zleceniu,
+# którego model nie jest pewny, kosztuje trzy sekundy uwagi, a niewysłany alert
+# o realnym kursie kosztuje kurs.
+#
+# UWAGA NA DRUGI PRÓG: `workers/classifier.PROG_PEWNOSCI` (50) jest stałą MODUŁU
+# i służy jego własnemu `warto_budzic()` — podpowiedzi dla wołającego, nie decyzji.
+# JEDYNYM miejscem, które rozstrzyga, czy brzęczy telefon, jest
+# `services/powiadomienia.ocen()` i to ono czyta tę zmienną. Gdyby oba progi
+# rozstrzygały naraz, obowiązywałby ostrzejszy, a operator zmieniający
+# `MIN_PEWNOSC` w .env nie zobaczyłby żadnej różnicy i nie miałby jak się
+# dowiedzieć dlaczego.
+MIN_PEWNOSC = _int("MIN_PEWNOSC", 40)
+
+# Cisza nocna [OD, DO) w godzinach lokalnych. W tych godzinach nie brzęczymy —
+# wszystko z nocy idzie jednym zbiorczym podsumowaniem rano. Transport planowany
+# nie ucieka przez osiem godzin, a operator wyciszający bota po trzeciej nocnej
+# pobudce przestaje dostawać także te alerty, które były coś warte.
+CISZA_NOCNA_OD = _int("CISZA_NOCNA_OD", 22)
+CISZA_NOCNA_DO = _int("CISZA_NOCNA_DO", 6)
+
+# Twardy sufit powiadomień na godzinę. Po przekroczeniu leci JEDNA zbiorcza
+# wiadomość „jeszcze N zleceń w panelu" i cisza. Przekroczenie tego limitu prawie
+# zawsze znaczy, że coś się zepsuło w bramce albo w klasyfikatorze — system
+# wysyłający 40 alertów dziennie zostanie wyciszony po tygodniu i przestanie
+# istnieć, a to jest awaria całkowita, tylko rozłożona na dni.
+MAX_POWIADOMIEN_H = _int("MAX_POWIADOMIEN_H", 15)
+
+# Okno dedupu treściowego. Ten sam post crossowany do pięciu grup ma pięć różnych
+# fb_id (hash liczymy z treści, a treść bywa minimalnie inna), więc dedup po
+# identyfikatorze go nie złapie.
+DEDUP_OKNO_H = _int("DEDUP_OKNO_H", 6)
+
+# ---------------------------------------------------------------------------
+# API panelu — JEDEN użytkownik, jeden token w nagłówku. Świadomie bez ról,
+# bez sesji i bez OAuth: system ról dla jednej osoby to warstwa, która potrafi
+# się zepsuć, i zero bezpieczeństwa więcej.
+#
+# Puste = API odpowiada WYŁĄCZNIE na /health i /zdrowie, a każdy endpoint
+# z danymi zwraca 503. Nie 200 z pustą listą — brak tokenu to niedokończona
+# konfiguracja, a nie „brak zleceń".
+# ---------------------------------------------------------------------------
+API_TOKEN = _txt("API_TOKEN")
+
+# Adres panelu — wchodzi do powiadomienia jako link „Otwórz w panelu" i do
+# nagłówka CORS. Puste = przycisk się nie pojawia (lepiej niż link donikąd).
+PANEL_URL = _txt("PANEL_URL").rstrip("/")
+
+# ---------------------------------------------------------------------------
+# WEB PUSH (VAPID) — DRUGI kanał obok Telegrama, nigdy zamiennik.
+#
+# Puste klucze = push po prostu wyłączony i panel mówi to wprost. To jest stan
+# domyślny i całkowicie poprawny: Telegram dowozi sam, a push wymaga zgody
+# przeglądarki, obsługi po jej stronie, a na iOS dodania PWA do ekranu głównego
+# — czyli trzech warunków, z których każdy potrafi przestać być spełniony bez
+# żadnego objawu.
+#
+# Wygenerowanie pary kluczy (raz, na stałe):
+#   python -c "from py_vapid import Vapid01; v=Vapid01(); v.generate_keys(); \
+#     print(v.public_key_urlsafe_base64(), v.private_key_urlsafe_base64())"
+# ---------------------------------------------------------------------------
+VAPID_PUBLIC_KEY = _txt("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = _txt("VAPID_PRIVATE_KEY")
+# Adres kontaktowy wymagany przez specyfikację VAPID — dostawca push używa go,
+# gdy coś jest nie tak z ruchem z tego serwera. Bez niego część dostawców
+# odrzuca żądania.
+VAPID_KONTAKT = _txt("VAPID_KONTAKT", "mailto:admin@example.com")
+
+# ---------------------------------------------------------------------------
 # Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
 # `if not X` w workerach — dzięki temu komunikat o brakach jest wszędzie taki sam
 # i da się go wypisać CAŁY naraz, zamiast wychodzić po pierwszym brakującym
@@ -227,6 +301,8 @@ OPIS_ZMIENNYCH: dict[str, str] = {
     "ANTHROPIC_API_KEY": "klucz API Anthropic — bez niego klasyfikator nie ruszy",
     "TELEGRAM_BOT_TOKEN": "token bota od @BotFather",
     "TELEGRAM_CHAT_ID": "ID czatu operatora (bot musi tam być dodany)",
+    "API_TOKEN": ("token panelu — jeden użytkownik, nagłówek `X-Token`. "
+                  "Wygeneruj: python -c \"import secrets;print(secrets.token_urlsafe(32))\""),
     "APIFY_API_TOKEN1": ("klucz Apify — normalnie przychodzi ze WSPÓLNEGO .env "
                          "(SHARED_ENV_PATH), nie ustawiaj go tutaj bez powodu"),
 }
@@ -274,10 +350,13 @@ def opis_srodowiska() -> str:
         "anthropic": bool(ANTHROPIC_API_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "baza_geo": bool(BAZA_LAT or BAZA_LON),
+        "api_token": bool(API_TOKEN),
     }
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
-    ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+    ) + (f", cisza_nocna={CISZA_NOCNA_OD}-{CISZA_NOCNA_DO}"
+         f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
+         f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
          f", llm={LLM_PROVIDER}/{CLASSIFIER_MODEL}"
          f", budzet={POSTY_NA_DOBE} postow/dobe"

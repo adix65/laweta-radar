@@ -23,5 +23,11 @@ pytest>=8.0.0            # testy offline (laweta_radar/tests/)
 # openai>=1.40.0         # LLM_PROVIDER=openai
 # google-genai>=1.0.0    # LLM_PROVIDER=gemini
 
+# --- OPCJONALNE: web push z panelu (services/powiadomienia._wyslij_push) -----
+# Ta sama zasada co wyżej. Szyfrowanie treści push ciągnie `cryptography` —
+# największą paczkę w całym projekcie, z kompilacją na części VPS-ów. Deploy
+# korzystający wyłącznie z Telegrama (czyli domyślny) nie ma powodu jej budować:
+# pywebpush>=2.0.0       # web push (VAPID); bez niej push po prostu milczy
+
 # socks5:// w APIFY_PROXY_* wymaga dodatkowo: pip install "httpx[socks]"
 # Dla http:// i https:// nic nie trzeba dokładać — patrz docs/APIFY-PROXY.md.
