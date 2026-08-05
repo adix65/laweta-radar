@@ -1,0 +1,55 @@
+# ZBIÓR REFERENCYJNY — na nim wybieramy model (scripts/porownaj_modele.py).
+#
+# JEDEN WIERSZ = JEDEN POST. Linie puste i zaczynające się od "#" są pomijane
+# przez wczytywanie, więc ten nagłówek żyje w tym samym pliku co dane i nie ma
+# szans rozjechać się z formatem.
+#
+# FORMAT:
+#   id          — dowolny identyfikator, żeby dało się wskazać przypadek w tabeli
+#   zrodlo      — "seed" (napisany ręcznie przy budowie repo) albo "prod"
+#                 (przepisany z bazy, z realnego posta). Ta różnica jest
+#                 ISTOTNA: seedy są napisane przez tego, kto pisał prompt, więc
+#                 model może na nich wyglądać lepiej, niż jest.
+#   tresc       — treść posta, dokładnie tak jak w bazie (bez ogonków, z literówkami)
+#   oczekiwane  — RĘCZNIE wpisany poprawny wynik. Oceniane są cztery pola:
+#                 czy_zlecenie, odbior_miasto, dostawa_miasto, pilnosc.
+#                 Wartość `null` znaczy "TU NIC NIE MA" (np. brak drugiego
+#                 miejsca) i jest oceniana normalnie. Pole POMINIĘTE w słowniku
+#                 nie jest oceniane wcale — używaj tego tam, gdzie post jest
+#                 realnie dwuznaczny i człowiek też by się wahał. Wpisanie
+#                 zgadywanki jako "poprawnej odpowiedzi" psuje pomiar ciszej,
+#                 niż go poprawia.
+#
+# JAK DOPISAĆ REALNE POSTY (robota do zrobienia RAZ, po pierwszym tygodniu
+# produkcji — dopóki jej nie ma, poniższe seedy służą tylko do sprawdzenia,
+# że skrypt chodzi):
+#   psql "$DATABASE_URL" -Atc \
+#     "SELECT tresc FROM posty ORDER BY pobrany_at DESC LIMIT 200" > /tmp/posty.txt
+#   ...wybierz ~40 różnorodnych (zlecenia, reklamy, pytania o cenę, transport
+#   zagraniczny), wpisz wynik RĘCZNIE, patrząc na post, i ustaw zrodlo="prod".
+#
+# Celuj w PROPORCJE Z PRODUKCJI, nie w równy podział. Zbiór złożony w połowie
+# z oczywistych reklam pokaże wysoką trafność przy modelu, który nie umie
+# wyciągnąć miasta — a to jedyna rzecz, którą naprawdę mierzymy.
+{"id": "ref-001", "zrodlo": "seed", "tresc": "Stanalem na dk28 pod Dukla, auto nie pali. Pilnie potrzebuje lawety do warsztatu w Krosnie. 501 234 567", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Dukla", "dostawa_miasto": "Krosno", "pilnosc": "teraz"}}
+{"id": "ref-002", "zrodlo": "seed", "tresc": "Laweta 24/7 Podkarpacie, konkurencyjne ceny, faktury VAT, zapraszam do kontaktu", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-003", "zrodlo": "seed", "tresc": "Polecicie kogos z laweta? Musze przewiezc golfa z Jasla do Rzeszowa, moze byc jutro", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Jaslo", "dostawa_miasto": "Rzeszow", "pilnosc": "jutro"}}
+{"id": "ref-004", "zrodlo": "seed", "tresc": "Ile sie bierze za holowanie do 50 km? Pytam z ciekawosci, zeby wiedziec na przyszlosc", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-005", "zrodlo": "seed", "tresc": "Kupilem auto w Kolonii, kto przywiezie do Sanoka? Nie spieszy sie, moze byc w tym miesiacu", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Kolonia", "dostawa_miasto": "Sanok", "pilnosc": "elastycznie"}}
+{"id": "ref-006", "zrodlo": "seed", "tresc": "Wczoraj dachowalem na obwodnicy, wszyscy cali. Uwazajcie na tym zakrecie jak pada", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-007", "zrodlo": "seed", "tresc": "Sprzedam golfa 4 po stluczce, silnik sprawny, przod do wymiany, cena do uzgodnienia", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-008", "zrodlo": "seed", "tresc": "Zdechlem w Sanoku na stacji orlen, akumulator padl. Ktos moze podjechac odpalic? Pisac na pw", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Sanok", "dostawa_miasto": null, "pilnosc": "teraz"}}
+{"id": "ref-009", "zrodlo": "seed", "tresc": "Potrzebna laweta z Brzozowa do Rzeszowa, passat po wypadku, nie toczy sie, urwane kolo. Dzis jak sie da. 600-100-200", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Brzozow", "dostawa_miasto": "Rzeszow", "pilnosc": "dzis"}}
+{"id": "ref-010", "zrodlo": "seed", "tresc": "Zatrudnie kierowce kat C na lawete, praca od zaraz, cv na priv", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-011", "zrodlo": "seed", "tresc": "Ktos jedzie w strone Wroclawia w tym tygodniu? Mam osobowke do zabrania z Krosna, zaplace za miejsce na lawecie", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Krosno", "dostawa_miasto": "Wroclaw", "pilnosc": "elastycznie"}}
+{"id": "ref-012", "zrodlo": "seed", "tresc": "Blokuje pas na s19 pod Rzeszowem, dziecko w aucie, potrzebuje pomocy natychmiast!!! 502 33 44 55", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Rzeszow", "dostawa_miasto": null, "pilnosc": "teraz"}}
+{"id": "ref-013", "zrodlo": "seed", "tresc": "Szukam lawety, motocykl nie odpala, stoi w garazu w Krosnie. Termin dowolny, kiedy komus bedzie po drodze", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Krosno", "dostawa_miasto": null, "pilnosc": "elastycznie"}}
+{"id": "ref-014", "zrodlo": "seed", "tresc": "Transport 2 aut z Hamburga do Jasla, odbior w przyszlym tygodniu, moge dac 2500 zl za komplet", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Hamburg", "dostawa_miasto": "Jaslo", "pilnosc": "elastycznie"}}
+{"id": "ref-015", "zrodlo": "seed", "tresc": "Uslugi lawetowe, transport maszyn, wciagarka, tanio i solidnie. Dzwoncie o kazdej porze", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-016", "zrodlo": "seed", "tresc": "Wjechalem w row pod Miejscem Piastowym, auto na kolach ale nie wyjade. Kto ma wyciagarke? Na juz", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Miejsce Piastowe", "dostawa_miasto": null, "pilnosc": "teraz"}}
+{"id": "ref-017", "zrodlo": "seed", "tresc": "Znacie kogos kto przewiezie ciagnik z Debicy do Mielca? Nie pilne, w ciagu dwoch tygodni", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Debica", "dostawa_miasto": "Mielec", "pilnosc": "elastycznie"}}
+{"id": "ref-018", "zrodlo": "seed", "tresc": "Potrzebuje przewiezc busa z Krosna 38-400 do Rzeszowa 35-001, skrzynia zablokowana, nie toczy sie. Jutro rano jak sie da", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Krosno", "dostawa_miasto": "Rzeszow", "pilnosc": "jutro"}}
+{"id": "ref-019", "zrodlo": "seed", "tresc": "Auto stoi na parkingu pod biedronka na Podkarpackiej w Krosnie od tygodnia, wlasciciel prosil zeby ktos odholowal do warsztatu na Bieszczadzka. Kontakt zostawiam w komentarzu", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Krosno", "dostawa_miasto": "Krosno", "pilnosc": "elastycznie"}}
+{"id": "ref-020", "zrodlo": "seed", "tresc": "Mialem dzis stluczke ale juz zalatwione, dziekuje wszystkim za pomoc i szybka reakcje", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
+{"id": "ref-021", "zrodlo": "seed", "tresc": "pilne!!! laweta w okolicy tarnobrzega? stoje na krajowce, ciezarowka 12t, nie odpala, +48 505 606 707", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Tarnobrzeg", "dostawa_miasto": null, "pilnosc": "teraz"}}
+{"id": "ref-022", "zrodlo": "seed", "tresc": "Szukam kogos kto przywiezie quada z Zamoscia do Krosna. Moze byc w przyszlym tygodniu, dogadamy sie co do ceny", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Zamosc", "dostawa_miasto": "Krosno", "pilnosc": "elastycznie"}}

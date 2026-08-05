@@ -39,8 +39,12 @@ STATUSY = ("nowe", "dzwonie", "wygrane", "przegrane", "smiec")
 # nie ma powodu wozić pełnej treści posta dla stu rekordów.
 POLA_LISTY = ("fb_id", "grupa_nazwa", "grupa_url", "post_url", "opublikowany_at",
               "pobrany_at", "status", "status_at", "stale", "gate_jezyk",
-              "ai_json", "ai_pewnosc", "ai_pilnosc", "telefon", "notatka",
-              "cena_koncowa")
+              "typ", "odbior_raw", "odbior_kod", "odbior_miasto",
+              "dostawa_raw", "dostawa_kod", "dostawa_miasto",
+              "pojazd_opis", "pojazd_kategoria", "stan_toczy_sie",
+              "stan_ma_kola", "stan_po_wypadku", "stan_uwagi",
+              "pilnosc", "kontakt_typ", "kontakt_wartosc",
+              "cena_sugerowana", "pewnosc", "powod", "notatka", "cena_koncowa")
 
 
 class Zmiana(BaseModel):
@@ -59,43 +63,34 @@ class Zmiana(BaseModel):
 def _rekord(wiersz: dict) -> dict:
     """Wiersz z `posty` -> rekord dla panelu, z policzoną geografią.
 
-    `ai_json` rozpakowujemy NA PŁASKO obok kolumn, a nie zagnieżdżamy — panel ma
-    czytać `zlecenie.pojazd`, a nie `zlecenie.ai.pojazd`, bo połowa tych pól i tak
-    ma odpowiednik w kolumnie (telefon, pewnosc) i dwa źródła prawdy w jednym
-    obiekcie kończą się pytaniem „które jest aktualne".
+    Pola klasyfikatora idą DALEJ PŁASKO, dokładnie pod nazwami kolumn
+    z `0004_klasyfikacja.sql`. Świadomie bez przepakowywania na `zlecenie.odbior
+    .miasto`: nazwa w SQL-u, w API i w TypeScripcie jest wtedy ta sama, więc
+    „gdzie to się bierze" sprawdza się grepem, a nie czytaniem mapowania.
     """
     dane = dict(wiersz)
-    ai = dane.pop("ai_json", None) or {}
-    if isinstance(ai, dict):
-        # Kolumny wygrywają z JSON-em: to one są aktualizowane migracjami
-        # i indeksowane, a JSON jest zapisem tego, co model powiedział wtedy.
-        for klucz, wartosc in ai.items():
-            dane.setdefault(klucz, wartosc)
+    odbior = geo.geokoduj(dane.get("odbior_kod"), dane.get("odbior_miasto"))
+    dostawa = geo.geokoduj(dane.get("dostawa_kod"), dane.get("dostawa_miasto"))
+    pods = geo.podsumowanie(odbior, dostawa)
 
-    dane.setdefault("pewnosc", dane.get("ai_pewnosc"))
-    dane.setdefault("pilnosc", dane.get("ai_pilnosc"))
     dane.setdefault("jezyk", dane.get("gate_jezyk"))
-
-    g = geo.opisz(dane)
     dane.update({
-        "km_od_bazy": g.km_od_bazy,
-        "km_trasy": g.km_trasy,
-        "szacunek_pln": g.szacunek_pln,
-        "link_mapy": g.link_mapy,
-        "link_nawigacji": g.link_nawigacji,
-        # Panel rysuje nad kilometrami wyraźny pasek ostrzegawczy, gdy to nie jest
-        # 'miasto' — i pokazuje w nim `lokalizacja_surowa`, czyli to, co REALNIE
-        # stało w poście. Bez surowej treści ostrzeżenie mówi „nie ufaj", nie
-        # mówiąc czemu, a operator nie ma jak sam rozstrzygnąć.
-        "lokalizacja_zrodlo": g.zrodlo,
-        "lokalizacja_surowa": g.surowe_od,
-        "miejsce_od": g.miejsce_od,
-        "miejsce_do": g.miejsce_do,
-        # Pinezka na mapie w panelu. `null` przy nierozpoznanym miejscu — panel
-        # pokazuje takie zlecenia listą pod mapą, z powodem, zamiast stawiać
-        # pinezkę „gdzieś", nieodróżnialną wzrokowo od pewnej.
-        "lat": g.lat,
-        "lon": g.lon,
+        "km_trasy": pods["km_trasy"],
+        "km_od_bazy": pods["km_od_bazy"],
+        "szacunek_pln": pods["szacunek_pln"],
+        "link_mapy": pods["link_trasa"],
+        "link_nawigacji": pods["link_nawigacja"],
+        # Panel rysuje nad kilometrami wyraźny pasek ostrzegawczy, gdy punkt jest
+        # niepewny albo nierozpoznany — i pokazuje w nim `odbior_raw`, czyli to,
+        # co REALNIE stało w poście. Bez surowej treści ostrzeżenie mówi „nie
+        # ufaj", nie mówiąc czemu, a operator nie ma jak sam rozstrzygnąć.
+        "lokalizacja_zrodlo": odbior.zrodlo if odbior else "brak",
+        "lokalizacja_niepewne": pods["niepewne"],
+        # Pinezka na mapie. `null` przy nierozpoznanym miejscu — panel pokazuje
+        # takie zlecenia listą pod mapą, z powodem, zamiast stawiać pinezkę
+        # „gdzieś", nieodróżnialną wzrokowo od pewnej.
+        "lat": odbior.lat if odbior else None,
+        "lng": odbior.lng if odbior else None,
     })
     return dane
 
@@ -176,10 +171,8 @@ def szczegol(fb_id: str) -> dict:
         _sprawdz_migracje(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT fb_id, tresc, autor, grupa_nazwa, grupa_url, post_url, "
-                "       opublikowany_at, pobrany_at, status, status_at, stale, "
-                "       gate_jezyk, gate_powod, zrodlo_decyzji, ai_json, "
-                "       ai_pewnosc, ai_pilnosc, ai_at, telefon, notatka, cena_koncowa "
+                f"SELECT {', '.join(POLA_LISTY)}, tresc, autor, gate_powod, "  # noqa: S608
+                "       zrodlo_decyzji, ai_zlecenie, ai_at, ai_model "
                 "  FROM posty WHERE fb_id = %s", (fb_id,))
             wiersz = cur.fetchone()
     if wiersz is None:
@@ -250,8 +243,13 @@ def _sprawdz_migracje(conn) -> None:
     sprawdzenia pierwszy deploy kończy się piątką i pytaniem „czemu panel nie
     działa" zamiast jedną linijką z nazwą pliku do odpalenia.
     """
-    brak = {"ai_json", "ai_pewnosc", "notatka", "status_at"} - db.kolumny(conn, "posty")
-    if brak:
-        raise db.BazaNiedostepna(
-            f"brakuje kolumn {', '.join(sorted(brak))} — odpal migrację "
-            "laweta_radar/api/migrations/0004_zlecenie.sql (scripts/migrate.sh)")
+    kolumny = db.kolumny(conn, "posty")
+    for potrzebne, migracja in (
+        ({"odbior_miasto", "pojazd_opis", "pewnosc"}, "0004_klasyfikacja.sql"),
+        ({"notatka", "cena_koncowa", "status_at"}, "0005_panel.sql"),
+    ):
+        brak = potrzebne - kolumny
+        if brak:
+            raise db.BazaNiedostepna(
+                f"brakuje kolumn {', '.join(sorted(brak))} — odpal migrację "
+                f"laweta_radar/api/migrations/{migracja} (scripts/migrate.sh)")

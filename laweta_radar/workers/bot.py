@@ -142,7 +142,8 @@ def _dzis(conn) -> str:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT status, ai_json, cena_koncowa
+            SELECT status, odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto,
+                   cena_koncowa
               FROM posty
              WHERE czy_zlecenie
                AND pobrany_at > date_trunc('day', NOW())
@@ -150,18 +151,21 @@ def _dzis(conn) -> str:
         wiersze = cur.fetchall()
 
     wziete = [w for w in wiersze if w[0] in ("dzwonie", "wygrane")]
-    km = 0
-    for _status, ai, _cena in wziete:
-        g = geo.opisz(dict(ai or {}))
-        km += (g.km_od_bazy or 0) + (g.km_trasy or 0)
-    przychod = sum(float(w[2] or 0) for w in wiersze if w[0] == "wygrane")
+    km = 0.0
+    for _status, o_kod, o_miasto, d_kod, d_miasto, _cena in wziete:
+        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
+                                geo.geokoduj(d_kod, d_miasto))
+        # Dojazd PLUS trasa: operator pyta „ile dziś przejechałem", a nie
+        # „jak długie były kursy". Pusty przebieg z bazy też zużywa paliwo.
+        km += (pods["km_od_bazy"] or 0) + (pods["km_trasy"] or 0)
+    przychod = sum(float(w[5] or 0) for w in wiersze if w[0] == "wygrane")
 
     linie = [
         "*📅 Dzisiaj*",
         "",
         f"zleceń: {len(wiersze)}",
         f"wziętych: {len(wziete)}",
-        f"kilometrów (dojazd + trasa): ~{km}",
+        f"kilometrów (dojazd + trasa): ~{round(km)}",
     ]
     if przychod:
         linie.append(f"przychód z wygranych: {przychod:.0f} zł")
@@ -179,7 +183,8 @@ def _ostatnie(conn, ile: int) -> str:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fb_id, grupa_nazwa, opublikowany_at, status, ai_json
+            SELECT fb_id, grupa_nazwa, opublikowany_at, status,
+                   odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto
               FROM posty
              WHERE czy_zlecenie
              ORDER BY opublikowany_at DESC NULLS LAST, pobrany_at DESC
@@ -194,12 +199,14 @@ def _ostatnie(conn, ile: int) -> str:
                  "przegrane": "✖", "smiec": "🗑"}
     teraz = datetime.now(timezone.utc)
     linie = [f"*🕘 Ostatnie {len(wiersze)} zleceń*", ""]
-    for fb_id, grupa, opublikowany, status, ai in wiersze:
-        g = geo.opisz(dict(ai or {}))
-        trasa = g.miejsce_od or "?"
-        if g.miejsce_do:
-            trasa += f" → {g.miejsce_do}"
-        km = f"{g.km_od_bazy} km" if g.km_od_bazy is not None else "? km"
+    for fb_id, grupa, opublikowany, status, o_kod, o_miasto, d_kod, d_miasto in wiersze:
+        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
+                                geo.geokoduj(d_kod, d_miasto))
+        trasa = str(o_miasto or o_kod or "?")
+        if d_miasto or d_kod:
+            trasa += f" → {d_miasto or d_kod}"
+        dystans = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
+        km = f"{round(dystans)} km" if dystans is not None else "? km"
         linie.append(telegram_notify._escape_md(
             f"{znaczniki.get(status, '•')} {trasa} · {km} · "
             f"{powiadomienia.wiek_posta(opublikowany, teraz)} · {grupa or '?'}"))

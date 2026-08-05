@@ -63,10 +63,11 @@ CREATE TABLE IF NOT EXISTS powiadomienia (
     --
     -- Klucze leżą TUTAJ, a nie są dociągane joinem z `posty`, z jednego powodu:
     -- zapytanie dedupu chodzi w ścieżce KAŻDEGO wysyłanego alertu i ma być jednym
-    -- indeksowym trafieniem w jedną tabelę. Join po `ai_json` przy każdym poście
-    -- to skan tabeli, która rośnie o kilkaset wierszy dziennie.
-    telefon      TEXT,      -- same cyfry, znormalizowane
-    klucz_tresci TEXT,      -- sha1(miasto_od|miasto_do|pojazd) — patrz _klucz_tresci()
+    -- indeksowym trafieniem w jedną tabelę. Join po kolumnach klasyfikatora przy
+    -- każdym poście to skan tabeli rosnącej o kilkaset wierszy dziennie.
+    telefon      TEXT,      -- same cyfry, znormalizowane (z `posty.kontakt_wartosc`)
+    klucz_tresci TEXT,      -- sha1(odbior_miasto|dostawa_miasto|pojazd_opis)
+                            -- patrz services/powiadomienia.klucz_tresci()
 
     -- Ile grup niosło TO SAMO zlecenie. Rośnie zamiast wysyłać drugą wiadomość:
     -- crosspost nie jest nowym kursem, ale wiedza „widziano to na czterech

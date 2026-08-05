@@ -24,15 +24,15 @@ TERAZ = datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc)
 
 ZLECENIE = {
     "fb_id": "abc123",
-    "pilnosc": "pilne",
-    "miasto_od": "Krosno",
-    "kod_pocztowy": "38-400",
-    "miasto_do": "Rzeszów",
-    "pojazd": "VW Golf IV",
-    "stan": "nie odpala",
-    "toczenie": "toczy się",
+    "pilnosc": "teraz",
+    "odbior_miasto": "Krosno",
+    "odbior_kod": "38-400",
+    "dostawa_miasto": "Rzeszow",
+    "pojazd_opis": "VW Golf IV",
+    "stan_uwagi": "nie odpala",
+    "stan_toczy_sie": True,
     "tresc": "potrzebuje lawety z Krosna do Rzeszowa, golf stanal i nie odpala",
-    "telefon": "+48 555 111 222",
+    "kontakt_wartosc": "+48 555 111 222",
     "grupa_nazwa": "Pomoc drogowa Podkarpacie",
     "pewnosc": 88,
     "jezyk": "pl",
@@ -41,10 +41,28 @@ ZLECENIE = {
 }
 
 
+# Mikro-baza geo — ta sama zasada co w `test_geo.py`: `data/kody_eu.csv` jest
+# zalążkiem i zostanie podmieniony pełnym eksportem z GeoNames, a test opierający
+# się na jego zawartości zacząłby wtedy padać z powodu niezwiązanego z kodem.
+FIXTURE_GEO = """kraj,kod,miejscowosc,wojewodztwo,lat,lng
+PL,38-400,Krosno,podkarpackie,49.6886,21.7706
+PL,35-001,Rzeszow,podkarpackie,50.0412,21.9991
+PL,80-001,Gdansk,pomorskie,54.3520,18.6466
+DE,50667,Koln,Nordrhein-Westfalen,50.9375,6.9603
+PL,30-001,Krakow,malopolskie,50.0647,19.9450
+"""
+
+
 @pytest.fixture(autouse=True)
-def baza_pod_krosnem(monkeypatch):
+def baza_pod_krosnem(monkeypatch, tmp_path):
+    plik = tmp_path / "kody.csv"
+    plik.write_text(FIXTURE_GEO, encoding="utf-8")
+    geo.zaladuj(plik)
     monkeypatch.setattr(geo.settings, "BAZA_LAT", 49.65)
     monkeypatch.setattr(geo.settings, "BAZA_LON", 21.60)
+    monkeypatch.setattr(geo.settings, "BAZA_LNG", 21.60)
+    yield
+    geo.zaladuj()   # wróć do bazy z repo, żeby nie zatruć kolejnych plików testów
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +72,7 @@ def test_pierwsza_linia_to_trzy_liczby_i_nic_wiecej():
     """Pilność, dystans, szacunek. Wszystko inne w tej linii konkuruje
     o dwie sekundy, których nie ma."""
     pierwsza = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).splitlines()[0]
-    assert "PILNE" in pierwsza
+    assert "TERAZ" in pierwsza
     assert "km" in pierwsza
     assert "zł" in pierwsza
     # Miasto, pojazd i grupa NIE mają prawa się tu znaleźć.
@@ -100,19 +118,56 @@ def test_formaty_wieku(delta, oczekiwane):
     assert pw.wiek_posta(TERAZ - delta, TERAZ) == oczekiwane
 
 
-def test_niepewna_lokalizacja_dostaje_znak_zapytania_i_ostrzezenie():
-    niepewne = dict(ZLECENIE, kod_pocztowy="", miasto_od="Krosno")
+def test_niepewna_lokalizacja_dostaje_znak_zapytania_i_ostrzezenie(tmp_path):
+    """Kilka miejscowości o tej nazwie -> geo oddaje `miasto_niepewne`, a alert
+    ma to POKAZAĆ: znak zapytania przy nazwie i jedno słowo obok."""
+    plik = tmp_path / "wieloznaczne.csv"
+    plik.write_text("kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+                    "PL,36-001,Nowa Wies,podkarpackie,50.1,22.1\n"
+                    "PL,05-870,Nowa Wies,mazowieckie,52.2,20.6\n", encoding="utf-8")
+    geo.zaladuj(plik)
+    niepewne = dict(ZLECENIE, odbior_kod="", odbior_miasto="Nowa Wies",
+                    dostawa_miasto="", dostawa_kod="")
     tresc = pw.zbuduj_tresc(niepewne, teraz=TERAZ)
-    assert "Krosno?" in tresc
+    assert "Nowa Wies?" in tresc
     assert "niepewne" in tresc
 
 
+def test_nierozpoznane_miejsce_jest_oznaczone():
+    """Brak dopasowania NIE jest cichy: kilometrów nie ma, więc operator musi
+    wiedzieć, że ma przeczytać cytat."""
+    tresc = pw.zbuduj_tresc(
+        dict(ZLECENIE, odbior_kod="", odbior_miasto="Zmyslone Miasto",
+             dostawa_miasto="", dostawa_kod=""), teraz=TERAZ)
+    assert "nierozpoznane" in tresc
+    assert "? km" in tresc
+
+
 def test_pewna_lokalizacja_bez_ostrzezenia():
-    """Kod pocztowy potwierdza nazwę — ostrzeganie mimo to jest fałszywym
+    """Kod pocztowy trafia dokładnie — ostrzeganie mimo to jest fałszywym
     alarmem, a operator, który raz je zignoruje, zignoruje też prawdziwe."""
     tresc = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
-    assert "?" not in tresc.split("\n")[2]
     assert "niepewne" not in tresc
+    assert "⚠️" not in tresc
+
+
+def test_dystans_to_dlugosc_kursu_a_dojazd_obok():
+    """Przy transporcie „ile km od bazy" nie znaczy nic — pierwszą liczbą jest
+    DŁUGOŚĆ KURSU odbiór->dostawa. Dojazd idzie linijkę niżej."""
+    linie = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).splitlines()
+    odbior, dostawa = pw.punkty(ZLECENIE)
+    pods = geo.podsumowanie(odbior, dostawa)
+    assert f"{round(pods['km_trasy'])} km" in linie[0]
+    assert "km od bazy" in linie[2]
+
+
+def test_toczenie_jest_trojstanowe():
+    """True/False/None znaczą co innego dla sprzętu, który trzeba zabrać."""
+    assert "toczy się" in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+    assert "NIE toczy się" in pw.zbuduj_tresc(
+        dict(ZLECENIE, stan_toczy_sie=False), teraz=TERAZ)
+    bez = pw.zbuduj_tresc(dict(ZLECENIE, stan_toczy_sie=None), teraz=TERAZ)
+    assert "toczy się" not in bez
 
 
 def test_znacznik_jezyka_tylko_dla_obcych():
@@ -126,7 +181,7 @@ def test_znacznik_jezyka_tylko_dla_obcych():
 def test_brak_numeru_jest_informacja_a_nie_pustka():
     """Brak numeru zmienia to, CO operator zrobi: pisze wiadomość zamiast
     dzwonić."""
-    tresc = pw.zbuduj_tresc(dict(ZLECENIE, telefon=""), teraz=TERAZ)
+    tresc = pw.zbuduj_tresc(dict(ZLECENIE, kontakt_wartosc=""), teraz=TERAZ)
     assert "brak numeru" in tresc
 
 
@@ -261,8 +316,11 @@ def test_cisza_wylaczona_gdy_od_rowna_sie_do(monkeypatch):
 
 def test_brak_progu_na_kilometry():
     """Trasa Kolonia-Kraków to 1100 km i normalny dzień pracy tego operatora."""
-    daleko = dict(ZLECENIE, miasto_od="Köln", miasto_do="Kraków", kod_pocztowy="")
+    daleko = dict(ZLECENIE, odbior_miasto="Koln", odbior_kod="",
+                  dostawa_miasto="Krakow", dostawa_kod="")
     assert _ocen(daleko).wysylac is True
+    odbior, dostawa = pw.punkty(daleko)
+    assert geo.podsumowanie(odbior, dostawa)["km_trasy"] > 1000
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +338,7 @@ def test_klucz_tresci_ignoruje_roznice_w_tresci_posta():
 
 def test_klucz_tresci_rozny_dla_roznych_tras():
     a = pw.klucz_tresci(ZLECENIE)
-    b = pw.klucz_tresci(dict(ZLECENIE, miasto_do="Gdańsk"))
+    b = pw.klucz_tresci(dict(ZLECENIE, dostawa_miasto="Gdansk"))
     assert a != b
 
 
@@ -323,3 +381,11 @@ def test_zbuduj_tresc_znosi_puste_zlecenie():
     tresc = pw.zbuduj_tresc({"fb_id": "x"}, teraz=TERAZ)
     assert "ZLECENIE" in tresc
     assert "? km" in tresc
+
+
+def test_przyciski_bez_trasy_gdy_nie_znamy_miejsca():
+    """Telegram odrzuca CAŁĄ klawiaturę, gdy którykolwiek `url` jest pusty —
+    alert dotarłby wtedy bez ŻADNYCH przycisków."""
+    for wiersz in pw.zbuduj_przyciski({"fb_id": "x", "post_url": "https://fb/1"}):
+        for przycisk in wiersz:
+            assert przycisk.get("url") or przycisk.get("callback_data")

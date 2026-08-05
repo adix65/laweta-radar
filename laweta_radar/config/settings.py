@@ -88,12 +88,38 @@ def _float(name: str, default: float) -> float:
 DATABASE_URL = _txt("DATABASE_URL")
 
 # ---------------------------------------------------------------------------
-# Klasyfikator (Anthropic). Model trzymamy w konfiguracji, bo przy zmianie
-# progu jakość/koszt chcemy go podmienić bez deployu — a nie dlatego, że
-# spodziewamy się częstych zmian.
+# Klasyfikator. Model trzymamy w konfiguracji, bo przy zmianie progu
+# jakość/koszt chcemy go podmienić bez deployu — a nie dlatego, że spodziewamy
+# się częstych zmian.
+#
+# LLM_PROVIDER przełącza CAŁĄ implementację wołania modelu (services/llm.py),
+# nie tylko nazwę. Istnieje z powodu pomiarowego: jakości ekstrakcji z polskiego
+# posta bez ogonków nie da się odczytać z żadnego benchmarku, więc mierzymy ją
+# na swoich danych (scripts/porownaj_modele.py). Nieznana wartość degraduje do
+# "anthropic" — jedynego providera, którego zależność jest w requirements.txt.
+#
+# Model per provider, a nie jeden wspólny, bo porównywarka odpala WSZYSTKIE
+# skonfigurowane naraz i musi wiedzieć, co puścić na każdym.
 # ---------------------------------------------------------------------------
 ANTHROPIC_API_KEY = _txt("ANTHROPIC_API_KEY")
 CLASSIFIER_MODEL = _txt("CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
+
+LLM_PROVIDER = _txt("LLM_PROVIDER", "anthropic")
+OPENAI_API_KEY = _txt("OPENAI_API_KEY")
+OPENAI_MODEL = _txt("OPENAI_MODEL", "gpt-5-mini")
+GEMINI_API_KEY = _txt("GEMINI_API_KEY")
+GEMINI_MODEL = _txt("GEMINI_MODEL", "gemini-2.5-flash")
+
+# Stawki providerów spoza Anthropic — JSON {"model": [usd_wejscie, usd_wyjscie]}
+# za MILION tokenów. Świadomie NIE są zaszyte w kodzie: zła stawka nie wywala
+# niczego, tylko po cichu przekłamuje jedyną liczbę, dla której porównywarka
+# istnieje. Pusto = raport pokaże koszt jako nieznany, i to jest poprawna
+# odpowiedź, dopóki nikt nie sprawdził cennika.
+CENNIK_EXTRA = _txt("CENNIK_EXTRA")
+# Kurs do przeliczenia kosztu runu na złotówki. Wartość domyślna jest
+# ZAOKRĄGLONYM PLACEHOLDEREM — ustaw realny, jeśli liczba ma być czymś więcej
+# niż rzędem wielkości.
+KURS_USD_PLN = _float("KURS_USD_PLN", 4.00)
 
 # ---------------------------------------------------------------------------
 # Telegram — jedyny kanał dowozu do operatora. Brak tokenu wycisza alerty
@@ -108,9 +134,28 @@ TELEGRAM_CHAT_ID = _txt("TELEGRAM_CHAT_ID")
 # się odrzucić zlecenia z drugiego końca Polski, a takie zlecenie jest gorsze niż
 # brak zlecenia: operator traci czas na czytanie alertu, którego i tak nie weźmie.
 # ---------------------------------------------------------------------------
+# BAZA_LNG i BAZA_LON to ta sama rzecz — długość geograficzna. `LON` był tu od
+# pierwszej wersji .env, `LNG` przyszedł z zadania geo i jest formą, którą
+# ludzie kopiują z Map Google. Przyjmujemy OBIE zamiast wybierać jedną, bo
+# jedyny efekt wyboru byłby taki, że czyjaś działająca konfiguracja po cichu
+# przestaje działać i dystanse liczą się od równika.
 BAZA_LAT = _float("BAZA_LAT", 0.0)
-BAZA_LON = _float("BAZA_LON", 0.0)
+BAZA_LON = _float("BAZA_LNG", 0.0) or _float("BAZA_LON", 0.0)
+BAZA_LNG = BAZA_LON
+BAZA_NAZWA = _txt("BAZA_NAZWA", "Krosno")
+
+# UWAGA: ta zmienna NIE JEST bramką i nie wolno jej nią zrobić. Zasada naczelna
+# repo mówi: system pokazuje zlecenia, decyduje kierowca. Dystans jest etykietą
+# na ekranie — przy transporcie międzynarodowym „ile km od bazy" i tak nie znaczy
+# nic, bo liczy się długość kursu odbiór->dostawa (services/geo.py). Zmienna
+# została, bo pokazuje ją /health i bo służy do WYRÓŻNIENIA zleceń blisko bazy.
 MAX_DYSTANS_KM = _int("MAX_DYSTANS_KM", 80)
+
+# Stawki do etykiety „szacunek" przy zleceniu (services/geo.kalkulacja).
+# To ETYKIETA NA EKRANIE, nie wycena i nie bramka — nic się na jej podstawie
+# nie ukrywa ani nie odrzuca. Kierowca patrzy na liczbę i sam decyduje.
+STAWKA_ZA_KM = _float("STAWKA_ZA_KM", 4.0)
+STAWKA_MINIMALNA = _float("STAWKA_MINIMALNA", 250.0)
 
 # Po ilu godzinach post przestaje być zleceniem. Starszy trafia do bazy ze
 # znacznikiem `stale`, ale NIE budzi nikogo powiadomieniem i nie idzie do modelu.
@@ -172,16 +217,6 @@ GATE_PROG = _int("GATE_PROG", 5)
 GATE_TRYB = _txt("GATE_TRYB", "cien")
 
 # ---------------------------------------------------------------------------
-# WYCENA — do TRIAŻU na ekranie, nie do podania klientowi.
-#
-# Dwie liczby, bo więcej i tak nie wiadomo z posta. Ich zadaniem jest odróżnić
-# kurs za 200 zł od kursu za 2000 zł w dwie sekundy patrzenia; cenę podaje
-# kierowca przez telefon, znając masę, porę i to, czy wraca pusty.
-# ---------------------------------------------------------------------------
-OPLATA_STARTOWA_PLN = _int("OPLATA_STARTOWA_PLN", 150)
-STAWKA_ZA_KM_PLN = _float("STAWKA_ZA_KM_PLN", 3.5)
-
-# ---------------------------------------------------------------------------
 # POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
 # brzęczy telefon. ŻADEN z nich nie usuwa zlecenia z bazy ani z panelu; to jest
 # zasada naczelna repo i najłatwiejsza tutaj do złamania, bo „nie wysyłaj" i
@@ -191,6 +226,14 @@ STAWKA_ZA_KM_PLN = _float("STAWKA_ZA_KM_PLN", 3.5)
 # Nie do kosza — do panelu. Czterdziestka jest niska celowo: alert o zleceniu,
 # którego model nie jest pewny, kosztuje trzy sekundy uwagi, a niewysłany alert
 # o realnym kursie kosztuje kurs.
+#
+# UWAGA NA DRUGI PRÓG: `workers/classifier.PROG_PEWNOSCI` (50) jest stałą MODUŁU
+# i służy jego własnemu `warto_budzic()` — podpowiedzi dla wołającego, nie decyzji.
+# JEDYNYM miejscem, które rozstrzyga, czy brzęczy telefon, jest
+# `services/powiadomienia.ocen()` i to ono czyta tę zmienną. Gdyby oba progi
+# rozstrzygały naraz, obowiązywałby ostrzejszy, a operator zmieniający
+# `MIN_PEWNOSC` w .env nie zobaczyłby żadnej różnicy i nie miałby jak się
+# dowiedzieć dlaczego.
 MIN_PEWNOSC = _int("MIN_PEWNOSC", 40)
 
 # Cisza nocna [OD, DO) w godzinach lokalnych. W tych godzinach nie brzęczymy —
@@ -315,6 +358,7 @@ def opis_srodowiska() -> str:
          f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
          f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
+         f", llm={LLM_PROVIDER}/{CLASSIFIER_MODEL}"
          f", budzet={POSTY_NA_DOBE} postow/dobe"
          f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")

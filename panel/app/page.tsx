@@ -35,12 +35,12 @@ export default function Lista() {
 
   const stan = useZlecenia(filtryApi);
 
-  // „Pilne" filtrujemy po stronie panelu, a nie w SQL-u: pilność jest polem
-  // z JSON-a klasyfikatora, więc warunek w bazie wymagałby indeksu na wyrażeniu
-  // z JSONB, którego przy stu wierszach nikt nie potrzebuje — a filtr w Pythonie
-  // po stronie API kosztowałby dokładnie tyle samo co tutaj.
+  // „Pilne" filtrujemy po stronie panelu, a nie w SQL-u. `pilnosc` JEST kolumną
+  // (0004_klasyfikacja.sql), więc dałoby się to zrobić zapytaniem — ale przy
+  // kilkudziesięciu rekordach, które i tak już przyszły, oznaczałoby to nowy
+  // parametr API i drugi round-trip za odsiew, który tutaj kosztuje mikrosekundy.
   const widoczne =
-    filtr === "pilne" ? stan.zlecenia.filter((z) => z.pilnosc === "pilne") : stan.zlecenia;
+    filtr === "pilne" ? stan.zlecenia.filter((z) => z.pilnosc === "teraz") : stan.zlecenia;
 
   async function zmien(fbId: string, status: Status) {
     // OPTYMISTYCZNIE: karta znika natychmiast, request leci w tle. Czekanie na

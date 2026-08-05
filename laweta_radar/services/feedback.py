@@ -50,7 +50,33 @@ def zapisz(conn, fb_id: str, ocena: str) -> bool:
             cur.execute(
                 """
                 INSERT INTO feedback (fb_id, ocena, tresc_posta, werdykt_ai_json)
-                SELECT p.fb_id, %s, p.tresc, p.ai_json
+                SELECT p.fb_id, %s, p.tresc,
+                       -- Werdykt składamy TU, z płaskich kolumn, bo klasyfikator
+                       -- pisze je osobno (0004_klasyfikacja.sql) i nie ma jednego
+                       -- pola z całością. `jsonb_strip_nulls` wyrzuca pola, których
+                       -- model nie wypełnił: przykład treningowy z piętnastoma
+                       -- nullami czyta się gorzej niż z trzema realnymi wartościami.
+                       jsonb_strip_nulls(jsonb_build_object(
+                           'czy_zlecenie',  p.ai_zlecenie,
+                           'typ',           p.typ,
+                           'odbior',        jsonb_strip_nulls(jsonb_build_object(
+                                                'raw', p.odbior_raw,
+                                                'kod', p.odbior_kod,
+                                                'miasto', p.odbior_miasto)),
+                           'dostawa',       jsonb_strip_nulls(jsonb_build_object(
+                                                'raw', p.dostawa_raw,
+                                                'kod', p.dostawa_kod,
+                                                'miasto', p.dostawa_miasto)),
+                           'pojazd',        p.pojazd_opis,
+                           'kategoria',     p.pojazd_kategoria,
+                           'toczy_sie',     p.stan_toczy_sie,
+                           'stan_uwagi',    p.stan_uwagi,
+                           'pilnosc',       p.pilnosc,
+                           'kontakt',       p.kontakt_typ,
+                           'cena_sugerowana', p.cena_sugerowana,
+                           'pewnosc',       p.pewnosc,
+                           'powod',         p.powod,
+                           'model',         p.ai_model))
                   FROM posty p
                  WHERE p.fb_id = %s
                 ON CONFLICT (fb_id, ocena) DO NOTHING

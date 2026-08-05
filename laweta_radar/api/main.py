@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from laweta_radar.api.routers import push, statystyki, zdrowie, zlecenia
 from laweta_radar.config import groups, settings
+from laweta_radar.services import geo, llm
 
 app = FastAPI(
     title="Laweta Radar",
@@ -107,9 +108,20 @@ def health() -> dict:
             "do_pobrania": len(groups.grupy_do_pobrania()),
             "wszystkich": len(groups.FB_GRUPY),
         },
+        # Klasyfikator i geo mają własne warunki startu, których nie widać
+        # w `brakujace_zmienne`: brakującą paczkę providera i brakujący plik
+        # z kodami pocztowymi. Obie awarie są CICHE — system wstaje, nie woła
+        # modelu albo nie pokazuje tras, i nic o tym nie mówi.
+        "klasyfikator": {
+            "provider": llm.normalizuj_provider(settings.LLM_PROVIDER),
+            "model": llm.model_domyslny(),
+            "gotowy": not llm.problemy(),
+            "problemy": llm.problemy(),
+        },
         "geo": {
             "baza_ustawiona": bool(settings.BAZA_LAT or settings.BAZA_LON),
             "max_dystans_km": settings.MAX_DYSTANS_KM,
+            "kody": geo.stan_bazy(),
         },
         # Klucze Apify nie należą do tego repo — przychodzą ze wspólnego .env
         # sales-core-engine. Bez tej sekcji „brak kluczy Apify" wyglądałoby na

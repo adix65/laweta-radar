@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import {
+  dystansGlowny,
   etykietaPilnosci,
   km,
   kolorPilnosci,
@@ -115,7 +116,7 @@ export default function KartaZlecenia({ zlecenie: z, onZmiana }: Props) {
         <div className="min-w-0 flex-1 py-3 pr-3">
           <Link href={`/zlecenie/${encodeURIComponent(z.fb_id)}`} className="block">
             <div className="flex items-baseline gap-3">
-              <span className="text-liczba">{km(z.km_od_bazy)}</span>
+              <span className="text-liczba">{km(dystansGlowny(z))}</span>
               <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
               {lokalizacjaNiepewna(z.lokalizacja_zrodlo) && (
                 <span

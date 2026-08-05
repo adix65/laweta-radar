@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { listaZlecen } from "@/lib/api";
-import { etykietaPilnosci, km, trasa, wiek, zl } from "@/lib/format";
+import { dystansGlowny, etykietaPilnosci, km, trasa, wiek, zl } from "@/lib/format";
 import type { Zlecenie } from "@/lib/typy";
 
 /**
@@ -61,8 +61,8 @@ export default function Mapa() {
       if (!zywe || !kontener.current) return;
 
       const punkty = zlecenia
-        .filter((z) => z.lat != null && z.lon != null)
-        .map((z) => ({ z, ll: [z.lat as number, z.lon as number] as [number, number] }));
+        .filter((z) => z.lat != null && z.lng != null)
+        .map((z) => ({ z, ll: [z.lat as number, z.lng as number] as [number, number] }));
       if (punkty.length === 0) return;
 
       if (!mapa.current) {
@@ -100,7 +100,7 @@ export default function Mapa() {
     };
   }, [zlecenia]);
 
-  const bezPozycji = zlecenia.filter((z) => z.lat == null || z.lon == null);
+  const bezPozycji = zlecenia.filter((z) => z.lat == null || z.lng == null);
 
   return (
     <main className="mx-auto max-w-2xl p-4">
@@ -124,7 +124,7 @@ export default function Mapa() {
           className="mt-3 block rounded-2xl border border-obrys bg-karta p-4"
         >
           <p className="flex items-baseline gap-3">
-            <span className="text-liczba">{km(wybrane.km_od_bazy)}</span>
+            <span className="text-liczba">{km(dystansGlowny(wybrane))}</span>
             <span className="text-liczba text-tekst-cichy">
               {zl(wybrane.szacunek_pln)}
             </span>

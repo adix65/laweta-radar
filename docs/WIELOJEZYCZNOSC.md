@@ -74,7 +74,8 @@ Mówi ona trzy rzeczy:
    z błędną pozycją jest gorsze niż brak zlecenia, bo zjada uwagę operatora i wysyła
    go nie tam.
 
-Kontrakt wywołania (szew jest już w fetcherze, `_klasyfikuj`):
+Kontrakt wywołania (szew w fetcherze: `_klasyfikuj`; wypełniony przez
+`workers/classifier.py`):
 
 ```python
 klasyfikuj(tresc: str, grupa: str, jezyk: str) -> dict | None
@@ -83,6 +84,19 @@ klasyfikuj(tresc: str, grupa: str, jezyk: str) -> dict | None
 
 `jezyk` przychodzi z bramki i jest tam po to, żeby klasyfikator nie musiał wykrywać
 języka drugi raz.
+
+Klasyfikator dokleja wtedy do promptu systemowego `INSTRUKCJA_JEZYKOWA_DLA_KLASYFIKATORA`
+— stałą z `workers/gate.py`, żeby ten tekst nie istniał w repo w dwóch wersjach.
+Dokleja ją **zawsze poza `jezyk="pl"`**, także gdy bramka nie rozstrzygnęła i pole
+jest puste: instrukcja kosztuje ułamek grosza na wywołanie, a jej brak przy poście
+niemieckim daje operatorowi pola po niemiecku dokładnie wtedy, gdy ma zdecydować
+w kilkanaście sekund.
+
+Sprawdzenie z ręki, bez sieci i bez kosztu:
+
+```bash
+python -m laweta_radar.workers.classifier --prompt --jezyk de
+```
 
 ## Powiadomienie
 

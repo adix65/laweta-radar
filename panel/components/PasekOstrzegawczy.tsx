@@ -1,6 +1,6 @@
 "use client";
 
-import { opisZrodla } from "@/lib/format";
+import { lokalizacjaNiepewna, opisZrodla } from "@/lib/format";
 import type { ZrodloLokalizacji } from "@/lib/typy";
 
 /**
@@ -22,7 +22,7 @@ export default function PasekOstrzegawczy({
   zrodlo: ZrodloLokalizacji;
   surowa?: string | null;
 }) {
-  if (zrodlo === "miasto") return null;
+  if (!lokalizacjaNiepewna(zrodlo)) return null;
 
   return (
     <div

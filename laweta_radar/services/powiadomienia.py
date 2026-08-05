@@ -106,10 +106,13 @@ MAX_CYTAT = 200
 # Ikona i etykieta pilności. Trzy poziomy, bo czwartego operator nie odróżni
 # w dwie sekundy. Nieznana wartość degraduje do „ZLECENIE" — brak etykiety jest
 # lepszy niż etykieta zmyślona.
+# Klucze to wartości z `workers/classifier.py` — nie wymyślamy własnych, bo
+# etykieta, której model nigdy nie zwraca, jest martwym kodem udającym funkcję.
 PILNOSC = {
-    "pilne": ("🚨", "PILNE"),
+    "teraz": ("🚨", "TERAZ"),
     "dzis": ("⏱", "DZIŚ"),
-    "planowane": ("📅", "PLANOWANE"),
+    "jutro": ("📅", "JUTRO"),
+    "elastycznie": ("🗓", "ELASTYCZNIE"),
 }
 
 # Znacznik języka pokazujemy TYLKO dla obcych. Wynika to z docs/WIELOJEZYCZNOSC.md:
@@ -203,38 +206,80 @@ def _cytat(tresc) -> str:
     return tekst
 
 
-def _linia_pilnosci(zlecenie: dict, g: geo.Geo) -> str:
-    """Trzy liczby, po których zapada decyzja. Nic więcej w tej linii."""
+def punkty(zlecenie: dict) -> tuple:
+    """Odbiór i dostawa jako `geo.Punkt` (albo None). Jedno miejsce, w którym
+    ten moduł tłumaczy pola klasyfikatora na geografię — reszta pliku dostaje
+    już gotowe punkty."""
+    odbior = geo.geokoduj(zlecenie.get("odbior_kod"), zlecenie.get("odbior_miasto"))
+    dostawa = geo.geokoduj(zlecenie.get("dostawa_kod"), zlecenie.get("dostawa_miasto"))
+    return odbior, dostawa
+
+
+def _linia_pilnosci(zlecenie: dict, pods: dict) -> str:
+    """Trzy liczby, po których zapada decyzja. Nic więcej w tej linii.
+
+    DYSTANS TO DŁUGOŚĆ KURSU (odbiór->dostawa), nie odległość od bazy — przy
+    transporcie międzynarodowym „ile km od bazy" nie znaczy nic, bo i tak
+    trzeba przejechać całą trasę z autem na lawecie. Dojazd z bazy idzie
+    o linijkę niżej, przy trasie, jako liczba pomocnicza. Gdy dostawy nie
+    znamy, w pierwszej linii ląduje dojazd — jest wtedy jedyną liczbą, jaką
+    mamy, a pusta pierwsza linia byłaby gorsza niż niedokładna.
+    """
     ikona, etykieta = PILNOSC.get(str(zlecenie.get("pilnosc") or "").lower(),
                                   ("🔧", "ZLECENIE"))
     czesci = [f"{ikona} {etykieta}"]
+    km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
     # „? km" zamiast pominięcia: brak dystansu to informacja, i to ważna —
     # znaczy, że nie rozpoznaliśmy miejsca i operator ma przeczytać cytat.
-    czesci.append(f"{g.km_od_bazy} km" if g.km_od_bazy is not None else "? km")
-    if g.szacunek_pln is not None:
-        czesci.append(f"~{g.szacunek_pln} zł")
+    czesci.append(f"{round(km)} km" if km is not None else "? km")
+    if pods["szacunek_pln"]:
+        czesci.append(f"~{round(pods['szacunek_pln'])} zł")
     return " · ".join(czesci)
 
 
-def _linia_trasy(zlecenie: dict, g: geo.Geo) -> str:
-    """Skąd → dokąd, z kodem pocztowym i ostrzeżeniem o niepewnym dopasowaniu."""
-    kod = str(zlecenie.get("kod_pocztowy") or "").strip()
-    skad = g.miejsce_od or str(zlecenie.get("miasto_od") or "").strip() or "?"
+def _miejsce(surowe, kod, punkt) -> str:
+    """Jedno miejsce na ekran: nazwa, kod pocztowy i ostrzeżenie o niepewności.
 
-    # Znak zapytania PRZY nazwie i JEDNO słowo ostrzeżenia — operator ma wiedzieć,
-    # że kilometry z pierwszej linii są orientacyjne, zanim je zaakceptuje.
-    # Ostrzeżenie i kod pocztowy dzielą jeden nawias: dwa nawiasy pod rząd
-    # („Krosno? (niepewne) (38-400)") czyta się dłużej niż całą resztę linii.
-    ostrzezenie = {"miasto_niepewne": "niepewne",
-                   "kod_pocztowy": "przybliżone",
-                   "brak": "nierozpoznane"}.get(g.zrodlo, "")
-    if ostrzezenie and g.zrodlo != "kod_pocztowy":
-        skad = f"⚠️ {skad}?"
+    Znak zapytania PRZY nazwie i JEDNO słowo obok — operator ma wiedzieć, że
+    kilometry z pierwszej linii są orientacyjne, ZANIM je zaakceptuje. Kod
+    i ostrzeżenie dzielą jeden nawias: dwa nawiasy pod rząd („Krosno?
+    (niepewne) (38-400)") czyta się dłużej niż całą resztę linii.
+
+    Nazwa idzie z posta (`odbior_miasto`), nie z bazy geo. Baza dokleja do
+    nazwy region i kraj („Krosno, podkarpackie (PL)"), co jest w sam raz do
+    diagnostyki i o dwa słowa za dużo do alertu czytanego w dwie sekundy.
+    """
+    nazwa = str(surowe or "").strip() or "?"
+    kod = str(kod or "").strip()
+    if punkt is None:
+        return f"⚠️ {nazwa} (nierozpoznane)"
+    ostrzezenie = "niepewne" if punkt.niepewny else ""
+    if ostrzezenie:
+        nazwa = f"⚠️ {nazwa}?"
     w_nawiasie = ", ".join(c for c in (kod, ostrzezenie) if c)
-    if w_nawiasie:
-        skad = f"{skad} ({w_nawiasie})"
-    dokad = g.miejsce_do or str(zlecenie.get("miasto_do") or "").strip()
-    return f"{skad} → {dokad}" if dokad else skad
+    return f"{nazwa} ({w_nawiasie})" if w_nawiasie else nazwa
+
+
+def _linia_trasy(zlecenie: dict, odbior, dostawa, pods: dict) -> str:
+    """Skąd → dokąd, plus dojazd z bazy jako liczba pomocnicza.
+
+    Dojazd doklejamy TU, a nie do pierwszej linii, bo pierwsza linia ma trzy
+    liczby i ani jednej więcej — a jednocześnie „ile mam do nich jechać" jest
+    pytaniem, które pada zaraz po „ile to warte".
+    """
+    skad = _miejsce(zlecenie.get("odbior_miasto") or zlecenie.get("odbior_raw"),
+                    zlecenie.get("odbior_kod"), odbior)
+    dokad = _miejsce(zlecenie.get("dostawa_miasto") or zlecenie.get("dostawa_raw"),
+                     zlecenie.get("dostawa_kod"), dostawa) if (
+                         zlecenie.get("dostawa_miasto") or zlecenie.get("dostawa_raw")) else ""
+
+    linia = f"{skad} → {dokad}" if dokad else skad
+    # Tylko gdy w pierwszej linii stoi trasa — inaczej powtarzalibyśmy tę samą
+    # liczbę dwa razy pod rząd. Zero pomijamy: „0 km od bazy" wygląda jak błąd
+    # zaokrąglenia, a znaczy „w mieście bazy" — co widać już po nazwie obok.
+    if pods["km_trasy"] is not None and round(pods["km_od_bazy"] or 0) >= 1:
+        linia += f" · {round(pods['km_od_bazy'])} km od bazy"
+    return linia
 
 
 def _linia_pojazdu(zlecenie: dict) -> str:
@@ -243,12 +288,21 @@ def _linia_pojazdu(zlecenie: dict) -> str:
     Pusty wiersz pomijamy zamiast pokazywać myślniki: alert ma być krótki,
     a „· · ·" wygląda jak błąd renderowania.
     """
-    czesci = [str(zlecenie.get(k) or "").strip()
-              for k in ("pojazd", "stan", "toczenie")]
+    czesci = [str(zlecenie.get("pojazd_opis") or "").strip(),
+              str(zlecenie.get("stan_uwagi") or "").strip()]
+    # `stan_toczy_sie` jest TRÓJSTANOWE i każdy stan znaczy co innego dla
+    # sprzętu, który trzeba wziąć: True = wjedzie sam, False = potrzebna wyciągarka,
+    # None = model nie wie i trzeba spytać przez telefon. Pokazujemy tylko dwa
+    # pierwsze — „nie wiadomo" operator i tak wyczyta z braku informacji.
+    toczy = zlecenie.get("stan_toczy_sie")
+    if toczy is True:
+        czesci.append("toczy się")
+    elif toczy is False:
+        czesci.append("NIE toczy się")
     return " · ".join(c for c in czesci if c)
 
 
-def zbuduj_tresc(zlecenie: dict, g: geo.Geo | None = None,
+def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
                  teraz: datetime | None = None) -> str:
     """Cała wiadomość jako tekst. Funkcja CZYSTA — bez bazy, bez sieci.
 
@@ -257,11 +311,12 @@ def zbuduj_tresc(zlecenie: dict, g: geo.Geo | None = None,
     testem. Alert jest produktem tego systemu; produkt, którego nie da się
     obejrzeć bez produkcji, poprawia się na ślepo.
     """
-    g = g or geo.opisz(zlecenie)
+    odbior, dostawa = punkty(zlecenie)
+    pods = pods or geo.podsumowanie(odbior, dostawa)
     esc = telegram_notify._escape_md
 
-    linie = [f"*{esc(_linia_pilnosci(zlecenie, g))}*", ""]
-    linie.append(esc(_linia_trasy(zlecenie, g)))
+    linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*", ""]
+    linie.append(esc(_linia_trasy(zlecenie, odbior, dostawa, pods)))
     pojazd = _linia_pojazdu(zlecenie)
     if pojazd:
         linie.append(esc(pojazd))
@@ -271,7 +326,7 @@ def zbuduj_tresc(zlecenie: dict, g: geo.Geo | None = None,
         linie += ["", f'"{esc(cytat)}"']
 
     linie.append("")
-    telefon = telefon_czytelnie(zlecenie.get("telefon"))
+    telefon = telefon_czytelnie(zlecenie.get("kontakt_wartosc"))
     if telefon:
         linie.append(f"📞 {telefon}")
     else:
@@ -289,7 +344,7 @@ def zbuduj_tresc(zlecenie: dict, g: geo.Geo | None = None,
     return "\n".join(linie)
 
 
-def zbuduj_przyciski(zlecenie: dict, g: geo.Geo | None = None) -> list[list[dict]]:
+def zbuduj_przyciski(zlecenie: dict, pods: dict | None = None) -> list[list[dict]]:
     """Inline keyboard. Bez „Otwórz post" cała wiadomość jest bezużyteczna.
 
     Telegram odrzuca CAŁĄ klawiaturę, gdy którykolwiek `url` jest pusty albo
@@ -298,11 +353,18 @@ def zbuduj_przyciski(zlecenie: dict, g: geo.Geo | None = None) -> list[list[dict
     odpisuje z systemu, tylko wchodzi na Facebooka i pisze z własnego konta, więc
     alert bez linku do posta jest alertem, z którym nie da się nic zrobić.
     """
-    g = g or geo.opisz(zlecenie)
+    if pods is None:
+        odbior, dostawa = punkty(zlecenie)
+        pods = geo.podsumowanie(odbior, dostawa)
     fb_id = str(zlecenie.get("fb_id") or "")
     post_url = str(zlecenie.get("post_url") or "").strip()
 
-    gorny: list[dict] = [{"text": "🗺 Trasa w mapach", "url": g.link_mapy}]
+    gorny: list[dict] = []
+    # `link_trasa` bywa PUSTY, gdy nie znamy żadnego punktu — i wtedy przycisku
+    # nie ma. Telegram odrzuca CAŁĄ klawiaturę, gdy którykolwiek `url` jest
+    # pusty, więc alert bez tego sprawdzenia dotarłby bez ŻADNYCH przycisków.
+    if pods["link_trasa"]:
+        gorny.append({"text": "🗺 Trasa w mapach", "url": pods["link_trasa"]})
     if post_url.startswith("http"):
         gorny.append({"text": "📄 Otwórz post", "url": post_url})
     else:
@@ -443,8 +505,8 @@ def klucz_tresci(zlecenie: dict) -> str:
     nie działa dla tego zlecenia, i to jest lepsze niż klucz zbudowany z pustek,
     który sklei ze sobą wszystkie nierozpoznane posty.
     """
-    czesci = [geo.klucz_nazwy(str(zlecenie.get(k) or ""))
-              for k in ("miasto_od", "miasto_do", "pojazd")]
+    czesci = [geo.normalizuj_nazwe(str(zlecenie.get(k) or ""))
+              for k in ("odbior_miasto", "dostawa_miasto", "pojazd_opis")]
     if not any(czesci):
         return ""
     return hashlib.sha1("|".join(czesci).encode("utf-8")).hexdigest()[:32]
@@ -569,12 +631,15 @@ def powiadom_o_zleceniu(zlecenie: dict) -> bool:
         post_url         link do posta — BEZ NIEGO ALERT JEST BEZUŻYTECZNY
         grupa_nazwa      etykieta grupy w stopce
         opublikowany_at  datetime — wiek posta
-        pilnosc          'pilne' | 'dzis' | 'planowane'
-        miasto_od        nazwa w formie ORYGINALNEJ (patrz docs/WIELOJEZYCZNOSC.md)
-        miasto_do        j.w., opcjonalnie
-        kod_pocztowy     '38-400' — rozjemca przy nierozpoznanej nazwie
-        pojazd, stan, toczenie   opis jednym wierszem
-        telefon          dowolny format, normalizujemy sami
+        pilnosc          'teraz' | 'dzis' | 'jutro' | 'elastycznie'
+        odbior_miasto    nazwa w formie ORYGINALNEJ (patrz docs/WIELOJEZYCZNOSC.md)
+        odbior_kod       '38-400' — rozjemca przy nierozpoznanej nazwie
+        dostawa_miasto   j.w., opcjonalnie
+        dostawa_kod      j.w., opcjonalnie
+        pojazd_opis      "VW Golf IV"
+        stan_uwagi       "nie odpala"
+        stan_toczy_sie   True | False | None — trójstanowe, patrz `_linia_pojazdu`
+        kontakt_wartosc  numer w dowolnym formacie, normalizujemy sami
         pewnosc          0-100 z klasyfikatora — próg MIN_PEWNOSC
         jezyk            'pl'|'de'|'cs'|'sk' z bramki
 
@@ -612,7 +677,7 @@ def _powiadom(zlecenie: dict) -> bool:
         return False
 
     try:
-        telefon = normalizuj_telefon(zlecenie.get("telefon"))
+        telefon = normalizuj_telefon(zlecenie.get("kontakt_wartosc"))
         klucz = klucz_tresci(zlecenie)
         grupa = str(zlecenie.get("grupa_nazwa") or "")
         juz, crosspost, w_godzinie = _stan_dedupu(conn, fb_id, telefon, klucz)
@@ -624,9 +689,10 @@ def _powiadom(zlecenie: dict) -> bool:
             _obsluz_pominiecie(conn, fb_id, decyzja, crosspost, grupa)
             return False
 
-        g = geo.opisz(zlecenie)
-        tresc = zbuduj_tresc(zlecenie, g)
-        message_id = telegram_notify.wyslij(tresc, zbuduj_przyciski(zlecenie, g))
+        odbior, dostawa = punkty(zlecenie)
+        pods = geo.podsumowanie(odbior, dostawa)
+        tresc = zbuduj_tresc(zlecenie, pods)
+        message_id = telegram_notify.wyslij(tresc, zbuduj_przyciski(zlecenie, pods))
         if message_id is None:
             # Transport zawiódł. NIE zapisujemy wiersza — inaczej dedup uznałby
             # zlecenie za obsłużone i alert nigdy by nie poszedł, mimo że nikt
@@ -640,7 +706,7 @@ def _powiadom(zlecenie: dict) -> bool:
         # a nie równoległy. Gdyby szedł niezależnie, zlecenie odrzucone przez
         # dedup Telegrama nadal brzęczałoby pushem — czyli antyspam istniałby
         # dla jednego kanału, a nie dla powiadomień.
-        _wyslij_push(conn, zlecenie, g)
+        _wyslij_push(conn, zlecenie, pods)
         _log(f"{fb_id}: wysłane (message_id={message_id}, "
              f"{w_godzinie + 1}/{settings.MAX_POWIADOMIEN_H} w tej godzinie)")
         return True
@@ -709,7 +775,7 @@ def _zbiorcze_o_limicie(conn) -> None:
 # ---------------------------------------------------------------------------
 # Web push — kanał DODATKOWY
 # ---------------------------------------------------------------------------
-def _wyslij_push(conn, zlecenie: dict, g: "geo.Geo") -> None:
+def _wyslij_push(conn, zlecenie: dict, pods: dict) -> None:
     """Powiadomienie systemowe do zapisanych przeglądarek. Nigdy nie rzuca.
 
     TRZY WARUNKI WYŁĄCZAJĄ TEN KANAŁ PO CICHU i wszystkie trzy są normalne:
@@ -730,16 +796,18 @@ def _wyslij_push(conn, zlecenie: dict, g: "geo.Geo") -> None:
         _log("push pominięty: brak pywebpush (pip install pywebpush)")
         return
 
-    tytul = f"{PILNOSC.get(str(zlecenie.get('pilnosc') or ''), ('🔧',))[0]} " \
-            f"{g.km_od_bazy if g.km_od_bazy is not None else '?'} km · " \
-            f"{('~' + str(g.szacunek_pln) + ' zł') if g.szacunek_pln else ''}".strip()
     fb_id = str(zlecenie.get("fb_id") or "")
+    odbior, dostawa = punkty(zlecenie)
     ladunek = json.dumps({
-        "tytul": tytul,
-        "tresc": f"{_linia_trasy(zlecenie, g)}\n{_linia_pojazdu(zlecenie)}".strip(),
+        "tytul": _linia_pilnosci(zlecenie, pods),
+        "tresc": (f"{_linia_trasy(zlecenie, odbior, dostawa, pods)}\n"
+                  f"{_linia_pojazdu(zlecenie)}").strip(),
         "fb_id": fb_id,
         "url": f"/zlecenie/{fb_id}",
-        "pilne": str(zlecenie.get("pilnosc") or "") == "pilne",
+        # `requireInteraction` w service workerze: powiadomienie zostaje na
+        # ekranie do dotknięcia zamiast zniknąć po kilku sekundach. Tylko dla
+        # „teraz" — przy każdym alercie zamieniłoby się w listę do posprzątania.
+        "pilne": str(zlecenie.get("pilnosc") or "") == "teraz",
     }, ensure_ascii=False)
 
     try:
@@ -807,7 +875,8 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
             cur.execute(
                 """
                 SELECT p.fb_id, p.grupa_nazwa, p.opublikowany_at,
-                       p.ai_json, p.tresc
+                       p.odbior_kod, p.odbior_miasto,
+                       p.dostawa_kod, p.dostawa_miasto
                   FROM posty p
                   LEFT JOIN powiadomienia w ON w.fb_id = p.fb_id
                  WHERE p.czy_zlecenie
@@ -826,15 +895,16 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
             return False
 
         linie = [f"🌅 *W nocy przyszło {len(wiersze)} zleceń*", ""]
-        for fb_id, grupa, opublikowany, ai, tresc in wiersze:
-            dane = dict(ai or {})
-            g = geo.opisz(dane)
-            skad = g.miejsce_od or "?"
-            dokad = f" → {g.miejsce_do}" if g.miejsce_do else ""
-            km = f"{g.km_od_bazy} km" if g.km_od_bazy is not None else "? km"
+        for fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto in wiersze:
+            pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
+                                    geo.geokoduj(d_kod, d_miasto))
+            km = pods["km_trasy"] if pods["km_trasy"] is not None else pods["km_od_bazy"]
+            trasa = str(o_miasto or o_kod or "?")
+            if d_miasto or d_kod:
+                trasa += f" → {d_miasto or d_kod}"
             linie.append(telegram_notify._escape_md(
-                f"• {skad}{dokad} · {km} · {wiek_posta(opublikowany, teraz)} "
-                f"· {grupa or '?'}"))
+                f"• {trasa} · {round(km) if km is not None else '?'} km "
+                f"· {wiek_posta(opublikowany, teraz)} · {grupa or '?'}"))
         linie += ["", "Szczegóły i przyciski — w panelu."]
         tresc = "\n".join(linie)
 
@@ -874,16 +944,16 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
 # ---------------------------------------------------------------------------
 PRZYKLAD = {
     "fb_id": "przyklad-0001",
-    "pilnosc": "pilne",
-    "miasto_od": "Krosno",
-    "kod_pocztowy": "38-400",
-    "miasto_do": "Rzeszów",
-    "pojazd": "VW Golf IV",
-    "stan": "nie odpala",
-    "toczenie": "toczy się",
+    "pilnosc": "teraz",
+    "odbior_miasto": "Krosno",
+    "odbior_kod": "38-400",
+    "dostawa_miasto": "Rzeszow",
+    "pojazd_opis": "VW Golf IV",
+    "stan_uwagi": "nie odpala",
+    "stan_toczy_sie": True,
     "tresc": ("potrzebuje lawety z Krosna do Rzeszowa, golf stanal i nie odpala, "
               "moze byc dzis wieczorem, dzwonic po 16"),
-    "telefon": "+48 555 111 222",
+    "kontakt_wartosc": "+48 555 111 222",
     "grupa_nazwa": "Pomoc drogowa Podkarpacie",
     "pewnosc": 88,
     "jezyk": "pl",

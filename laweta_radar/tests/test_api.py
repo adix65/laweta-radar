@@ -5,7 +5,8 @@ które NIE zależą od Postgresa i psują się niezależnie od niego:
 
   • autoryzację — czyli to, czy numery telefonów obcych ludzi z grup FB nie
     wyjdą pod gołym URL-em;
-  • składanie rekordu z kolumn i `ai_json` razem z policzoną geografią;
+  • składanie rekordu z płaskich kolumn klasyfikatora razem z policzoną
+    geografią (kilometry, linki, pewność lokalizacji);
   • to, że `max_km` jest FILTREM OPERATORA, a nie progiem systemu.
 
 Ostatni punkt jest tu najważniejszy: to jedyne miejsce, w którym da się zapisać
@@ -28,26 +29,48 @@ from laweta_radar.services import geo
 TOKEN = "token-testowy"
 TERAZ = datetime.now(timezone.utc)
 
+# Mikro-baza geo — patrz nota w `test_geo.py`: `data/kody_eu.csv` jest zalążkiem
+# i zostanie podmieniony pełnym eksportem, więc test na jego zawartości zacząłby
+# padać z powodu niezwiązanego z kodem.
+FIXTURE_GEO = """kraj,kod,miejscowosc,wojewodztwo,lat,lng
+PL,38-400,Krosno,podkarpackie,49.6886,21.7706
+PL,35-001,Rzeszow,podkarpackie,50.0412,21.9991
+DE,50667,Koln,Nordrhein-Westfalen,50.9375,6.9603
+PL,30-001,Krakow,malopolskie,50.0647,19.9450
+"""
+
+
+def _wiersz(fb_id, **nadpisz):
+    """Wiersz `posty` z kompletem kolumn czytanych przez router.
+
+    Komplet, a nie podzbiór: `RealDictCursor` w produkcji zwraca wszystkie
+    kolumny z SELECT-a, a atrapa, która pomija połowę, przepuściłaby błąd
+    „router czyta pole, którego nie ma w zapytaniu".
+    """
+    baza = {k: None for k in router_zlecen.POLA_LISTY}
+    baza.update({
+        "fb_id": fb_id, "grupa_nazwa": "Podkarpacie", "grupa_url": "u1",
+        "post_url": f"https://fb/{fb_id}", "opublikowany_at": TERAZ,
+        "pobrany_at": TERAZ, "status": "nowe", "stale": False,
+        "gate_jezyk": "pl", "pewnosc": 90, "pilnosc": "teraz",
+    })
+    baza.update(nadpisz)
+    return baza
+
+
 WIERSZE = [
-    {"fb_id": "blisko", "grupa_nazwa": "Podkarpacie", "grupa_url": "u1",
-     "post_url": "https://fb/1", "opublikowany_at": TERAZ - timedelta(minutes=5),
-     "pobrany_at": TERAZ, "status": "nowe", "status_at": None, "stale": False,
-     "gate_jezyk": "pl", "ai_pewnosc": 90, "ai_pilnosc": "pilne",
-     "telefon": "555111222", "notatka": None, "cena_koncowa": None,
-     "ai_json": {"miasto_od": "Krosno", "kod_pocztowy": "38-400",
-                 "miasto_do": "Rzeszów", "pojazd": "VW Golf IV"}},
-    {"fb_id": "daleko", "grupa_nazwa": "Transport DE", "grupa_url": "u2",
-     "post_url": "https://fb/2", "opublikowany_at": TERAZ - timedelta(hours=2),
-     "pobrany_at": TERAZ, "status": "nowe", "status_at": None, "stale": False,
-     "gate_jezyk": "de", "ai_pewnosc": 70, "ai_pilnosc": "planowane",
-     "telefon": None, "notatka": None, "cena_koncowa": None,
-     "ai_json": {"miasto_od": "Köln", "miasto_do": "Kraków", "pojazd": "BMW"}},
-    {"fb_id": "nieznane", "grupa_nazwa": "Podkarpacie", "grupa_url": "u1",
-     "post_url": "https://fb/3", "opublikowany_at": TERAZ - timedelta(minutes=9),
-     "pobrany_at": TERAZ, "status": "nowe", "status_at": None, "stale": False,
-     "gate_jezyk": "pl", "ai_pewnosc": 55, "ai_pilnosc": "dzis",
-     "telefon": None, "notatka": None, "cena_koncowa": None,
-     "ai_json": {"miasto_od": "gdzies za lasem", "pojazd": "Ford"}},
+    _wiersz("blisko", odbior_miasto="Krosno", odbior_kod="38-400",
+            dostawa_miasto="Rzeszow", pojazd_opis="VW Golf IV",
+            stan_toczy_sie=True, kontakt_wartosc="555111222",
+            opublikowany_at=TERAZ - timedelta(minutes=5)),
+    _wiersz("daleko", grupa_nazwa="Transport DE", grupa_url="u2", gate_jezyk="de",
+            odbior_miasto="Koln", dostawa_miasto="Krakow", pojazd_opis="BMW",
+            pilnosc="elastycznie", pewnosc=70,
+            opublikowany_at=TERAZ - timedelta(hours=2)),
+    _wiersz("nieznane", odbior_raw="gdzies za lasem",
+            odbior_miasto="Zmyslone Miasto", pojazd_opis="Ford",
+            pilnosc="dzis", pewnosc=55,
+            opublikowany_at=TERAZ - timedelta(minutes=9)),
 ]
 
 
@@ -84,17 +107,25 @@ class _FalszywePolaczenie:
         self.commity += 1
 
 
+KOMPLET_KOLUMN = {"odbior_miasto", "pojazd_opis", "pewnosc",
+                  "notatka", "cena_koncowa", "status_at"}
+
+
 @pytest.fixture(autouse=True)
-def srodowisko(monkeypatch):
+def srodowisko(monkeypatch, tmp_path):
+    plik = tmp_path / "kody.csv"
+    plik.write_text(FIXTURE_GEO, encoding="utf-8")
+    geo.zaladuj(plik)
     monkeypatch.setattr(settings, "API_TOKEN", TOKEN)
     monkeypatch.setattr(geo.settings, "BAZA_LAT", 49.65)
     monkeypatch.setattr(geo.settings, "BAZA_LON", 21.60)
+    monkeypatch.setattr(geo.settings, "BAZA_LNG", 21.60)
     # Migracje „są odpalone" — sprawdzenie kolumn ma własny test niżej.
-    monkeypatch.setattr(db, "kolumny", lambda conn, tabela: {
-        "ai_json", "ai_pewnosc", "notatka", "status_at"})
+    monkeypatch.setattr(db, "kolumny", lambda conn, tabela: KOMPLET_KOLUMN)
     monkeypatch.setattr(router_zlecen.db, "kolumny",
-                        lambda conn, tabela: {"ai_json", "ai_pewnosc",
-                                              "notatka", "status_at"})
+                        lambda conn, tabela: KOMPLET_KOLUMN)
+    yield
+    geo.zaladuj()
 
 
 def _podepnij_baze(monkeypatch, wiersze):
@@ -150,21 +181,36 @@ def test_lista_liczy_geografie_po_stronie_api(monkeypatch):
     _podepnij_baze(monkeypatch, WIERSZE)
     dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
     pierwszy = dane["zlecenia"][0]
-    for pole in ("km_od_bazy", "szacunek_pln", "link_mapy", "link_nawigacji",
-                 "lokalizacja_zrodlo", "lat", "lon"):
+    for pole in ("km_trasy", "km_od_bazy", "szacunek_pln", "link_mapy",
+                 "link_nawigacji", "lokalizacja_zrodlo", "lat", "lng"):
         assert pole in pierwszy
     assert pierwszy["km_od_bazy"] < 30
-    assert pierwszy["lokalizacja_zrodlo"] == "miasto"
+    # Kod pocztowy trafia dokładnie — to jest najpewniejsze źródło, jakie mamy.
+    assert pierwszy["lokalizacja_zrodlo"] == "kod"
 
 
-def test_ai_json_rozpakowany_na_plasko(monkeypatch):
+def test_pola_klasyfikatora_ida_pod_nazwami_kolumn(monkeypatch):
+    """Nazwa w SQL-u, w API i w TypeScripcie jest ta sama — „skąd to się bierze"
+    sprawdza się wtedy grepem, a nie czytaniem mapowania."""
     _podepnij_baze(monkeypatch, WIERSZE)
     z = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()["zlecenia"][0]
-    assert z["pojazd"] == "VW Golf IV"
-    assert z["miasto_do"] == "Rzeszów"
+    assert z["pojazd_opis"] == "VW Golf IV"
+    assert z["dostawa_miasto"] == "Rzeszow"
+    assert z["stan_toczy_sie"] is True
     assert z["pewnosc"] == 90
-    assert z["pilnosc"] == "pilne"
+    assert z["pilnosc"] == "teraz"
     assert z["jezyk"] == "pl"
+
+
+def test_dlugosc_kursu_jest_policzona(monkeypatch):
+    """`km_trasy` to liczba, po której operator decyduje — przy transporcie
+    „ile km od bazy" sama nie znaczy nic."""
+    _podepnij_baze(monkeypatch, WIERSZE)
+    dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
+    blisko = [z for z in dane["zlecenia"] if z["fb_id"] == "blisko"][0]
+    daleko = [z for z in dane["zlecenia"] if z["fb_id"] == "daleko"][0]
+    assert blisko["km_trasy"] > 0
+    assert daleko["km_trasy"] > 1000
 
 
 def test_domyslnie_bez_progu_na_kilometry(monkeypatch):
@@ -199,8 +245,11 @@ def test_nierozpoznane_miejsce_bez_pinezki(monkeypatch):
     dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
     nieznane = [z for z in dane["zlecenia"] if z["fb_id"] == "nieznane"][0]
     assert nieznane["lat"] is None
+    assert nieznane["lng"] is None
     assert nieznane["lokalizacja_zrodlo"] == "brak"
-    assert nieznane["lokalizacja_surowa"] == "gdzies za lasem"
+    # Surowy fragment z posta zostaje — bez niego pasek ostrzegawczy w panelu
+    # mówi „nie ufaj", nie dając operatorowi czym to sprawdzić.
+    assert nieznane["odbior_raw"] == "gdzies za lasem"
 
 
 def test_nieznany_status_daje_400(monkeypatch):
@@ -278,4 +327,16 @@ def test_brak_kolumn_mowi_ktora_migracje_odpalic(monkeypatch):
     monkeypatch.setattr(router_zlecen.db, "kolumny", lambda conn, tabela: set())
     odp = klient.get("/zlecenia", headers={"X-Token": TOKEN})
     assert odp.status_code == 503
-    assert "0004_zlecenie.sql" in odp.json()["detail"]
+    assert "0004_klasyfikacja.sql" in odp.json()["detail"]
+
+
+def test_brak_samego_panelu_wskazuje_wlasciwa_migracje(monkeypatch):
+    """Dwie migracje, dwa różne komunikaty — „odpal migracje" bez numeru
+    znaczy przejrzenie ośmiu plików."""
+    _podepnij_baze(monkeypatch, WIERSZE)
+    monkeypatch.setattr(router_zlecen.db, "kolumny",
+                        lambda conn, tabela: {"odbior_miasto", "pojazd_opis",
+                                              "pewnosc"})
+    odp = klient.get("/zlecenia", headers={"X-Token": TOKEN})
+    assert odp.status_code == 503
+    assert "0005_panel.sql" in odp.json()["detail"]

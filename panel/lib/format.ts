@@ -38,7 +38,7 @@ export function wiekMinut(iso?: string | null): number | null {
  *  i zieleni, a to jest aplikacja dla kierowcy lawety, nie dla projektanta. */
 export function kolorPilnosci(pilnosc?: Pilnosc | null): string {
   switch (pilnosc) {
-    case "pilne":
+    case "teraz":
       return "bg-pilne";
     case "dzis":
       return "bg-dzis";
@@ -49,15 +49,24 @@ export function kolorPilnosci(pilnosc?: Pilnosc | null): string {
 
 export function etykietaPilnosci(pilnosc?: Pilnosc | null): string {
   switch (pilnosc) {
-    case "pilne":
-      return "PILNE";
+    case "teraz":
+      return "TERAZ";
     case "dzis":
       return "DZIŚ";
-    case "planowane":
-      return "PLANOWANE";
+    case "jutro":
+      return "JUTRO";
+    case "elastycznie":
+      return "ELASTYCZNIE";
     default:
       return "ZLECENIE";
   }
+}
+
+/** Dystans na pierwszy plan: DŁUGOŚĆ KURSU, a gdy dostawy nie znamy — dojazd.
+ *  Ta sama reguła co w powiadomieniu na Telegramie; rozjazd między alertem
+ *  a panelem znaczy, że operator przestaje ufać obu. */
+export function dystansGlowny(z: Zlecenie): number | null {
+  return z.km_trasy ?? z.km_od_bazy;
 }
 
 /** Kilometry na ekran. `null` to „nie wiemy" i tak ma być napisane —
@@ -86,26 +95,29 @@ export function linkTel(surowy?: string | null): string {
 }
 
 export function trasa(z: Zlecenie): string {
-  const skad = z.miejsce_od || z.miasto_od || "?";
-  const dokad = z.miejsce_do || z.miasto_do;
+  const skad = z.odbior_miasto || z.odbior_raw || z.odbior_kod || "?";
+  const dokad = z.dostawa_miasto || z.dostawa_raw || z.dostawa_kod;
   return dokad ? `${skad} → ${dokad}` : skad;
 }
 
 export function pojazdJednymWierszem(z: Zlecenie): string {
-  return [z.pojazd, z.stan, z.toczenie].filter(Boolean).join(" · ");
+  const czesci = [z.pojazd_opis, z.stan_uwagi];
+  // Trójstanowe `stan_toczy_sie`: pokazujemy tylko dwa znane stany, bo każdy
+  // zmienia sprzęt, który trzeba zabrać. „Nie wiadomo" operator wyczyta z braku.
+  if (z.stan_toczy_sie === true) czesci.push("toczy się");
+  else if (z.stan_toczy_sie === false) czesci.push("NIE toczy się");
+  return czesci.filter(Boolean).join(" · ");
 }
 
-/** Czy nad kilometrami ma iść pasek ostrzegawczy. */
+/** Czy nad kilometrami ma iść pasek ostrzegawczy. `kod` i `miasto` są pewne. */
 export function lokalizacjaNiepewna(zrodlo: ZrodloLokalizacji): boolean {
-  return zrodlo !== "miasto";
+  return zrodlo === "miasto_niepewne" || zrodlo === "brak";
 }
 
 export function opisZrodla(zrodlo: ZrodloLokalizacji): string {
   switch (zrodlo) {
-    case "kod_pocztowy":
-      return "Lokalizacja z kodu pocztowego — środek obszaru, kilometry ±20-30 km.";
     case "miasto_niepewne":
-      return "Nazwa miejsca dopasowana NIEPEWNIE — kilometry są orientacyjne. Sprawdź w treści posta, zanim podasz cenę.";
+      return "W bazie jest kilka miejscowości o tej nazwie — wzięliśmy największą. Kilometry są orientacyjne; sprawdź treść posta, zanim podasz cenę.";
     case "brak":
       return "Nie rozpoznaliśmy miejsca. Kilometrów nie ma — przeczytaj oryginał posta.";
     default:

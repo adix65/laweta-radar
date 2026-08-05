@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import PasekOstrzegawczy from "@/components/PasekOstrzegawczy";
 import { jednoZlecenie, zmienZlecenie } from "@/lib/api";
 import {
+  dystansGlowny,
   etykietaPilnosci,
   km,
   kolorPilnosci,
@@ -111,7 +112,7 @@ export default function Szczegol() {
   }
   if (!z) return <main className="p-5 text-opis text-tekst-cichy">Wczytuję…</main>;
 
-  const telefon = telefonCzytelnie(z.telefon);
+  const telefon = telefonCzytelnie(z.kontakt_wartosc);
 
   return (
     <main className="mx-auto max-w-2xl p-4">
@@ -125,7 +126,7 @@ export default function Szczegol() {
       <div className="mt-3">
         <PasekOstrzegawczy
           zrodlo={z.lokalizacja_zrodlo}
-          surowa={z.lokalizacja_surowa}
+          surowa={z.odbior_raw ?? z.odbior_miasto}
         />
       </div>
 
@@ -137,7 +138,7 @@ export default function Szczegol() {
             {z.jezyk && z.jezyk !== "pl" ? ` · ${z.jezyk.toUpperCase()}` : ""}
           </p>
           <p className="flex items-baseline gap-3">
-            <span className="text-liczba">{km(z.km_od_bazy)}</span>
+            <span className="text-liczba">{km(dystansGlowny(z))}</span>
             <span className="text-liczba text-tekst-cichy">{zl(z.szacunek_pln)}</span>
           </p>
         </div>
@@ -145,12 +146,28 @@ export default function Szczegol() {
 
       <h1 className="mt-3 text-xl font-bold">{trasa(z)}</h1>
       <dl className="mt-3 grid grid-cols-2 gap-3 text-opis">
-        <Pole etykieta="Pojazd" wartosc={z.pojazd} />
-        <Pole etykieta="Stan" wartosc={z.stan} />
-        <Pole etykieta="Toczenie" wartosc={z.toczenie} />
-        <Pole etykieta="Termin" wartosc={z.termin} />
-        <Pole etykieta="Trasa (odbiór → dostawa)" wartosc={km(z.km_trasy)} />
-        <Pole etykieta="Kod pocztowy" wartosc={z.kod_pocztowy} />
+        <Pole etykieta="Rodzaj" wartosc={z.typ} />
+        <Pole etykieta="Pojazd" wartosc={z.pojazd_opis} />
+        <Pole etykieta="Kategoria" wartosc={z.pojazd_kategoria} />
+        <Pole etykieta="Stan" wartosc={z.stan_uwagi} />
+        <Pole
+          etykieta="Toczenie"
+          wartosc={
+            z.stan_toczy_sie == null
+              ? "nie wiadomo — spytaj przez telefon"
+              : z.stan_toczy_sie
+                ? "toczy się"
+                : "NIE toczy się — potrzebna wyciągarka"
+          }
+        />
+        <Pole etykieta="Kurs (odbiór → dostawa)" wartosc={km(z.km_trasy)} />
+        <Pole etykieta="Dojazd z bazy" wartosc={km(z.km_od_bazy)} />
+        <Pole etykieta="Kod odbioru" wartosc={z.odbior_kod} />
+        <Pole etykieta="Kod dostawy" wartosc={z.dostawa_kod} />
+        <Pole
+          etykieta="Cena sugerowana przez model"
+          wartosc={z.cena_sugerowana != null ? `${z.cena_sugerowana} zł` : null}
+        />
         <Pole etykieta="Pewność modelu" wartosc={z.pewnosc != null ? `${z.pewnosc}/100` : null} />
         <Pole etykieta="Wiek posta" wartosc={wiek(z.opublikowany_at)} />
         <Pole etykieta="Grupa" wartosc={z.grupa_nazwa} />
@@ -245,19 +262,27 @@ export default function Szczegol() {
         className="sticky bottom-0 -mx-4 mt-6 flex gap-2 border-t border-obrys bg-tlo/95 p-3 backdrop-blur"
         style={{ marginBottom: "calc(-1rem - env(safe-area-inset-bottom))" }}
       >
+        {/* `link_nawigacji` bywa PUSTY — gdy nie rozpoznaliśmy punktu odbioru.
+            Przycisk zostaje w układzie (operator ma go w pamięci mięśniowej),
+            ale jest wyłączony i mówi dlaczego. */}
         <a
-          href={z.link_nawigacji}
+          href={z.link_nawigacji || undefined}
           target="_blank"
           rel="noopener noreferrer"
-          className="dotyk flex-1 rounded-xl bg-tekst text-sm font-bold text-tlo"
+          aria-disabled={!z.link_nawigacji}
+          className={`dotyk flex-1 rounded-xl text-sm font-bold ${
+            z.link_nawigacji
+              ? "bg-tekst text-tlo"
+              : "pointer-events-none border border-obrys bg-karta text-tekst-cichy"
+          }`}
         >
-          NAWIGUJ
+          {z.link_nawigacji ? "NAWIGUJ" : "BRAK MIEJSCA"}
         </a>
         {/* ZADZWOŃ to `tel:` — otwiera dialer z wpisanym numerem. Gdy numeru
             nie ma, przycisk jest WYŁĄCZONY i mówi czemu; ukrycie go zmieniałoby
             układ trzech przycisków, który operator ma w pamięci mięśniowej. */}
         <a
-          href={telefon ? linkTel(z.telefon) : undefined}
+          href={telefon ? linkTel(z.kontakt_wartosc) : undefined}
           aria-disabled={!telefon}
           className={`dotyk flex-1 rounded-xl text-sm font-bold ${
             telefon

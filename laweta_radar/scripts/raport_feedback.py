@@ -75,7 +75,7 @@ def _pobierz(cur, dni: int, ocena: str) -> list[dict]:
         """
         SELECT f.fb_id, f.ocena, f.tresc_posta, f.werdykt_ai_json, f.ocenil_at,
                p.grupa_nazwa, p.gate_punkty, p.gate_werdykt, p.gate_jezyk,
-               p.ai_pewnosc, p.post_url
+               p.pewnosc, p.post_url
           FROM feedback f
           LEFT JOIN posty p ON p.fb_id = f.fb_id
          WHERE f.ocena = %s
@@ -149,7 +149,7 @@ def _raport(wiersze: list[dict], ocena: str, dni: int, wzorce_tylko: bool) -> No
 
     _naglowek("PRZYKŁADY — wklej pod prompt klasyfikatora jako kontrprzykłady")
     for i, w in enumerate(wiersze, 1):
-        pewnosc = w.get("ai_pewnosc")
+        pewnosc = w.get("pewnosc")
         print()
         print(f"--- {i}. {w['fb_id']} "
               f"[{w.get('grupa_nazwa') or 'grupa ?'}"
