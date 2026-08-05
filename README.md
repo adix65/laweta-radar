@@ -445,6 +445,7 @@ laweta_radar/
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
+    odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
   tests/               # testy offline (bez sieci i bez bazy)
     dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
   .env.example
@@ -943,6 +944,7 @@ pm2 restart laweta-api laweta-bot
 | nic nie przychodzi na Telegram | `python -m laweta_radar.services.telegram_notify` |
 | „brak kluczy Apify", choć są w `.env` | `source laweta_radar/scripts/env-shell.sh` |
 | ile kluczy widzi rotator | `python -m laweta_radar.workers.apify_keys` |
+| czy darmowe proxy w ogóle dochodzi do Apify | `python laweta_radar/scripts/odswiez_proxy.py` (wymaga sieci) |
 | ile kredytu zostało na kontach | `python -m laweta_radar.workers.apify_credits` (wymaga sieci) |
 | dlaczego bramka przepuściła/odrzuciła post | `python -m laweta_radar.workers.gate "treść"` |
 | czy bramkę można już włączyć | `python laweta_radar/scripts/raport_gate.py` |
