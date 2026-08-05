@@ -235,10 +235,15 @@ przeladuj() {
         ostrzez "PM2 nie zna procesu '$proc' — pomijam (pierwsze uruchomienie: README, sekcja Deploy)."
         return
     fi
-    if pm2 restart "$proc" >/dev/null 2>&1; then
+    # Wyjście PM2 ląduje w zmiennej, a nie w /dev/null: "nie przeszedł" bez
+    # powodu zostawia operatora z niczym, a powód PM2 podaje wprost.
+    local wyjscie
+    if wyjscie="$(pm2 restart "$proc" 2>&1)"; then
         log "przeładowany: $proc"
     else
-        ostrzez "pm2 restart $proc nie przeszedł — pm2 logs $proc"
+        ostrzez "pm2 restart $proc nie przeszedł:"
+        sed 's/^/           /' <<<"$wyjscie" >&2
+        ostrzez "logi procesu:  pm2 logs $proc --lines 30"
         BLEDY=1
     fi
 }

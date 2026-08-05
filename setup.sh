@@ -81,15 +81,65 @@ fi
 # są w nginxie, w panel/.env.example i w README, i nie ma powodu ich ruszać.
 NAZWA="laweta${INSTANCJA:+-$INSTANCJA}"
 if [[ -n "$INSTANCJA" ]]; then
-    API_PORT="${API_PORT:-8012}"
-    PANEL_PORT="${PANEL_PORT:-6210}"
+    DOMYSLNY_API=8012
+    DOMYSLNY_PANEL=6210
     DB_NAME="laweta_${INSTANCJA//-/_}"
     DB_USER="laweta_${INSTANCJA//-/_}"
 else
-    API_PORT="${API_PORT:-8002}"
-    PANEL_PORT="${PANEL_PORT:-6200}"
+    DOMYSLNY_API=8002
+    DOMYSLNY_PANEL=6200
     DB_NAME="laweta"
     DB_USER="laweta"
+fi
+
+z_env() {   # klucz -> wartość albo pusto
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" laweta_radar/.env 2>/dev/null \
+        | tail -1 | sed 's/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//'
+}
+
+# Na maszynie z kilkunastoma usługami zajęty port objawia się jako proces, który
+# wstaje i pada w pętli PM2 — bez żadnego objawu na zewnątrz poza tym, że panel
+# nie odpowiada. Taniej sprawdzić to teraz niż czytać potem logi.
+port_zajety() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnH 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+    else
+        # Bez iproute2: próba połączenia. Odpowiada ktoś = port zajęty.
+        (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && exec 3<&- && return 0
+        return 1
+    fi
+}
+
+wolny_port() {   # od którego zacząć
+    local p="$1"
+    for _ in $(seq 1 60); do
+        port_zajety "$p" || { echo "$p"; return 0; }
+        p=$((p + 1))
+    done
+    echo "$1"   # nic wolnego w 60 próbach — oddaj wyjściowy, zgłosi się przy starcie
+}
+
+# Kolejność jest istotna: jawny argument > port zapisany w .env > pierwszy wolny.
+# Port z .env jest NASZ (zapisało go poprzednie uruchomienie) i nie wolno go
+# przesuwać po cichu — siedzi w nginxie i w panel/.env.local.
+API_PORT="${API_PORT:-$(z_env API_PORT)}"
+PANEL_PORT="${PANEL_PORT:-$(z_env PANEL_PORT)}"
+API_PORT="${API_PORT:-$(wolny_port $DOMYSLNY_API)}"
+PANEL_PORT="${PANEL_PORT:-$(wolny_port $DOMYSLNY_PANEL)}"
+[[ "$API_PORT" == "$DOMYSLNY_API" ]] || log "Port API: $DOMYSLNY_API zajęty -> biorę $API_PORT"
+[[ "$PANEL_PORT" == "$DOMYSLNY_PANEL" ]] || log "Port panelu: $DOMYSLNY_PANEL zajęty -> biorę $PANEL_PORT"
+
+# Port zapisany w .env, trzymany przez KOGOŚ INNEGO (nasz proces nie chodzi) —
+# to jedyny przypadek, w którym cicha zmiana byłaby gorsza od głośnego pytania.
+if command -v pm2 >/dev/null 2>&1; then
+    for rola in api panel; do
+        port="$([[ $rola == api ]] && echo "$API_PORT" || echo "$PANEL_PORT")"
+        if port_zajety "$port" && ! pm2 describe "$NAZWA-$rola" >/dev/null 2>&1; then
+            ostrzez "port $port ($rola) jest zajęty, a proces $NAZWA-$rola nie chodzi."
+            ostrzez "wskaż inny:  ./setup.sh ${INSTANCJA:+--instancja $INSTANCJA }--port-$rola INNY_PORT"
+            BLEDY=1
+        fi
+    done
 fi
 
 log "Instancja:  ${INSTANCJA:-produkcyjna}  (procesy: $NAZWA-api, $NAZWA-bot, $NAZWA-panel)"
@@ -163,11 +213,6 @@ ustaw_env() {   # klucz, wartość
         printf '%s=%s\n' "$k" "$v" >> "$plik"
     fi
 }
-z_env() {   # klucz -> wartość albo pusto
-    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" laweta_radar/.env 2>/dev/null \
-        | tail -1 | sed 's/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//'
-}
-
 NOWY_ENV=0
 if [[ ! -f laweta_radar/.env ]]; then
     cp laweta_radar/.env.example laweta_radar/.env

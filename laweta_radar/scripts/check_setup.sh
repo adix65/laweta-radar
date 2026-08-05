@@ -14,7 +14,17 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$REPO_DIR/.." && pwd)"
 export PYTHONPATH="$ROOT_DIR"
 cd "$ROOT_DIR"
-PY="${PYTHON_BIN:-python3}"
+# Venv repo, tak samo jak start_api.sh i start_bot.sh. Systemowy python3 nie ma
+# zależności projektu, więc diagnostyka kończyła się ścianą
+# `ModuleNotFoundError: No module named 'dotenv'` — czyli narzędzie od
+# odpowiadania "czego brakuje" samo wyglądało na zepsute.
+PY="${PYTHON_BIN:-$ROOT_DIR/venv/bin/python3}"
+if [[ ! -x "$PY" ]]; then
+    echo "!! Brak $PY — używam systemowego python3."
+    echo "   Zależności projektu są w venv: ./setup.sh albo python3 -m venv venv"
+    echo
+    PY=python3
+fi
 
 if [[ ! -f "$REPO_DIR/.env" ]]; then
     echo "!! Brak $REPO_DIR/.env — skopiuj wzór:"
@@ -90,8 +100,12 @@ echo "=== 10. Telegram (WYSYŁA wiadomość testową) ==="
 
 echo
 echo "=== 11. Baza danych (wymaga wstającego API albo psql) ==="
+# Port z .env, nie na sztywno: instancja testowa stoi na 8012 i podpowiedź
+# z 8002 wysyłałaby operatora pod API produkcyjne (albo w pustkę).
+PORT_API="$(sed -n 's/^[[:space:]]*API_PORT[[:space:]]*=[[:space:]]*//p' "$REPO_DIR/.env" 2>/dev/null \
+            | tail -1 | sed 's/[[:space:]]*#.*$//')"
 echo "Migracje:  bash laweta_radar/scripts/migrate.sh"
-echo "Stan:      curl -s localhost:8002/health"
+echo "Stan:      curl -s localhost:${PORT_API:-8002}/health"
 echo
 echo "Realne adresy wyjściowe proxy (wymaga sieci):"
 echo "  $PY -m laweta_radar.workers.apify_proxy --check --limit 10"
