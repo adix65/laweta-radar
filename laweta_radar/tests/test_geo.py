@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
@@ -286,6 +288,17 @@ def test_kalkulacja_znosi_smieci():
     assert geo.kalkulacja(-10)["km_trasy"] == 0.0
 
 
+def test_kalkulacja_bez_dystansu_nie_ma_ceny():
+    """`None` to nie jest „zero kilometrów", tylko „nie wiadomo ile".
+
+    Wcześniej wchodziło przez `km or 0.0` w stawkę minimalną i zlecenie bez
+    trasy dostawało „~250 zł" — liczbę, która wygląda jak wyliczenie, a jest
+    wartością domyślną."""
+    pusta = geo.kalkulacja(None)
+    assert pusta["km_trasy"] is None
+    assert pusta["szacunek_pln"] is None
+
+
 def test_podsumowanie_pokazuje_trase_i_dystans_od_bazy(tmp_path):
     """Długość kursu jest liczbą pierwszą, dystans od bazy — pomocniczą."""
     _z_fixture(tmp_path)
@@ -298,12 +311,114 @@ def test_podsumowanie_pokazuje_trase_i_dystans_od_bazy(tmp_path):
 
 
 def test_podsumowanie_bez_dostawy_nie_udaje_ze_zna_trase(tmp_path):
-    """Brak `km_trasy` jest informacją: nie wiemy, dokąd auto ma jechać."""
+    """Brak `km_trasy` jest informacją: nie wiemy, dokąd auto ma jechać.
+
+    I nie ma ceny: szacunek liczony z dojazdu do bazy albo ze stawki minimalnej
+    byłby liczbą, której nikt nie policzył z trasy."""
     _z_fixture(tmp_path)
     p = geo.podsumowanie(geo.geokoduj("38-500", None), None)
     assert p["km_trasy"] is None
+    assert p["szacunek_pln"] is None
     assert p["km_od_bazy"] is not None
-    assert p["szacunek_pln"] > 0
+
+
+def test_nierozpoznany_drugi_punkt_zeruje_km_i_szacunek(tmp_path):
+    """REALNY PRZYPADEK Z PRODUKCJI, ten, dla którego ten test istnieje.
+
+    Post: „transport mikrosamochodu Aixam z Dębicy do Turku, 62-700. Trasa ma
+    około 490 km". Dębica rozpoznana, Turek NIE — a panel pokazywał „60 km,
+    ~250 zł", bo pod brakujący koniec trasy podstawiał się dojazd z bazy
+    operatora (Krosno->Dębica to właśnie 60 km). Kierowca odrzuca wtedy kurs
+    na 490 km, patrząc na wycenę lokalnego skoku.
+
+    Zła liczba jest gorsza niż jej brak: brak widać, złej liczby nie."""
+    plik = tmp_path / "kody.csv"
+    plik.write_text("kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+                    "PL,39-200,Debica,podkarpackie,50.0517,21.4111\n"
+                    "PL,38-400,Krosno,podkarpackie,49.6886,21.7706\n",
+                    encoding="utf-8")
+    geo.zaladuj(plik)
+
+    odbior = geo.geokoduj("39-200", "Debica")
+    dostawa = geo.geokoduj("62-700", "Turek")      # nie ma go w bazie
+    assert odbior is not None and dostawa is None
+
+    p = geo.podsumowanie(odbior, dostawa)
+    assert p["km_trasy"] is None
+    assert p["szacunek_pln"] is None
+    # Dojazd z bazy nadal się liczy — to osobna, prawdziwa liczba. Test pilnuje,
+    # żeby NIE PRZECIEKŁA na miejsce długości kursu ani do wyceny: gdyby
+    # przeciekła, oba pola wyżej byłyby liczbami wyliczonymi właśnie z niej.
+    assert p["km_od_bazy"] == pytest.approx(60, abs=5)
+
+
+# ===========================================================================
+# ODLEGŁOŚĆ PODANA PRZEZ AUTORA POSTA
+#
+# Autor zna trasę lepiej niż nasz geokoder — ale w tych grupach KAŻDY post ma
+# kilometry, bo każdy ma przebieg auta. Wzięcie przebiegu za długość trasy
+# byłoby dokładnie tym błędem, który ten moduł ma przestać popełniać, więc
+# testy fałszywych trafień są tu równie ważne jak testy trafień.
+# ===========================================================================
+@pytest.mark.parametrize("tresc,oczekiwane", [
+    # Zdanie wprost z produkcyjnego posta.
+    ("transport mikrosamochodu Aixam z Debicy do Turku, 62-700. "
+     "Trasa ma okolo 490 km.", 490),
+    ("Trasa ma około 490 km", 490),
+    # Sygnał w poprzednim zdaniu — jedna myśl zapisana dwoma zdaniami.
+    ("Trasa Dębica - Turek. Około 490 km.", 490),
+    ("Odległość: 1 200 km, płacę 4000 zł", 1200),
+    # Tysiące z kropką: „2.500 km" to 2500, a nie 2.
+    ("dystans 2.500 km, transport z Hiszpanii", 2500),
+    ("490 km do przejechania", 490),
+    ("trasa 490km w jedną stronę", 490),
+    ("Trasa ok. 490 kilometrów", 490),
+    ("kurs 120 Km, auto po wypadku", 120),
+    # Pierwsze trafienie: „w jedną stronę" jest tą liczbą, o którą pyta operator.
+    ("trasa 490 km w jedną stronę, 980 km tam i z powrotem", 490),
+])
+def test_km_wg_autora_czyta_odleglosc_z_tresci(tresc, oczekiwane):
+    assert geo.km_wg_autora(tresc) == oczekiwane
+
+
+@pytest.mark.parametrize("tresc", [
+    "Golf 1.9 TDI, przebieg 190 tys km, nie odpala",
+    "przejechane 245 000 km, silnik do remontu",
+    "auto ma przebieg 3500 km, jak nowe",          # w zakresie tras, ale to licznik
+    "spalanie 8l/100 km",
+    "jedzie 140 km/h bez problemu",
+    "potrzebna laweta, jakies 500 km stad",        # liczba bez słowa o trasie
+    "cena 2500 zl",
+    "",
+    None,
+])
+def test_km_wg_autora_nie_bierze_przebiegu_ani_przypadkowych_liczb(tresc):
+    """Milczenie jest tańsze niż zła liczba: „wg autora: 190000 km" przy
+    przebiegu byłoby tym samym błędem, tylko z drugiej strony."""
+    assert geo.km_wg_autora(tresc) is None
+
+
+def test_km_wg_autora_jest_liczba_a_nie_fragmentem_posta():
+    """Wprost o bezpieczeństwie: post jest wejściem od nieznanej osoby, a ta
+    wartość idzie na ekran operatora i do wiadomości na Telegramie. Przez `int`
+    nie przejdzie ani znacznik Markdowna, ani instrukcja dla modelu."""
+    wynik = geo.km_wg_autora("trasa *490* km _pilne_ [klik](http://zle) 490 km")
+    assert isinstance(wynik, int)
+
+
+def test_podsumowanie_niesie_odleglosc_autora_obok_wlasnej(tmp_path):
+    """Dwie liczby, dwa źródła, dwa pola. Rozjazd między nimi jest sygnałem,
+    że któryś punkt złapaliśmy źle — sklejenie ich w jedno ten sygnał kasuje."""
+    _z_fixture(tmp_path)
+    p = geo.podsumowanie(geo.geokoduj("38-500", None), geo.geokoduj("35-001", None),
+                         "Sanok -> Rzeszow, trasa ma jakies 80 km")
+    assert p["km_wg_autora"] == 80
+    assert p["km_trasy"] is not None and p["km_trasy"] != 80
+
+
+def test_podsumowanie_bez_tresci_nie_wymysla_odleglosci(tmp_path):
+    _z_fixture(tmp_path)
+    assert geo.podsumowanie(geo.geokoduj("38-500", None), None)["km_wg_autora"] is None
 
 
 def test_podsumowanie_niesie_ostrzezenie_o_niepewnosci(tmp_path):

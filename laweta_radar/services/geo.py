@@ -15,6 +15,15 @@ na ekranie; dystans od bazy do odbioru idzie obok, jako druga, pomocnicza.
 zlecenia, decyduje kierowca — o tym, czy kurs pod Kolonię się opłaca, decyduje
 człowiek patrzący na trasę, a nie kod porównujący kilometry z progiem.
 
+DYSTANS I WYCENA TYLKO Z DWÓCH ZNANYCH PUNKTÓW. Gdy którykolwiek koniec trasy
+jest nierozpoznany, `km_trasy` i `szacunek_pln` są NULL-em — i tak zostaje na
+ekranie („trasa nieustalona"), zamiast liczby wziętej z czegokolwiek innego.
+BAZA OPERATORA NIE ZASTĘPUJE BRAKUJĄCEGO PUNKTU: post „transport z Dębicy do
+Turku, trasa ma około 490 km" z nierozpoznanym Turkiem pokazywał „60 km,
+~250 zł" — czyli dojazd Krosno->Dębica podstawiony pod długość kursu. Kierowca
+odrzuca wtedy kurs na 490 km, patrząc na wycenę lokalnego skoku. Zła liczba
+jest gorsza niż jej brak: brak widać, złej liczby nie.
+
 `zrodlo` W KAŻDYM PUNKCIE JEST CZĘŚCIĄ PRODUKTU, nie diagnostyką. Wartość
 "miasto_niepewne" znaczy „w Polsce jest kilkanaście miejscowości o tej nazwie
 i wybraliśmy największą". To MUSI trafić do interfejsu: operator ma zobaczyć,
@@ -26,6 +35,7 @@ i dalej działa z pamięci. Bazę pobiera osobno `scripts/pobierz_geo.py`.
 CLI:
     python -m laweta_radar.services.geo "Krosno" "Rzeszow"
     python -m laweta_radar.services.geo --kody "auto stoi w 50667 Koln, cena 2500 zl"
+    python -m laweta_radar.services.geo "Debica" "Turek" --tresc "trasa ma okolo 490 km"
 """
 from __future__ import annotations
 
@@ -434,15 +444,23 @@ def link_do_nawigacji(cel: Punkt) -> str:
 # ---------------------------------------------------------------------------
 # KALKULACJA
 # ---------------------------------------------------------------------------
-def kalkulacja(km: float) -> dict:
-    """Prosty szacunek ze stawek z .env.
+def kalkulacja(km: float | None) -> dict:
+    """Prosty szacunek ze stawek z .env. `km=None` -> obie wartości NULL.
 
     TO JEST ETYKIETA NA EKRANIE, NIE BRAMKA. Nic się na jej podstawie nie
     ukrywa ani nie odrzuca — kierowca patrzy na liczbę i sam decyduje, czy
     kurs mu się opłaca. Zna swój sprzęt, swój kalendarz i swoją cenę lepiej
     niż ten wzór.
+
+    NIEZNANY DYSTANS NIE MA CENY i ta reguła mieszka TUTAJ, a nie tylko
+    u wołającego. Wcześniej `None` wchodziło przez `km or 0.0` w stawkę
+    minimalną, więc zlecenie bez trasy dostawało „~250 zł" — liczbę, która
+    wygląda jak wyliczenie, a jest wartością domyślną. Warstwa wyżej ma
+    prawo nie mieć dystansu; nie ma prawa dostać za niego ceny.
     """
-    km = max(0.0, float(km or 0.0))
+    if km is None:
+        return {"km_trasy": None, "szacunek_pln": None}
+    km = max(0.0, float(km))
     return {
         "km_trasy": round(km, 1),
         "szacunek_pln": round(max(settings.STAWKA_MINIMALNA, km * settings.STAWKA_ZA_KM), 2),
@@ -634,27 +652,119 @@ def znajdz_kody(tekst: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# ODLEGŁOŚĆ PODANA WPROST PRZEZ AUTORA POSTA
+#
+# „Trasa ma około 490 km" to liczba od człowieka, który tę trasę zna — i bywa
+# JEDYNĄ, jaką mamy, bo geokoder nie rozpoznał celu. Pokazujemy ją zawsze jako
+# CYTAT („wg autora: 490 km"), nigdy jako nasz wynik i NIGDY nie liczymy z niej
+# wyceny: to treść cudzego posta, a nie pomiar.
+#
+# Zwracamy LICZBĘ, nie fragment tekstu, i to jest decyzja o bezpieczeństwie,
+# nie o formacie. Post jest wejściem od nieznanej osoby; przez tę funkcję na
+# ekran operatora i do wiadomości na Telegramie idzie wyłącznie `int` z zakresu
+# tras — nie ma czym wstrzyknąć ani znaczników Markdowna, ani instrukcji.
+#
+# NAJWIĘKSZE RYZYKO TO PRZEBIEG AUTA. W tych grupach każdy post ma kilometry:
+# „przebieg 190 tys km", „przejechane 245 000 km". Wzięcie ich za długość trasy
+# byłoby dokładnie tym błędem, który ten moduł ma przestać popełniać — dlatego
+# liczba musi mieć OBOK słowo o trasie i NIE MIEĆ słowa o przebiegu, a wynik
+# poza zakresem realnego kursu odrzucamy.
+# ---------------------------------------------------------------------------
+# Realny kurs lawetą: od kilku kilometrów po transport z Hiszpanii. Powyżej
+# 5000 km to już nie trasa, tylko licznik albo literówka.
+ZAKRES_KM_TRASY = (1, 5000)
+
+# Liczba tuż przed „km"/„kilometrami". `(?![\w/])` po jednostce wycina „km/h"
+# i „kmh", a lookbehind — „8l/100km" i ogon dłuższej liczby („45000 km" nie ma
+# dać 5000). Grupa tysięcy jest zapisywana i spacją, i kropką, i przecinkiem
+# („1 200", „2.500", „2,500") — bez niej „2.500 km" dałoby „2 km", czyli
+# dokładnie ten rodzaj cichej pomyłki, którą ten moduł ma eliminować.
+# Ułamek („490,5 km") ucinamy: pełne kilometry wystarczą.
+_LICZBA_PRZED_KM = re.compile(
+    r"(?<![\w,./-])(\d{1,4}(?:[ \u00a0.,]\d{3})?)(?:[.,]\d{1,2})?"
+    r"\s*(?:km|kilometr\w*)(?![\w/])",
+    re.IGNORECASE)
+
+# Słowa, po których liczba przy „km" jest DŁUGOŚCIĄ TRASY. Bez któregoś z nich
+# w oknie liczby nie bierzemy — „jakieś 500 km" bez kontekstu równie dobrze
+# opisuje zasięg auta, a milczenie jest tu tańsze niż zła liczba.
+# Formy zapisane PO NORMALIZACJI (`normalizuj_nazwe`): bez ogonków, małymi.
+_SYGNALY_TRASY = (
+    "trasa", "trase", "trasy", "trasie",
+    "dystans", "odleglosc", "odleglosci",
+    "przejechac", "przejazd", "do przejechania",
+    "w jedna strone", "w obie strony", "tam i z powrotem",
+    "kurs", "kursu",
+)
+
+# Słowa, które przesądzają, że kilometry dotyczą PRZEBIEGU, a nie trasy.
+# Sprawdzane w wąskim oknie przy samej liczbie, bo „przebieg" z drugiego końca
+# zdania nie unieważnia poprawnie podanej trasy.
+_SYGNALY_PRZEBIEGU = (
+    "przebieg", "licznik", "tys", "mln", "spalanie", "zasieg", "gwarancj",
+)
+
+
+def km_wg_autora(tresc: str | None) -> int | None:
+    """Odległość, którą autor posta podał wprost. Brak takiej liczby -> None.
+
+    Bierzemy PIERWSZE trafienie, bo tak pisze się posty: najpierw trasa, potem
+    ewentualnie wariant („490 km w jedną stronę, 980 tam i z powrotem") —
+    a liczba w jedną stronę jest tą, o którą operator pyta.
+
+    Ta wartość NIE WCHODZI DO ŻADNEGO RACHUNKU. Jest cytatem obok naszych
+    kilometrów i tylko tak wolno ją pokazać: autor zna trasę lepiej niż nasz
+    geokoder, ale to nadal jest liczba z cudzego posta i nikt jej nie sprawdził.
+    """
+    tekst = tresc or ""
+    for m in _LICZBA_PRZED_KM.finditer(tekst):
+        start, koniec = m.span()
+        wartosc = int(re.sub(r"[^\d]", "", m.group(1)))
+        if not (ZAKRES_KM_TRASY[0] <= wartosc <= ZAKRES_KM_TRASY[1]):
+            continue
+        # Okno przebiegu jest wąskie i przesunięte w lewo: „przebieg 190 tys km"
+        # i „245 000 km przebiegu" — kwalifikator stoi tuż przy liczbie.
+        przy_liczbie = normalizuj_nazwe(tekst[max(0, start - 25):koniec + 15])
+        if any(s in przy_liczbie for s in _SYGNALY_PRZEBIEGU):
+            continue
+        # Okno trasy jest szersze i sięga do poprzedniego zdania, bo „Trasa
+        # Dębica-Turek. Około 490 km." to jedna myśl zapisana dwoma zdaniami.
+        okno = normalizuj_nazwe(tekst[max(0, start - 80):koniec + 40])
+        if any(s in okno for s in _SYGNALY_TRASY):
+            return wartosc
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ZŁOŻENIE DLA WARSTWY WYŻEJ
 # ---------------------------------------------------------------------------
-def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None) -> dict:
+def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None,
+                 tresc: str | None = None) -> dict:
     """Komplet liczb i linków dla jednego zlecenia — to, co idzie na ekran.
 
     `km_trasy` (odbiór->dostawa) jest liczbą PIERWSZĄ, bo to ona mówi, ile
     realnie trzeba przejechać z autem na lawecie. `km_od_bazy` idzie obok, jako
     druga i pomocnicza — przy transporcie międzynarodowym sama nic nie znaczy.
     Żadna z nich niczego nie filtruje.
+
+    OBA PUNKTY ALBO NIC. Brakujący koniec trasy zeruje `km_trasy` I
+    `szacunek_pln` — nie ma podstawiania `km_od_bazy` ani stawki minimalnej pod
+    nieznany dystans. `km_od_bazy` zostaje policzony, bo to osobna, prawdziwa
+    liczba (baza->odbiór) i wyłącznie pod taką etykietą wolno ją pokazać; do
+    pierwszej linii alertu ani do wyceny nie wchodzi NIGDY.
+
+    `km_wg_autora` to odległość z treści posta — cytat obok naszych liczb,
+    liczony osobno i osobno oznaczany na ekranie.
     """
     b = baza()
     km_od_bazy = dystans_km(b, odbior) if odbior else None
     km_trasy = dystans_km(odbior, dostawa) if (odbior and dostawa) else None
-    # Szacunek liczymy z DŁUGOŚCI KURSU, a gdy znamy tylko jeden punkt — z drogi
-    # od bazy. `km_trasy` w wyniku zostaje wtedy None, bo jego brak jest
-    # informacją: nie wiemy, dokąd auto ma jechać.
-    podstawa = km_trasy if km_trasy is not None else (km_od_bazy or 0.0)
     return {
         "km_trasy": km_trasy,
         "km_od_bazy": km_od_bazy,
-        "szacunek_pln": kalkulacja(podstawa)["szacunek_pln"],
+        # `kalkulacja(None)` oddaje None — brak trasy nie ma ceny.
+        "szacunek_pln": kalkulacja(km_trasy)["szacunek_pln"],
+        "km_wg_autora": km_wg_autora(tresc),
         "niepewne": [p.nazwa for p in (odbior, dostawa) if p and p.niepewny],
         "link_trasa": link_do_map(b, odbior, dostawa),
         "link_nawigacja": link_do_nawigacji(odbior) if odbior else "",
@@ -674,6 +784,8 @@ def _main(argv: list[str]) -> int:
     ap.add_argument("miejsca", nargs="*", help="odbiór [dostawa] — nazwa miasta albo kod")
     ap.add_argument("--kody", metavar="TEKST",
                     help="wyłuskaj kody pocztowe z surowego tekstu i zakończ")
+    ap.add_argument("--tresc", metavar="TEKST",
+                    help="treść posta — do odległości podanej przez autora wprost")
     args = ap.parse_args(argv[1:])
 
     print(stan_bazy(), file=sys.stderr)
@@ -684,6 +796,8 @@ def _main(argv: list[str]) -> int:
         for kod, kraj in znalezione:
             p = geokoduj(kod, None)
             print(f"  {kod} [{kraj}] -> {p.nazwa if p else 'brak w bazie'}")
+        wg_autora = km_wg_autora(args.kody)
+        print(f"WG AUTORA: {f'{wg_autora} km' if wg_autora else '(nie podał)'}")
         return 0
 
     if not args.miejsca:
@@ -703,7 +817,8 @@ def _main(argv: list[str]) -> int:
             print(f"{etykieta}:  {p.nazwa}  [{p.zrodlo}]  {p.wspolrzedne()}"
                   + ("   <-- LOKALIZACJA ZGADYWANA" if p.niepewny else ""))
     print()
-    print(_json.dumps(podsumowanie(odbior, dostawa), ensure_ascii=False, indent=2))
+    print(_json.dumps(podsumowanie(odbior, dostawa, args.tresc),
+                      ensure_ascii=False, indent=2))
     return 0
 
 
