@@ -144,6 +144,15 @@ export function opisZrodla(zrodlo: ZrodloLokalizacji): string {
   }
 }
 
+/** Czy to zlecenie na transport zwierząt.
+ *
+ *  Jedno miejsce na to pytanie, bo odpowiada na nie i karta na liście, i ekran
+ *  szczegółu, i obie muszą pokazywać ten sam znacznik. `null` (bramka nie
+ *  orzekała, rekordy sprzed migracji 0010) to NIE jest zwierzę. */
+export function transportZwierzat(z: Zlecenie): boolean {
+  return z.kategoria_ladunku === "zwierze";
+}
+
 /** Jedno ostrzeżenie o jednym końcu trasy — tyle, ile trzeba, żeby je narysować. */
 export interface OstrzezenieLokalizacji {
   /** Klucz Reacta i zarazem nazwa końca trasy: „Odbiór" / „Dostawa". */

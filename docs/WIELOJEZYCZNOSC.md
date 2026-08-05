@@ -43,7 +43,13 @@ Dwie zasady rozstrzygania między słownikami:
   załatwione" przestaje być zleceniem niezależnie od tego, w jakim języku to
   napisano. Samo „weź najlepszy wynik" tu nie wystarcza: słownik, który nie zna
   zwrotu „hat sich erledigt", po prostu milczy — a milczenie wygląda lepiej niż
-  odrzucenie.
+  odrzucenie;
+- **wśród przepuszczeń wygrywa NAZWANA REGUŁA, dopiero potem wyższa punktacja.**
+  Część wzorców jest niezależna od języka (marki aut, kody pocztowe, nazwy domów
+  aukcyjnych) i punktuje w KAŻDYM słowniku, a twarde przepuszczenie ma z definicji
+  zero punktów. Bez tej kolejności polski post „Do zabrania iveco … do 08-110
+  siedlce" wygrywał słownikiem **niemieckim** i dostawał znacznik `de` — czyli
+  podpowiedź, żeby oddzwonić po niemiecku do kogoś, kto pisał po polsku.
 
 Szczegóły warstw, wag i doboru wzorców: docstring `workers/gate.py`.
 

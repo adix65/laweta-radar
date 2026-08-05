@@ -8,6 +8,7 @@ import {
   kolorPilnosci,
   lokalizacjaNiepewna,
   pojazdJednymWierszem,
+  transportZwierzat,
   trasa,
   trasaUstalona,
   wgAutora,
@@ -149,6 +150,16 @@ export default function KartaZlecenia({ zlecenie: z, onZmiana }: Props) {
             <p className="mt-1 text-xs font-bold uppercase tracking-wide text-tekst-cichy">
               {etykietaPilnosci(z.pilnosc)}
               {z.jezyk && z.jezyk !== "pl" ? ` · ${z.jezyk.toUpperCase()}` : ""}
+              {/* ZNACZNIK, NIE UKRYCIE. Karta zostaje na liście (API stawia ją
+                  tylko niżej) i ma komplet przycisków — operator dziś zwierząt
+                  nie wozi, ale to jego decyzja, nie panelu. Słowem, nie samym
+                  kolorem: kolor jest nieczytelny w słońcu i nie istnieje dla
+                  czytnika ekranu. */}
+              {transportZwierzat(z) && (
+                <span className="ml-2 rounded bg-karta-akcent px-1.5 py-0.5 text-ostrzezenie">
+                  🐴 ZWIERZĘ
+                </span>
+              )}
             </p>
 
             <p className="mt-2 truncate text-opis font-semibold">{trasa(z)}</p>

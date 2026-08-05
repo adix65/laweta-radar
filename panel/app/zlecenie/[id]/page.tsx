@@ -12,6 +12,7 @@ import {
   kolorPilnosci,
   linkTel,
   telefonCzytelnie,
+  transportZwierzat,
   trasa,
   trasaUstalona,
   wgAutora,
@@ -128,6 +129,18 @@ export default function Szczegol() {
       <div className="mt-3">
         <PasekOstrzegawczy zlecenie={z} />
       </div>
+
+      {/* Znacznik ładunku NAD liczbami, z tego samego powodu co pasek
+          ostrzegawczy: „1100 km · ~4400 zł" wygląda identycznie dla golfa
+          i dla wałacha, a ostrzeżenie po liczbie przychodzi już po tym, jak
+          liczba została zaakceptowana. Zlecenie zostaje w pełni obsługiwalne —
+          komplet przycisków, pełna treść, zmiana statusu. */}
+      {transportZwierzat(z) && (
+        <p className="mt-3 rounded-xl border border-obrys bg-karta-akcent px-3 py-2 text-opis font-bold text-ostrzezenie">
+          🐴 TRANSPORT ZWIERZĄT — poza standardową ofertą. Zlecenie jest tu w całości;
+          decyzja należy do Ciebie.
+        </p>
+      )}
 
       <section className="mt-3 flex items-center gap-3">
         <div className={`h-14 w-2 rounded-full ${kolorPilnosci(z.pilnosc)}`} />

@@ -45,6 +45,7 @@ STATUSY = ("nowe", "dzwonie", "wygrane", "przegrane", "smiec")
 # nie ma powodu wozić pełnej treści posta dla stu rekordów.
 POLA_LISTY = ("fb_id", "grupa_nazwa", "grupa_url", "post_url", "opublikowany_at",
               "pobrany_at", "status", "status_at", "stale", "gate_jezyk",
+              "kategoria_ladunku",
               "typ", "odbior_raw", "odbior_kod", "odbior_miasto",
               "dostawa_raw", "dostawa_kod", "dostawa_miasto",
               "pojazd_opis", "pojazd_kategoria", "stan_toczy_sie",
@@ -140,6 +141,11 @@ def lista(
     publikacji (Apify nie zawsze ją oddaje) ląduje NA KOŃCU, bo góra listy należy
     do najświeższych, a nie do tych o nieznanym wieku.
 
+    TRANSPORT ZWIERZĄT LĄDUJE NIŻEJ, ale ZOSTAJE NA LIŚCIE — to jest cała
+    różnica między „nie wożę koni" a „nie chcę o tym wiedzieć", i tylko pierwsze
+    wolno tu zakodować. Kolejność jest podpowiedzią, nie filtrem: zlecenie widać
+    w każdym widoku, wchodzi w `limit` i daje się otworzyć jak każde inne.
+
     `max_km` filtruje PO policzeniu geografii, w Pythonie — kilometrów nie ma
     w bazie i nie ma ich tam z premedytacją: zależą od `BAZA_LAT/BAZA_LON`, które
     operator może zmienić (przeprowadzka, druga baza), a kolumna z kilometrami
@@ -176,7 +182,13 @@ def lista(
                 # a nie odczytu z Postgresa.
                 f"SELECT {', '.join(POLA_LISTY)}, tresc FROM posty "  # noqa: S608 — lista stała
                 f" WHERE {' AND '.join(warunki)}"
-                "  ORDER BY opublikowany_at DESC NULLS LAST, pobrany_at DESC "
+                # COALESCE, a nie samo porównanie: `kategoria_ladunku` jest NULL
+                # dla wierszy sprzed migracji 0010, a NULL w ORDER BY ... ASC
+                # idzie na KONIEC — czyli cała historia wylądowałaby pod
+                # zwierzętami. NULL znaczy „bramka nie orzekała" i ma się
+                # zachowywać jak zwykłe zlecenie.
+                "  ORDER BY (COALESCE(kategoria_ladunku, '') = 'zwierze') ASC,"
+                "           opublikowany_at DESC NULLS LAST, pobrany_at DESC "
                 "  LIMIT %s",
                 (*parametry, zapas),
             )
@@ -286,6 +298,7 @@ def _sprawdz_migracje(conn) -> None:
     for potrzebne, migracja in (
         ({"odbior_miasto", "pojazd_opis", "pewnosc"}, "0004_klasyfikacja.sql"),
         ({"notatka", "cena_koncowa", "status_at"}, "0005_panel.sql"),
+        ({"kategoria_ladunku"}, "0010_kategoria_ladunku.sql"),
     ):
         brak = potrzebne - kolumny
         if brak:

@@ -363,6 +363,7 @@ def _tabela_istnieje(conn, nazwa: str) -> bool:
 KOLUMNY_SWIADKOWIE = (
     ("zrodlo_decyzji", "0003_fetcher.sql"),
     ("pewnosc", "0004_klasyfikacja.sql"),
+    ("kategoria_ladunku", "0010_kategoria_ladunku.sql"),
 )
 
 
@@ -608,7 +609,8 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
                      "autor", "opublikowany_at",
                      "zrodlo_decyzji", "czy_zlecenie", "status", "stale",
                      "gate_werdykt", "gate_punkty", "gate_powod",
-                     "gate_trafienia", "gate_tryb", "gate_jezyk")
+                     "gate_trafienia", "gate_tryb", "gate_jezyk",
+                     "kategoria_ladunku")
     wartosci = [
         identyfikator, post["tresc"], post.get("post_url") or None,
         post.get("group_url") or None, post.get("group_name") or None,
@@ -616,6 +618,11 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
         decyzja.zrodlo, decyzja.czy_zlecenie, decyzja.status, decyzja.stale,
         decyzja.gate_werdykt, decyzja.gate_punkty, decyzja.gate_powod,
         list(decyzja.gate_trafienia), decyzja.gate_tryb, decyzja.jezyk or None,
+        # Kategoria ładunku jedzie tym samym INSERT-em co werdykt bramki — to ta
+        # sama decyzja, podjęta w tym samym momencie i przez ten sam moduł.
+        # Dopisywanie jej drugim zapytaniem byłoby drugą okazją do porażki bez
+        # żadnego objawu (patrz nota o jednym INSERT-cie wyżej).
+        decyzja.kategoria_ladunku or None,
     ]
     # Kolumny ekstrakcji lecą ZAWSZE, także gdy modelu nie pytano — wtedy jako
     # NULL-e, czyli dokładnie to, co i tak byłoby w wierszu. Jedna ścieżka SQL
@@ -1025,6 +1032,11 @@ class Decyzja:
     gate_powod: str = ""
     gate_trafienia: tuple = ()
     gate_tryb: str = ""
+    # 'pojazd' | 'zwierze' | 'inne' — CO miałoby jechać. Nie zmienia ani
+    # `czy_zlecenie`, ani `status`: post o transporcie konia idzie przez pipeline
+    # normalnie. Zmienia to, co widać w panelu i czy brzęczy telefon
+    # (services/powiadomienia.ocen + ALERT_ZWIERZETA).
+    kategoria_ladunku: str = gate.KAT_INNE
 
 
 def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
@@ -1057,6 +1069,7 @@ def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
         "gate_powod": b.powod,
         "gate_trafienia": tuple(b.trafienia),
         "gate_tryb": b.tryb,
+        "kategoria_ladunku": b.kategoria_ladunku,
     }
 
     # `przepusc`, nie `werdykt` — to jest DECYZJA OPERACYJNA i uwzględnia tryb
@@ -1342,8 +1355,14 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 odsiane += 1
             if decyzja.czy_zlecenie:
                 zlecenia += 1
+                # Znacznik ładunku W LOGU, nie tylko w bazie. Przy
+                # ALERT_ZWIERZETA=0 taki post nie brzęczy telefonem, więc bez tej
+                # linii jedyny ślad po nim byłby w panelu — a cisza, której nie
+                # widać w logu, jest nie do odróżnienia od awarii wysyłki.
+                znacznik = ("  [ZWIERZĘ]"
+                            if decyzja.kategoria_ladunku == gate.KAT_ZWIERZE else "")
                 log(f"[{KTO}] {_skrot(post['tresc'])}: ZLECENIE "
-                    f"[{decyzja.jezyk or '??'}] "
+                    f"[{decyzja.jezyk or '??'}]{znacznik} "
                     f"{post.get('post_url') or '(BRAK LINKU)'}")
                 # Alert idzie TU, a nie „gdzieś dalej w pipelinie" — dalej nie ma
                 # nic. To jest jedyne miejsce w systemie, w którym wiadomo, że
@@ -1459,6 +1478,10 @@ def zlecenie_do_alertu(identyfikator: str, post: dict, decyzja: Decyzja,
         "grupa_nazwa": post.get("group_name") or None,
         "opublikowany_at": post.get("post_date"),
         "jezyk": decyzja.jezyk or "",
+        # Kategoria ładunku decyduje, czy alert w ogóle wyjdzie (ALERT_ZWIERZETA)
+        # i czy dostanie znacznik w treści. Bez tego pola powiadomienie widziałoby
+        # transport konia dokładnie tak samo jak transport golfa.
+        "kategoria_ladunku": decyzja.kategoria_ladunku,
     }
 
 

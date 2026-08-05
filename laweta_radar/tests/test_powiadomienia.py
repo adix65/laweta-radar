@@ -340,6 +340,62 @@ def test_pauza_wycisza_ale_nie_kasuje():
     assert "panelu" in d.powod
 
 
+# ---------------------------------------------------------------------------
+# TRANSPORT ZWIERZĄT — cisza, ale NIE zniknięcie
+#
+# Bramka takich postów nie odrzuca (patrz workers/gate.py): operator zwierząt nie
+# wozi, ale „nie wożę" i „nie chcę o tym wiedzieć" to dwie różne rzeczy. Tutaj
+# rozstrzyga się wyłącznie to, czy brzęczy telefon — reszta systemu ma się
+# zachować dokładnie tak samo jak przy każdym innym zleceniu.
+# ---------------------------------------------------------------------------
+ZWIERZE = dict(ZLECENIE, kategoria_ladunku="zwierze",
+               pojazd_opis="koń — wałach", tresc="szukam transportu dla walacha")
+
+
+def test_zwierze_domyslnie_nie_brzeczy(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    d = _ocen(ZWIERZE)
+    assert d.wysylac is False
+    assert d.kod == "zwierze"
+    # Ten fragment powodu jest kontraktem, nie ozdobą: to jedyne zdanie, które
+    # odróżnia „wyciszone" od „zgubione", gdy operator pyta, gdzie jest zlecenie.
+    assert "panelu" in d.powod
+
+
+def test_zwierze_z_wlaczonym_alertem_idzie_normalnie(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 1)
+    assert _ocen(ZWIERZE).wysylac is True
+
+
+def test_zwierze_nie_rusza_pozostalych_zlecen(monkeypatch):
+    """Reguła ma dotyczyć WYŁĄCZNIE kategorii 'zwierze'. Brak pola (wiersze
+    sprzed migracji 0010) i 'pojazd' zachowują się identycznie jak dotąd."""
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    assert _ocen(ZLECENIE).wysylac is True
+    assert _ocen(dict(ZLECENIE, kategoria_ladunku="pojazd")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kategoria_ladunku=None)).wysylac is True
+
+
+def test_zwierze_po_dedupie(monkeypatch):
+    """Kolejność jak przy pauzie: post już wysłany zostaje duplikatem, a nie
+    zwierzęciem — inaczej zniknąłby powód, dla którego nie poszedł drugi raz."""
+    monkeypatch.setattr(pw.settings, "ALERT_ZWIERZETA", 0)
+    assert _ocen(ZWIERZE, juz_wyslane=True).kod == "duplikat"
+
+
+def test_zwierze_ma_widoczny_znacznik_w_tresci_alertu():
+    """Przy ALERT_ZWIERZETA=1 alert dociera — i musi być rozpoznawalny w pierwszym
+    rzucie oka. „1100 km · ~4400 zł" wygląda tak samo dla golfa i dla wałacha."""
+    tresc = pw.zbuduj_tresc(ZWIERZE, teraz=TERAZ)
+    assert "ZWIERZ" in tresc.upper()
+    # Nad cytatem, czyli w części czytanej najpierw.
+    assert tresc.upper().index("ZWIERZ") < tresc.index("szukam transportu")
+
+
+def test_zwykle_zlecenie_bez_znacznika_zwierzat():
+    assert "ZWIERZ" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).upper()
+
+
 @pytest.mark.parametrize("godzina,cisza", [(23, True), (2, True), (5, True),
                                            (6, False), (12, False), (21, False),
                                            (22, True)])

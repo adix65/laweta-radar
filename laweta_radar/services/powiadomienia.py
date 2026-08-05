@@ -95,6 +95,12 @@ from datetime import datetime, timedelta, timezone
 
 from laweta_radar.config import settings
 from laweta_radar.services import geo, telegram_notify
+# Bramka jest modułem CZYSTYM (bez bazy, bez sieci, bez zależności od services),
+# więc import w tę stronę nie robi cyklu. Bierzemy stąd nazwy kategorii ładunku
+# zamiast przepisywać stringi: „zwierze" wpisane z palca w drugim pliku rozjeżdża
+# się przy pierwszej zmianie i nie daje żadnego objawu — alert po prostu
+# przestaje rozpoznawać kategorię i wysyła wszystko.
+from laweta_radar.workers import gate
 
 KTO = "powiadomienia"
 
@@ -405,7 +411,15 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     pods = pods or geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
     esc = telegram_notify._escape_md
 
-    linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*", ""]
+    linie = [f"*{esc(_linia_pilnosci(zlecenie, pods))}*"]
+    # ZNACZNIK ŁADUNKU tuż pod nagłówkiem, nie w stopce. Alert o transporcie
+    # konia dociera tylko przy ALERT_ZWIERZETA=1 — czyli wtedy, gdy operator
+    # świadomie takich kursów szuka. Ale nawet wtedy musi POZNAĆ go w pierwszym
+    # rzucie oka: linia kilometrów i złotówek wygląda identycznie dla golfa
+    # i dla wałacha, a to są dwa zupełnie różne telefony.
+    if str(zlecenie.get("kategoria_ladunku") or "") == gate.KAT_ZWIERZE:
+        linie.append(esc("🐴 TRANSPORT ZWIERZĄT — poza standardową ofertą"))
+    linie.append("")
     trasa = _linia_trasy(zlecenie, odbior, dostawa, pods)
     if trasa:
         linie.append(esc(trasa))
@@ -542,7 +556,8 @@ class Decyzja:
     """
 
     wysylac: bool
-    kod: str      # '' | 'pewnosc' | 'cisza_nocna' | 'duplikat' | 'crosspost' | 'limit'
+    kod: str      # '' | 'pewnosc' | 'cisza_nocna' | 'duplikat' | 'crosspost'
+                  # | 'limit' | 'pauza' | 'zwierze'
     powod: str
 
 
@@ -573,6 +588,25 @@ def ocen(zlecenie: dict, *, juz_wyslane: bool, crosspost_id: int | None,
         # pauzy trafi do podsumowania po `/start`, tak samo jak nocne.
         return Decyzja(False, "pauza", "powiadomienia wyciszone przez /stop "
                                        "— zlecenia lecą do panelu bez brzęczenia")
+
+    # TRANSPORT ZWIERZĄT — kurs spoza oferty tego operatora, a nie śmieć.
+    # Bramka takich postów NIE odrzuca (patrz workers/gate.py), więc zlecenie
+    # JEST w bazie i JEST w panelu — ze znacznikiem i niżej na liście. Tutaj
+    # rozstrzyga się wyłącznie jedno: czy o nim brzęczeć.
+    #
+    # Obok pauzy i przed progiem pewności, bo to jest ta sama klasa decyzji:
+    # stała preferencja operatora, a nie ocena jakości posta. Model może być
+    # w 100% pewny, że to zlecenie — i mieć rację; koń dalej nie wjedzie
+    # na lawetę do aut.
+    #
+    # ALERT_ZWIERZETA=1 znosi tę regułę w całości, bez żadnej innej zmiany
+    # w systemie: dane są zbierane niezależnie od wartości tej zmiennej,
+    # więc przełączenie jej działa od następnego posta i wstecz niczego nie psuje.
+    if (not settings.ALERT_ZWIERZETA
+            and str(zlecenie.get("kategoria_ladunku") or "") == gate.KAT_ZWIERZE):
+        return Decyzja(False, "zwierze",
+                       "transport zwierząt — poza ofertą (ALERT_ZWIERZETA=0). "
+                       "Zlecenie JEST w panelu, tylko bez brzęczenia")
 
     # PRÓG DZIAŁA TYLKO NA ZNANEJ LICZBIE. Nieznana pewność (NULL w bazie, pusty
     # string, śmieć) NIE jest niską pewnością i nie ma prawa wyciszyć alertu:
@@ -755,10 +789,13 @@ def powiadom_o_zleceniu(zlecenie: dict) -> bool:
         kontakt_wartosc  numer w dowolnym formacie, normalizujemy sami
         pewnosc          0-100 z klasyfikatora — próg MIN_PEWNOSC
         jezyk            'pl'|'de'|'cs'|'sk' z bramki
+        kategoria_ladunku 'pojazd'|'zwierze'|'inne' z bramki — 'zwierze' dokłada
+                         znacznik do treści i (przy ALERT_ZWIERZETA=0) wycisza alert
 
     False znaczy „nie wysłano" i NIE jest zaproszeniem do ponowienia. Powodów
-    jest sześć i wszystkie są normalne: duplikat, crosspost, niska pewność, cisza
-    nocna, przekroczony limit, awaria transportu. Każdy stoi w logu z nazwą.
+    jest osiem i wszystkie są normalne: duplikat, crosspost, pauza z `/stop`,
+    transport zwierząt, niska pewność, cisza nocna, przekroczony limit, awaria
+    transportu. Każdy stoi w logu z nazwą.
 
     ŻADNA ze ścieżek tej funkcji nie usuwa niczego z bazy ani z panelu.
     """
@@ -847,6 +884,20 @@ def _obsluz_pominiecie(conn, fb_id: str, decyzja: Decyzja,
         _zapisz(conn, fb_id=fb_id, kanal="pominiete_limit",
                 tresc=decyzja.powod, message_id=None)
         _zbiorcze_o_limicie(conn)
+        return
+
+    if decyzja.kod == "zwierze":
+        # Wiersz z kanałem 'pominiete_zwierze' zamyka sprawę TAK SAMO jak przy
+        # limicie, i to jest tu konieczne, a nie kosmetyczne: podsumowanie ranne
+        # szuka zleceń BEZ wiersza w `powiadomienia` (patrz `podsumowanie_nocne`),
+        # więc bez tego zapisu transport konia i tak przyszedłby o świcie —
+        # czyli ALERT_ZWIERZETA=0 opóźniałby alert zamiast go wyłączać.
+        #
+        # Wiersz jest przy okazji jedyną odpowiedzią na pytanie „ile takich
+        # kursów przeszło obok" — a to jest dokładnie ta liczba, od której zależy
+        # decyzja o przyczepie do koni albo o podnajmowaniu ich dalej.
+        _zapisz(conn, fb_id=fb_id, kanal="pominiete_zwierze",
+                tresc=decyzja.powod, message_id=None)
         return
 
     # 'pewnosc' i 'cisza_nocna' NIE zostawiają wiersza. Pierwszy dlatego, że

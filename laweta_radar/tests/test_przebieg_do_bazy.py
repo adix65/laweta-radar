@@ -37,7 +37,7 @@ from laweta_radar.workers import fb_fetcher as f  # noqa: E402
 # Zapis dotyka kolumn z 0003/0004, powiadomienia żyją w tabeli z 0006.
 MIGRACJE = ("0001_posty.sql", "0002_gate.sql", "0003_fetcher.sql",
             "0004_klasyfikacja.sql", "0005_panel.sql", "0006_powiadomienia.sql",
-            "0009_werdykt_modelu.sql")
+            "0009_werdykt_modelu.sql", "0010_kategoria_ladunku.sql")
 
 GRUPA = {"url": "https://www.facebook.com/groups/testowa", "name": "Grupa testowa"}
 
@@ -332,3 +332,54 @@ def test_post_odrzucony_przez_bramke_nie_budzi_nikogo(przebieg):
 
     assert przebieg.powiadomienia() == []
     assert przebieg.telegram.wiadomosci == []
+
+
+# ---------------------------------------------------------------------------
+# 7. TRANSPORT ZWIERZĄT: cisza na telefonie, PEŁNY wiersz w bazie
+#
+# To jest jedyne miejsce, w którym widać RÓŻNICĘ między „nie brzęczę" a „nie
+# zapisuję". Obie ścieżki dają operatorowi tę samą ciszę na telefonie, a różnią
+# się tym, czy za pół roku da się odpowiedzieć na pytanie „ile takich kursów
+# przeszło obok" — czyli czy decyzja o przyczepie do koni ma się o co oprzeć.
+# ---------------------------------------------------------------------------
+KON = ("Potrzebny transport busem jednego konia (+dużo sprzętu) z Gajewnik "
+       "do 38-400 Krosno, proszę o kontakt")
+
+
+@baza
+def test_transport_zwierzat_laduje_w_bazie_ale_nie_brzeczy(przebieg, monkeypatch):
+    monkeypatch.setattr(f.settings, "ALERT_ZWIERZETA", 0)
+    przebieg.posty_z_apify(KON)
+    assert przebieg.uruchom() == 0
+
+    fb_id = f.fb_id(KON)
+    with przebieg.conn.cursor() as cur:
+        cur.execute("SELECT czy_zlecenie, status, kategoria_ladunku, gate_werdykt "
+                    "  FROM posty WHERE fb_id = %s", (fb_id,))
+        czy_zlecenie, status, kategoria, gate_werdykt = cur.fetchone()
+
+    # Zlecenie jak każde inne: przeszło bramkę, poszło do modelu, jest w kolejce.
+    assert gate_werdykt is True
+    assert czy_zlecenie is True
+    assert status == "nowe"
+    assert kategoria == "zwierze"
+
+    # ...i ani jednej wiadomości na telefonie.
+    assert przebieg.telegram.wiadomosci == []
+    # Wiersz w `powiadomienia` MUSI powstać — inaczej podsumowanie ranne szuka
+    # zleceń bez wiersza i przysłałoby ten sam kurs o świcie, czyli
+    # ALERT_ZWIERZETA=0 opóźniałoby alert zamiast go wyłączać.
+    kanaly = [p["kanal"] for p in przebieg.powiadomienia()]
+    assert kanaly == ["pominiete_zwierze"]
+
+
+@baza
+def test_alert_zwierzeta_1_wysyla_alert_ze_znacznikiem(przebieg, monkeypatch):
+    """Jedna zmienna w .env, zero zmian w reszcie systemu — bo dane o tych
+    kursach zbierają się niezależnie od jej wartości."""
+    monkeypatch.setattr(f.settings, "ALERT_ZWIERZETA", 1)
+    przebieg.posty_z_apify(KON)
+    assert przebieg.uruchom() == 0
+
+    assert len(przebieg.telegram.wiadomosci) == 1
+    assert "ZWIERZ" in przebieg.telegram.wiadomosci[0].upper()

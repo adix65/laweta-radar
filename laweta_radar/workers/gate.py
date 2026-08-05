@@ -30,6 +30,18 @@ CZTERY WARSTWY, W TEJ KOLEJNOŚCI. Kolejność jest merytoryczna, nie porządkow
   3. ODRZUCENIE      — tylko wzorce jednoznaczne
   4. PUNKTACJA       — reszta; próg kalibrowany jedną liczbą w .env
 
+OBOK werdyktu bramka zwraca KATEGORIĘ ŁADUNKU ("pojazd" / "zwierze" / "inne").
+To NIE jest piąta warstwa i nie ma prawa nią zostać: kategoria niczego nie
+odrzuca i nie dodaje ani jednego punktu. Odpowiada wyłącznie na pytanie „co
+miałoby jechać", bo giełdy transportowe mieszają auta z końmi i bydłem, a ten
+operator zwierząt nie wozi. Post o zwierzętach przechodzi bramkę normalnie,
+dostaje widoczny znacznik w panelu i w alercie, ląduje niżej na liście —
+i (przy ALERT_ZWIERZETA=0) nie brzęczy telefonem. Twarde odrzucenie byłoby
+tu skasowaniem danych, których nikt potem nie odtworzy: gdyby operator dokupił
+przyczepę do koni albo zaczął podnajmować takie kursy, historia już czeka
+w bazie. Szczegóły: `_kategoria` i kolumna `kategoria_ladunku`
+(api/migrations/0010_kategoria_ladunku.sql).
+
 Dwa miejsca, w których ta kolejność ratuje realne pieniądze:
 
   • "Sprzedam golfa po stłuczce, ale najpierw trzeba go odholować z parkingu"
@@ -202,8 +214,12 @@ PRZEPUSZCZENIE: list[tuple[str, int, str]] = [
     (rf"potrzebuje ({_USLUGA})", 0, "prosba wprost"),
     (r"potrzebn[ay] (mi )?(laweta|pomoc drogowa|laweta na juz)", 0, "prosba wprost"),
     (r"potrzebn[ye] (transport|przewoz|holowanie|odholowanie)", 0, "prosba wprost"),
-    (r"szukam (lawety|pomocy drogowej|kogos z laweta|firmy|transportu|"
-     r"przewoznika|miejsca na lawecie|kogos kto)", 0, "prosba wprost"),
+    # „poszukuję" obok „szukam": to samo zgłoszenie, inna forma czasownika.
+    # Produkcyjne „Poszukuję transportu dla ..." nie trafiało TU w nic i spadało
+    # do punktacji, a warstwa 3 ma tuż obok „poszukuje kierowcy" (ogłoszenie
+    # o pracy) — czyli jedyny wzorzec, który tę formę w ogóle znał, ODRZUCAŁ.
+    (r"(szukam|poszukuje) (lawety|pomocy drogowej|kogos z laweta|firmy|"
+     r"transportu|przewoznika|miejsca na lawecie|kogos kto)", 0, "prosba wprost"),
     (r"pilnie laweta", 0, "prosba wprost"),
     (r"laweta pilnie", 0, "prosba wprost"),
     (r"kto (mi )?(odholuje|przewiezie|przywiezie|zawiezie|podskoczy|pomoze|"
@@ -226,6 +242,38 @@ PRZEPUSZCZENIE: list[tuple[str, int, str]] = [
     # z czynnością albo pojazdem.
     (r"(auto|samochod|pojazd) na lawete", 0, "prosba wprost"),
     (r"(zabra(c|nie|nia)|wziac|zaladowa(c|nie|nia)) na lawete", 0, "prosba wprost"),
+
+    # --- ZGŁOSZENIE Z GIEŁDY TRANSPORTOWEJ: forma bezokolicznikowa ---
+    #
+    # Na giełdach zlecenie zaczyna się najczęściej NIE od prośby, tylko od
+    # rzeczownika odczasownikowego: „Do przywiezienia Citroen Berlingo z 18556
+    # do 63-505". Nie ma tu ani „potrzebuję", ani awarii, ani pary miast
+    # w formie „z X do Y" — więc taki post trafiał w warstwie 4 w ZERO wzorców,
+    # dostawał zero punktów i wylatywał jako śmieć. To jest najdroższy błąd,
+    # jaki ten moduł potrafi popełnić: kompletne zlecenie z trasą i pojazdem,
+    # skasowane bez śladu, bo słownik nie znał formy gramatycznej.
+    #
+    # DLACZEGO TWARDE PRZEPUSZCZENIE, A NIE PUNKTY. Te zwroty są jednoznaczne po
+    # stronie POPYTU: nikt nie reklamuje własnej lawety zdaniem „do zabrania
+    # iveco solówka spod Paryża". Sygnał poszlakowy (punkty) wymagałby drugiego
+    # trafienia, żeby przekroczyć próg — a te posty są z założenia telegraficzne
+    # i drugiego sygnału zwykle nie mają.
+    (r"do (przywiezienia|przywozu|zabrania|odebrania|odbioru|przewiezienia|"
+     r"przewozu|sciagniecia|podjecia|zawiezienia|dowiezienia|"
+     r"przetransportowania|zaladowania)", 0, "zgloszenie z gieldy"),
+    # „szukam wolnego JEDNEGO miejsca" — między „wolnego" a „miejsca" ludzie
+    # wtrącają liczebnik albo przymiotnik, więc jedno słowo jest tu dozwolone.
+    # Wzorzec bez tej luki nie trafiłby posta, od którego zaczęło się zgłoszenie.
+    (r"(szukam|poszukuje) wolnego( [a-z]+)? miejsca", 0, "zgloszenie z gieldy"),
+    (r"(szukam|poszukuje) miejsca (w transporcie|na transport|na aucie|"
+     r"w aucie|na lawete)", 0, "zgloszenie z gieldy"),
+    (r"wolne miejsc[ae]", 0, "zgloszenie z gieldy"),
+    (r"jest wolne miejsce", 0, "zgloszenie z gieldy"),
+    # „kto wraca z Niemiec", „kto jedzie w kierunku Wrocławia" — pytanie
+    # o doładunek. Istniejące „kto jedzie (z|do|w strone|na)" nie znało formy
+    # „w kierunku" ani żadnego wariantu z „wraca".
+    (r"kto (wraca|bedzie wracal|wracal)", 0, "zgloszenie z gieldy"),
+    (r"kto jedzie w kierunku", 0, "zgloszenie z gieldy"),
 
     # --- prośba o polecenie: PEŁNOPRAWNY LEAD, nie spam ---
     # Autor szuka wykonawcy, czyli daje najczystszy możliwy sygnał zakupowy.
@@ -488,6 +536,168 @@ HAMULCE_WARUNKOWE: list[tuple[str, int, str, str]] = [
     (r"w zeszlym tygodniu", -2, "HAMULEC", "PILNOSC"),
     (r"kilka dni temu", -2, "HAMULEC", "PILNOSC"),
 ]
+
+# ===========================================================================
+# WZORCE NIEZALEŻNE OD JĘZYKA
+#
+# Trzy rzeczy w tych postach wyglądają tak samo po polsku, niemiecku, czesku
+# i słowacku: kod pocztowy, marka auta i nazwa domu aukcyjnego. Trzymanie ich
+# w każdym słowniku osobno znaczyłoby cztery kopie tej samej listy i trzy
+# miejsca do zapomnienia przy dopisaniu marki — a zapomniana kopia nie daje
+# ŻADNEGO objawu, tylko cicho gubi punkty w jednym języku.
+#
+# Dlatego stoją TU, raz, i `_zbuduj_slownik` dokleja je do punktacji KAŻDEGO
+# słownika. Kod pocztowy jest osobno (jak numer telefonu), bo nie jest frazą
+# — liczy się nie samo trafienie, tylko ILE ich jest w treści.
+# ===========================================================================
+
+# MARKI (+3). Na giełdzie post prawie nigdy nie mówi „samochód osobowy" — mówi
+# „Citroena C5", „Opel Meriva", „iveco solówka". Bez marek taki post trafiał
+# najwyżej w AKCJĘ i kończył z trójką przy progu pięć.
+#
+# Waga WYŻSZA niż ogólne „auto" (+2), bo marka jest sygnałem mocniejszym: słowo
+# „auto" pada też w reklamie warsztatu i w ogłoszeniu o pracę, a „Berlingo
+# z kodu 18556" pada w zleceniu.
+MARKI: list[tuple[str, int, str]] = [
+    (r"citroen[a-z]*", 3, "POJAZD"),
+    (r"opel[a-z]*|opla|oplem|oplu", 3, "POJAZD"),
+    (r"iveco", 3, "POJAZD"),
+    (r"mercedes[a-z]*", 3, "POJAZD"),
+    (r"volkswagen[a-z]*|vw", 3, "POJAZD"),
+    (r"renault[a-z]*", 3, "POJAZD"),
+    (r"ford[a-z]*", 3, "POJAZD"),
+    (r"audi", 3, "POJAZD"),
+    (r"bmw", 3, "POJAZD"),
+    (r"skod[aeyu]", 3, "POJAZD"),
+    (r"fiat[a-z]*", 3, "POJAZD"),
+    (r"peugeot[a-z]*", 3, "POJAZD"),
+    (r"toyot[aeyu]", 3, "POJAZD"),
+    (r"nissan[a-z]*", 3, "POJAZD"),
+]
+
+# ŹRÓDŁO AUTA (+2) — dom aukcyjny, komis, autohaus. Sygnał słabszy od marki
+# i dlatego niższa waga: sam „komis" bywa też w reklamie komisu. Ale w parze
+# z czymkolwiek innym („Opel Meriva … Copart Buddingen") domyka post do progu.
+ZRODLA_AUT: list[tuple[str, int, str]] = [
+    (r"copart", 2, "ZRODLO"),
+    (r"autohaus[a-z]*", 2, "ZRODLO"),
+    # Pusta alternatywa zamiast „*": „komis[a-z]*" trafiałoby w „komisariat"
+    # i „komisję" (patrz nota o prawej granicy przy `_skompiluj`).
+    (r"komis(u|ie|em|ow|y|)", 2, "ZRODLO"),
+    (r"aukcj[a-z]*", 2, "ZRODLO"),
+    # Warianty obcojęzyczne tej samej rzeczy — lista jest wspólna, więc nie ma
+    # powodu, żeby czeski „autobazar" albo niemiecki „Auktion" jej nie widziały.
+    (r"aukc[ei][a-z]*", 2, "ZRODLO"),
+    (r"auktion[a-z]*", 2, "ZRODLO"),
+    (r"autobazar[a-z]*", 2, "ZRODLO"),
+    (r"dom aukcyjny", 2, "ZRODLO"),
+]
+
+# KODY POCZTOWE. Dwa różne kody w jednej treści to praktycznie definicja trasy
+# — i jedyny sygnał, jaki niosą posty telegraficzne („z kodu 18556 … 63-505"),
+# w których nie ma ani czasownika, ani nazwy miasta znanej słownikowi.
+#
+# Formaty czterech rynków naraz: PL „38-400", DE/FR/IT/ES pięć cyfr, AT/BE/DK/NL
+# cztery, CZ/SK „110 00". Świadomie SZEROKO — ta reguła wyłącznie DODAJE punkty,
+# więc jej fałszywe trafienie (rok „2009" wzięty za kod belgijski) kosztuje
+# ułamek grosza za pytanie do modelu, a fałszywy brak kosztuje kurs.
+#
+# Lewy lookaround dopuszcza „-", żeby zadziałało niemieckie „D-64354"; prawy go
+# NIE dopuszcza, bo inaczej numer telefonu pisany „48-123-456" rozpadałby się na
+# kody. Litera po prawej też blokuje trafienie — „2009r" to rok, nie kod.
+_KOD_POCZTOWY = re.compile(
+    r"(?<![0-9a-z])(?:[0-9]{2}-[0-9]{3}|[0-9]{3} [0-9]{2}|[0-9]{4,5})(?![0-9a-z-])"
+)
+WAGA_DWA_KODY = 4
+
+
+def kody_pocztowe(tekst: str) -> list[str]:
+    """Kody pocztowe z treści ZNORMALIZOWANEJ, bez powtórzeń, w kolejności.
+
+    Powtórzenia liczymy po formie BEZ separatorów: „97-400" i „97400" to ten sam
+    kod zapisany dwa razy, a nie trasa. Bez tego post powtarzający jeden adres
+    w dwóch zapisach dostawałby +4 za trasę, której nie ma.
+    """
+    widziane: set[str] = set()
+    wynik: list[str] = []
+    for kod in _KOD_POCZTOWY.findall(tekst):
+        klucz = kod.replace("-", "").replace(" ", "")
+        if klucz in widziane:
+            continue
+        widziane.add(klucz)
+        wynik.append(kod)
+    return wynik
+
+
+# ---------------------------------------------------------------------------
+# ZWIERZĘTA — KATEGORIA ŁADUNKU, NIE ODRZUCENIE
+#
+# Te giełdy mieszają transport aut z transportem koni i zwierząt gospodarskich.
+# Operator zwierząt NIE wozi, ale post o koniu NIE JEST śmieciem — jest kursem
+# spoza jego oferty, a to są dwie różne rzeczy i tylko jedną z nich wolno tej
+# bramce kasować. Zasada naczelna repo: system pokazuje zlecenia, decyduje
+# kierowca. Twarde odrzucenie zabrałoby mu tę decyzję i skasowało dane, których
+# nikt nie odtworzy — a gdyby kiedyś doszła przyczepa do koni albo chęć
+# podnajmowania takich kursów dalej, historia musi już być w bazie.
+#
+# Stąd ta tabela NIE MA WAGI (zero) i nie stoi w żadnej z czterech warstw.
+# Odpowiada na osobne pytanie: co miałoby jechać.
+#
+# WZORCE SĄ WĄSKIE CELOWO. „kon" bez granicy słowa łapałoby „kontakt",
+# „konkurencję" i „koniec" — czyli oznaczałoby jako transport zwierząt połowę
+# postów o lawetach. Granice dokłada `_skompiluj`, ale alternatywy piszemy tak,
+# żeby żadna nie kończyła się fragmentem częstego słowa.
+#
+# JEDNA KOLIZJA JEST NIE DO ROZSTRZYGNIĘCIA: „źrebak" i „zrębak" (rębak do
+# gałęzi, realny ładunek dla lawety) po normalizacji to ten sam ciąg „zrebak".
+# Zostawiamy go w tabeli, bo transport koni jest tu problemem realnym, a rębak
+# — hipotetycznym; skutkiem pomyłki jest znacznik i brak brzęczenia, nie
+# zniknięcie zlecenia z panelu.
+# ---------------------------------------------------------------------------
+ZWIERZETA: list[tuple[str, int, str]] = [
+    # Konie — najczęstszy przypadek na tych grupach, w komplecie odmian.
+    #
+    # PUSTA ALTERNATYWA NA KOŃCU, A NIE „?" — i to jest tu warunek działania,
+    # nie stylistyka. `_skompiluj` dokłada prawą granicę słowa TYLKO wzorcom
+    # kończącym się literą, cyfrą albo domknięciem grupy; wzorzec kończący się
+    # kwantyfikatorem mówi „tu może być ciąg dalszy" i granicy nie dostaje.
+    # `kon(...)?` bez granicy trafiał w „KONtakt", „KONkurencję" i „KONieczna",
+    # czyli oznaczałby jako transport zwierząt połowę grupy o lawetach.
+    (r"kon(ia|iu|ie|i|iem|iami|mi|)", 0, "ZWIERZE"),
+    (r"koniowo[zs][a-z]*", 0, "ZWIERZE"),
+    (r"walach[a-z]*", 0, "ZWIERZE"),
+    (r"klacz[a-z]*", 0, "ZWIERZE"),
+    (r"ogier[a-z]*", 0, "ZWIERZE"),
+    (r"zrebak[a-z]*|zrebi(e|ec|eta|at)[a-z]*", 0, "ZWIERZE"),
+    (r"kucyk[a-z]*", 0, "ZWIERZE"),
+    # Gospodarskie.
+    (r"osiol[a-z]*|osla|oslem|oslami", 0, "ZWIERZE"),
+    (r"krow[aeyu]|krowami", 0, "ZWIERZE"),
+    (r"byk|byka|bykiem|bykow", 0, "ZWIERZE"),
+    (r"ciel(e|ak|aka|eta|at)", 0, "ZWIERZE"),
+    (r"owc[aeyu]|owiec", 0, "ZWIERZE"),
+    # Kolejność alternatyw też nie jest dowolna: wariant z „*" musi stać PRZED
+    # zwykłym, żeby cały wzorzec kończył się literą i dostał prawą granicę —
+    # inaczej „koz[ae]" trafiałoby w „kozaki".
+    (r"kozl[a-z]*|koz[ae]|kozami", 0, "ZWIERZE"),
+    (r"stado|stada|stadem", 0, "ZWIERZE"),
+    # „transport zwierząt" i „przewóz zwierząt" NIE mają tu osobnych wpisów —
+    # pokrywa je sam rzeczownik, a martwy wzorzec w tabeli jest gorszy niż jego
+    # brak (wygląda na zabezpieczenie, którego nie ma).
+    (r"zwierz(e|eta|at|etami|akow|aki)", 0, "ZWIERZE"),
+    # Obcojęzyczne warianty tej samej rzeczy — tabela jest wspólna dla wszystkich
+    # słowników, a „Pferdetransport" znaczy dokładnie to samo co „transport koni".
+    (r"pferd[a-z]*", 0, "ZWIERZE"),
+    (r"tiertransport[a-z]*", 0, "ZWIERZE"),
+    (r"kobyl[a-z]*|kone|kun", 0, "ZWIERZE"),
+]
+
+# Wartości kolumny `kategoria_ladunku` — trzy i tylko trzy. Stałe, a nie gołe
+# stringi, bo tę samą wartość czyta panel, powiadomienia i SQL.
+KAT_POJAZD = "pojazd"
+KAT_ZWIERZE = "zwierze"
+KAT_INNE = "inne"
+
 
 # ===========================================================================
 # WIELOJĘZYCZNOŚĆ
@@ -840,13 +1050,18 @@ HAMULCE_WARUNKOWE_CS_SK: list[tuple[str, int, str, str]] = [
 
 def _zbuduj_slownik(jezyk: str, wygaszenie, przepuszczenie, odrzucenie,
                     punktacja, hamulce, hamulce_warunkowe) -> Slownik:
-    """Kompilacja RAZ, przy imporcie — bramka stoi na ścieżce każdego posta."""
+    """Kompilacja RAZ, przy imporcie — bramka stoi na ścieżce każdego posta.
+
+    MARKI i ŹRÓDŁA AUT dokładamy TUTAJ, a nie w każdej liście z osobna: „Citroen"
+    i „Copart" znaczą to samo we wszystkich czterech językach, a cztery kopie
+    tej samej listy to trzy miejsca do zapomnienia przy dopisaniu marki.
+    """
     return Slownik(
         jezyk=jezyk,
         wygaszenie=_skompiluj_liste(wygaszenie),
         przepuszczenie=_skompiluj_liste(przepuszczenie),
         odrzucenie=_skompiluj_liste(odrzucenie),
-        punktacja=_skompiluj_liste(punktacja),
+        punktacja=_skompiluj_liste([*punktacja, *MARKI, *ZRODLA_AUT]),
         hamulce=_skompiluj_liste(hamulce),
         hamulce_warunkowe=[(_skompiluj(w), waga, etykieta, kat)
                            for w, waga, etykieta, kat in hamulce_warunkowe],
@@ -895,6 +1110,67 @@ def _rozne_slowniki() -> list[tuple[str, Slownik]]:
         widziane.add(id(slownik))
         wynik.append((znacznik, slownik))
     return wynik
+
+
+# ---------------------------------------------------------------------------
+# KATEGORIA ŁADUNKU — co miałoby jechać na lawecie
+#
+# ODPOWIEDŹ JEST NIEZALEŻNA OD WERDYKTU i liczona osobno, poza czterema
+# warstwami. Powód jest praktyczny: warstwy 1-3 kończą pracę natychmiast po
+# trafieniu, więc post przepuszczony przez „szukam transportu" NIGDY nie
+# dochodzi do punktacji i nie ma z czego odczytać, czy chodziło o auto, czy
+# o konia. Kategoria musi działać na KAŻDEJ ścieżce, także tej najkrótszej.
+#
+# Wzorce pojazdu bierzemy z PUNKTACJI wszystkich słowników (etykieta „POJAZD"),
+# a nie z osobnej listy — inaczej dopisanie marki w jednym miejscu zmieniałoby
+# punkty, ale nie kategorię, i po pół roku te dwie listy mówiłyby co innego.
+# ---------------------------------------------------------------------------
+_ZWIERZETA = _skompiluj_liste(ZWIERZETA)
+
+_WZORCE_POJAZDU: list[re.Pattern[str]] = [
+    wzorzec
+    for _znacznik, slownik in _rozne_slowniki()
+    for wzorzec, _waga, etykieta in slownik.punktacja
+    if etykieta == "POJAZD"
+]
+
+
+def _kategoria(tekst: str) -> tuple[str, list[str]]:
+    """Kategoria ładunku + ślad, na treści JUŻ znormalizowanej.
+
+    ZWIERZĘ BIJE POJAZD i to nie jest przeoczenie: „potrzebny transport busem
+    jednego konia" mówi o obu naraz, bo pojazd jest tu ŚRODKIEM transportu,
+    a nie ładunkiem. Odwrotna kolejność oznaczałaby taki post jako „pojazd"
+    i cały ten mechanizm byłby ozdobnikiem.
+
+    Ślad wraca razem z kategorią, bo operator patrzący na wyszarzone zlecenie
+    ma prawo wiedzieć, KTÓRE słowo je tak oznaczyło — inaczej znacznik „zwierzę"
+    przy transporcie rębaka wygląda na awarię, a nie na trafioną literówkę
+    języka polskiego.
+
+    „inne" ZNACZY „nie rozpoznałem słowa oznaczającego pojazd", a nie „to nie
+    jest pojazd" — i nic w systemie nie traktuje go inaczej niż „pojazd".
+    Jedyną wartością, która cokolwiek zmienia, jest „zwierze"; pozostałe dwie
+    są informacją dla człowieka i materiałem do statystyki.
+    """
+    for wzorzec, _waga, etykieta in _ZWIERZETA:
+        if wzorzec.search(tekst):
+            return KAT_ZWIERZE, [_etykieta(etykieta, wzorzec)]
+    for wzorzec in _WZORCE_POJAZDU:
+        if wzorzec.search(tekst):
+            return KAT_POJAZD, []
+    return KAT_INNE, []
+
+
+def kategoria_ladunku(tresc: str) -> str:
+    """Kategoria ładunku dla SUROWEJ treści — "pojazd" | "zwierze" | "inne".
+
+    Publiczna, bo pyta o nią `scripts/raport_gate.py` — liczy kategorię z TREŚCI,
+    więc odpowiada także dla wierszy sprzed migracji 0010, w których kolumna jest
+    pusta. `gate()` woła wariant wewnętrzny, żeby nie normalizować tej samej
+    treści drugi raz.
+    """
+    return _kategoria(normalizuj(tresc))[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1337,14 @@ class GateResult:
     # zależy, w jakim języku operator ma oddzwonić — a wszystkie pozostałe pola
     # alertu są już po polsku, więc sam post tego nie zdradzi.
     jezyk: str = "pl"
+    # CO miałoby jechać: "pojazd" | "zwierze" | "inne". NIE wpływa ani na
+    # `werdykt`, ani na `punkty` — post o koniach przechodzi bramkę tak samo jak
+    # każdy inny. Zmienia tylko to, co widać w panelu (znacznik i miejsce na
+    # liście) oraz czy brzęczy telefon (ALERT_ZWIERZETA w .env).
+    #
+    # Domyślne "inne", a nie "pojazd": wynik zbudowany ręcznie (test, skrypt) nie
+    # oglądał treści, więc nie ma prawa twierdzić, że widział auto.
+    kategoria_ladunku: str = KAT_INNE
 
 
 def _etykieta(nazwa: str, wzorzec: re.Pattern[str], waga: int = 0) -> str:
@@ -1114,6 +1398,17 @@ def _ocen(tekst: str, oryginal: str, slownik: Slownik, prog: int
         punkty += 1
         kategorie.add("KONTAKT")
         trafienia.append("KONTAKT:numer telefonu(+1)")
+    # DWA RÓŻNE KODY POCZTOWE = TRASA. Waga wyższa niż jakiegokolwiek pojedynczego
+    # słowa (+4), bo para kodów jest w tych postach praktycznie definicją kursu —
+    # i bywa JEDYNYM sygnałem, gdy autor napisał samo „z 18556 do 63-505".
+    # Liczone tu, a nie w tabeli wzorców, bo warunkiem jest LICZBA trafień,
+    # a nie trafienie — tak samo jak przy numerze telefonu wyżej.
+    kody = kody_pocztowe(tekst)
+    if len(kody) >= 2:
+        punkty += WAGA_DWA_KODY
+        kategorie.add("TRASA")
+        trafienia.append(
+            f"TRASA:dwa kody pocztowe ({', '.join(kody[:2])})({WAGA_DWA_KODY:+d})")
     for wzorzec, waga, etykieta in slownik.hamulce:
         if wzorzec.search(tekst):
             punkty += waga
@@ -1134,8 +1429,21 @@ def _rozstrzygnij(wynik: tuple, wykryty: str) -> tuple:
 
     PRZEPUSZCZENIE bije wszystko — jeden słownik widzący zlecenie wystarczy,
     bo ułamek grosza za niepotrzebne pytanie modelu jest nieporównywalny
-    z kursem straconym przez odrzucenie. Wśród przepuszczeń wygrywa wyższa
-    punktacja (więcej sygnału), a przy remisie — słownik zgodny z detekcją.
+    z kursem straconym przez odrzucenie.
+
+    WŚRÓD PRZEPUSZCZEŃ NAJPIERW NAZWANA REGUŁA (warstwy 1-3), potem wyższa
+    punktacja, na końcu zgodność z detekcją. Kolejność tych dwóch pierwszych
+    kryteriów jest odwrotna niż w pierwszej wersji i to jest poprawka realnego
+    błędu: wzorce NIEZALEŻNE OD JĘZYKA (marki, kody pocztowe) punktują w KAŻDYM
+    słowniku, więc polski „Do zabrania iveco … do 08-110 siedlce" wygrywał
+    słownikiem NIEMIECKIM — polskie twarde przepuszczenie ma z definicji zero
+    punktów, a niemiecki dokładał marce i kodom siódemkę. Skutek widział
+    operator: flaga 🇩🇪 przy polskim zleceniu, czyli podpowiedź, żeby zadzwonić
+    po niemiecku (docs/WIELOJEZYCZNOSC.md), i „punktacja 7 >= prog" w raporcie
+    zamiast nazwy reguły, która naprawdę zadziałała.
+
+    Trafienie w nazwaną regułę jest przy tym MOCNIEJSZYM sygnałem niż suma wag:
+    znaczy „ten słownik rozpoznał tu zgłoszenie", a nie „nazbierało się punktów".
 
     WŚRÓD ODRZUCEŃ wygrywa uzasadnienie NAJBARDZIEJ KONKRETNE: najpierw to,
     w którym zadziałała nazwana reguła, potem NIŻSZA punktacja. Odwrotnie niż
@@ -1144,14 +1452,17 @@ def _rozstrzygnij(wynik: tuple, wykryty: str) -> tuple:
     informację, z której da się kalibrować próg; ta sama reklama odrzucona przez
     słownik polski jako „punktacja 0 < prog 5" nie niesie żadnej.
     """
-    werdykt, punkty, _powod, trafienia, znacznik = wynik
+    werdykt, punkty, powod, trafienia, znacznik = wynik
     zgodny_z_detekcja = 1 if (wykryty and znacznik == wykryty) else 0
+    # „punktacja …" to jedyny powód, którego NIE wystawia nazwana reguła —
+    # składa go `_ocen` z sumy wag (patrz koniec tamtej funkcji).
+    nazwana_regula = 0 if powod.startswith("punktacja") else 1
     # Oba warianty mają tę samą długość, żeby porównanie nigdy nie zależało od
     # kolejności argumentów (krotki różnej długości porównują się poprawnie
     # tylko dopóki różnią się wcześniej — a to jest założenie, które łatwo
     # złamać przy kolejnej zmianie kryteriów).
     if werdykt:
-        return (1, punkty, 0, zgodny_z_detekcja)
+        return (1, nazwana_regula, punkty, zgodny_z_detekcja)
     return (0, 1 if trafienia else 0, -punkty, zgodny_z_detekcja)
 
 
@@ -1216,6 +1527,12 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
     if znacznik in ("cs", "sk"):
         znacznik = _wariant_cs_sk(oryginal)
 
+    # Kategoria ładunku liczona NIEZALEŻNIE od tego, która warstwa rozstrzygnęła
+    # i który słownik wygrał — wzorce zwierząt są wspólne dla wszystkich języków,
+    # a post o koniu przepuszczony przez warstwę 2 nigdy nie dojdzie do punktacji.
+    kategoria, slad = _kategoria(tekst)
+    trafienia = [*trafienia, *slad]
+
     return GateResult(
         przepusc=True if tryb == TRYB_CIEN else werdykt,
         punkty=punkty,
@@ -1224,6 +1541,7 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
         werdykt=werdykt,
         tryb=tryb,
         jezyk=znacznik,
+        kategoria_ladunku=kategoria,
     )
 
 
@@ -1237,13 +1555,14 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
 # ---------------------------------------------------------------------------
 SQL_ZAPIS = """
 UPDATE posty SET
-    gate_werdykt   = %(gate_werdykt)s,
-    gate_punkty    = %(gate_punkty)s,
-    gate_powod     = %(gate_powod)s,
-    gate_trafienia = %(gate_trafienia)s,
-    gate_tryb      = %(gate_tryb)s,
-    gate_jezyk     = %(gate_jezyk)s,
-    gate_at        = NOW()
+    gate_werdykt      = %(gate_werdykt)s,
+    gate_punkty       = %(gate_punkty)s,
+    gate_powod        = %(gate_powod)s,
+    gate_trafienia    = %(gate_trafienia)s,
+    gate_tryb         = %(gate_tryb)s,
+    gate_jezyk        = %(gate_jezyk)s,
+    kategoria_ladunku = %(kategoria_ladunku)s,
+    gate_at           = NOW()
 WHERE fb_id = %(fb_id)s
 """
 
@@ -1260,6 +1579,12 @@ def wiersz_do_zapisu(wynik: GateResult, fb_id: str) -> dict[str, object]:
         # Znacznik języka jedzie do bazy razem z werdyktem, bo powiadomienie
         # bierze go stamtąd — a nie liczy jeszcze raz z treści.
         "gate_jezyk": wynik.jezyk or None,
+        # Kategoria ładunku też jedzie do bazy, i to jest cały sens rozdzielenia
+        # jej od odrzucenia: post o transporcie konia ZOSTAJE w tabeli razem
+        # z powodem, dla którego jest wyszarzony. Twarde odrzucenie kasowałoby
+        # tę informację bezpowrotnie i bez śladu — a gdyby operator dokupił
+        # przyczepę do koni, dane potrzebne do decyzji już tu czekają.
+        "kategoria_ladunku": wynik.kategoria_ladunku or None,
     }
 
 
@@ -1318,6 +1643,9 @@ def _main(argv: list[str]) -> int:
     # się wtedy ze słownika, który wytłumaczył post najlepiej.
     print(f"JĘZYK:          {w.jezyk or '—'}"
           f"   (detekcja: {wykryty or 'nierozstrzygnięta, liczę wszystkimi słownikami'})")
+    print(f"ŁADUNEK:        {w.kategoria_ladunku}"
+          + ("   (idzie do panelu ze znacznikiem i NIŻEJ na liście; alert tylko "
+             "przy ALERT_ZWIERZETA=1)" if w.kategoria_ladunku == KAT_ZWIERZE else ""))
     print(f"PUNKTY:         {w.punkty}"
           + (f"  (prog {args.prog if args.prog is not None else settings.GATE_PROG})"
              if w.powod.startswith("punktacja") else ""))
