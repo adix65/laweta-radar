@@ -299,14 +299,47 @@ i przestanie istnieć — to jest awaria całkowita, tylko rozłożona na dni.
 **muszą** to pokazać, i pokazują:
 
 - w alercie — znak zapytania przy nazwie i jedno słowo ostrzeżenia
-  („Nowa Wies? (niepewne)"), a przy braku dopasowania „(nierozpoznane)" i `? km`;
+  („Nowa Wies? (niepewne)"), a przy braku dopasowania „(nierozpoznane)"
+  i **„trasa nieustalona"** zamiast kilometrów;
 - w panelu — pasek nad kilometrami z **surową treścią miejsca z posta**
   (`odbior_raw`), bo ostrzeżenie bez niej mówi „nie ufaj", nie dając czym to
-  sprawdzić.
+  sprawdzić. Pasek patrzy na **oba końce trasy**, nie tylko na odbiór.
 
 Cicho podana zła liczba kilometrów wysyła lawetę nie tam, a dowiadujesz się
 o tym po godzinie jazdy — dlatego geokoder ma prawo powiedzieć „nie wiem",
 ale nie ma prawa zgadnąć po cichu.
+
+### Dystans i wycena tylko z DWÓCH znanych punktów
+
+`km_trasy` i `szacunek_pln` są **NULL-em**, gdy którykolwiek koniec trasy jest
+nierozpoznany — a panel i alert piszą wtedy „trasa nieustalona", **bez żadnej
+liczby**. Pod brakujący punkt nie podstawia się nic: ani baza operatora, ani
+stawka minimalna.
+
+Skąd ta zasada. Post: „transport mikrosamochodu Aixam z Dębicy do Turku,
+62-700. Trasa ma około 490 km". Dębica rozpoznana, Turku nie ma w bazie — a
+panel pokazał **„60 km, ~250 zł"**, bo w miejsce nieznanej trasy wchodził dojazd
+z bazy operatora (Krosno→Dębica to dokładnie te 60 km), a z niego wycena.
+Kierowca odrzuca wtedy kurs na pół Polski, patrząc na cenę lokalnego skoku.
+Zła liczba jest tu gorsza niż jej brak: brak widać, złej liczby nie.
+
+`km_od_bazy` liczy się dalej — to osobna, prawdziwa liczba (baza→odbiór) i wolno
+ją pokazać **wyłącznie pod własną etykietą** („dojazd z bazy"). Nigdy w miejscu
+długości kursu i nigdy jako podstawa wyceny.
+
+### „wg autora: 490 km"
+
+Gdy autor podaje odległość wprost, wyciągamy ją z treści (`geo.km_wg_autora`)
+i pokazujemy **osobno, z podpisem** — obok naszych kilometrów, nigdy zamiast
+nich i nigdy jako podstawa wyceny. Autor zna trasę lepiej niż nasz geokoder,
+ale to nadal liczba z cudzego posta, której nikt nie sprawdził; rozjazd „60 km"
+vs „490 km" jest przy okazji jedynym sygnałem, że któryś punkt złapaliśmy źle.
+
+Liczba musi mieć obok słowo o trasie („trasa", „dystans", „odległość",
+„w jedną stronę") i nie mieć słowa o przebiegu — inaczej „przebieg 190 tys km"
+z każdego drugiego posta wjechałby na ekran jako długość kursu. Wynik jest
+`int`-em z zakresu realnych tras, więc na ekran nie przechodzi żaden fragment
+cudzego tekstu.
 
 ### API i bot
 
@@ -837,6 +870,9 @@ Trzy rzeczy, które w tym module są decyzją, a nie szczegółem:
   filtruje, a `kalkulacja()` jest etykietą na ekranie, nie bramką i nie wyceną
   (dystans liczymy Haversine razy 1,25 — to szacunek do przesiewu, nie na
   fakturę).
+- **Oba punkty albo nic.** Brakujący koniec trasy zeruje `km_trasy` **i**
+  `szacunek_pln`; `kalkulacja(None)` oddaje dwa NULL-e, a nie stawkę minimalną.
+  Dojazd z bazy nie zastępuje nieznanej trasy — patrz sekcja o dystansie wyżej.
 
 Formaty kodów pocztowych są tu **jednym źródłem prawdy dla całego repo**:
 klasyfikator pyta `geo.czy_kod_pocztowy()`, zamiast trzymać własną listę.
