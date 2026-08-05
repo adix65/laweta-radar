@@ -528,6 +528,29 @@ Pięć, i są nienegocjowalne — reszta kodu na nich stoi:
    chodzą z crona: wyjątek to awaria powtarzana co kilka minut, a niezerowy kod
    wyjścia zapycha skrzynkę do momentu, w którym prawdziwa awaria nie ma jak się
    przebić. Brak tokenu to nie awaria — to system, którego jeszcze nie włączono.
+
+   **Ale „czyste wyjście" należy się WYŁĄCZNIE brakom blokującym start.** Braki
+   dzielą się na dwie klasy (`config/settings.py`):
+
+   | klasa | zmienne | reakcja |
+   |---|---|---|
+   | blokujące start | `DATABASE_URL` | bez bazy nie ma czego pokazywać |
+   | degradujące | klucz modelu, Telegram, `API_TOKEN`, klucze Apify | podsystem milczy, reszta działa |
+
+   Degradujący brak **nie ma prawa zatrzymać procesu**. Klasyfikator jest jednym
+   z kilku podsystemów: bez klucza modelu fetcher dalej zbiera posty do bazy,
+   bramka dalej punktuje, panel dalej pokazuje zebrane, a Telegram dalej dowozi.
+   API wstaje wtedy normalnie, `/health` wypisuje braki w polu `braki`, a status
+   brzmi `niepelna_konfiguracja` — i to jest stan **poprawny**, nie awaria.
+   Proces kończący się na braku opcjonalnego klucza daje pod PM2 pętlę restartów
+   ze statusem `errored`: w logach wygląda jak awaria kodu, a jest brakiem jednej
+   linijki w `.env`.
+
+   **Krytyczny jest wyłącznie klucz AKTYWNEGO providera** (`LLM_PROVIDER`):
+   `anthropic` → `ANTHROPIC_API_KEY`, `openai` → `OPENAI_API_KEY` **oraz**
+   niepusty `OPENAI_MODEL`, `gemini` → `GEMINI_API_KEY`. Klucze pozostałych są
+   opcjonalne — ich brak pojawia się najwyżej jako informacja („porównanie modeli
+   obejmie 1 z 3 providerów"), nigdy jako powód zatrzymania.
 4. **Zero sekretów w logach.** Proxy logujemy jako `host:port`, hasła maskujemy,
    tokeny skracamy do czterech ostatnich znaków.
 
@@ -573,6 +596,13 @@ curl -s localhost:8002/health | python -m json.tool
 `/health` odpowiada **zawsze 200**, także gdy konfiguracja jest niepełna — kod mówi
 „API żyje", a treść mówi, co jest zepsute. Traktowanie niewłączonego systemu jak
 awarii mieszałoby dwie zupełnie różne sytuacje.
+
+Braki wychodzą w polu `braki`, rozdzielone na `blokujace_start` i `degradujace`,
+razem ze `skutki` — zdaniem o tym, co przez dany brak nie działa. Płaska lista
+stawiała brak `DATABASE_URL` obok nieużywanego klucza nieaktywnego providera,
+więc nie dało się z niej odczytać jedynej rzeczy, po którą się tu przychodzi:
+czy system ma z czego żyć. Tę samą linię wypisuje API przy starcie, żeby dało się
+ją znaleźć w `pm2 logs` bez odpytywania endpointu.
 
 ### Zanim cokolwiek pobierze
 

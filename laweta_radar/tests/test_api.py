@@ -173,6 +173,84 @@ def test_zdrowie_i_health_bez_tokenu():
 
 
 # ---------------------------------------------------------------------------
+# Niepełna konfiguracja to NIE jest awaria API
+#
+# Sedno regresji: brak klucza modelu kładł API, PM2 podnosiło je z powrotem
+# i proces stawał w pętli restartów ze statusem `errored`. W logach wyglądało
+# to na awarię kodu, a było brakiem jednej linijki w .env — czyli objaw kierował
+# w najgorsze możliwe miejsce. Klasyfikator jest jednym z kilku podsystemów:
+# bez niego fetcher dalej zbiera do bazy, bramka dalej punktuje, panel dalej
+# pokazuje zebrane, a Telegram dalej dowozi.
+# ---------------------------------------------------------------------------
+def test_api_wstaje_bez_klucza_modelu_i_raportuje_braki(monkeypatch):
+    """KRYTERIUM ODBIORU: pusty klucz modelu = API wstaje i mówi, czego brakuje."""
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    # Baza JEST — inaczej test nie odróżniłby braku klucza od braku bazy, czyli
+    # dokładnie tego rozróżnienia, którego pilnuje.
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql://x@localhost/laweta")
+
+    # `with` odpala `lifespan`, czyli tę samą ścieżkę startową, którą wykonuje
+    # uvicorn pod PM2 — test bez niego nie sprawdziłby tego, o co tu chodzi.
+    with TestClient(app) as swiezy:
+        odp = swiezy.get("/health")
+
+    assert odp.status_code == 200
+    dane = odp.json()
+    assert dane["status"] == "niepelna_konfiguracja"
+    assert "ANTHROPIC_API_KEY" in dane["braki"]["degradujace"]
+    assert dane["braki"]["blokujace_start"] == []
+    # Skutek, nie sama nazwa: „czy mogę z tym żyć do jutra" to jedyne pytanie,
+    # które ktoś zadaje temu endpointowi o trzeciej w nocy.
+    assert dane["braki"]["skutki"]["ANTHROPIC_API_KEY"]
+
+
+def test_health_oddziela_brak_blokujacy_od_degradujacego(monkeypatch):
+    """Płaska lista stawiała brak bazy obok nieużywanego klucza providera.
+
+    Z takiej listy nie da się odczytać jedynej rzeczy, po którą się tu
+    przychodzi: czy system w ogóle ma z czego żyć.
+    """
+    monkeypatch.setattr(settings, "DATABASE_URL", "")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+
+    braki = klient.get("/health").json()["braki"]
+    assert braki["blokujace_start"] == ["DATABASE_URL"]
+    assert "ANTHROPIC_API_KEY" in braki["degradujace"]
+    assert "DATABASE_URL" not in braki["degradujace"]
+
+
+def test_health_nie_zglasza_klucza_nieuzywanego_providera(monkeypatch):
+    """Instalacja na OpenAI nie ma się dowiadywać o brak klucza Anthropic.
+
+    Jego brak wolno pokazać najwyżej jako informację o zasięgu porównania
+    modeli — nigdy jako brak konfiguracji.
+    """
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-dziala")
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5-mini")
+
+    dane = klient.get("/health").json()
+    assert "ANTHROPIC_API_KEY" not in dane["braki"]["degradujace"]
+    assert "ANTHROPIC_API_KEY" not in dane["braki"]["blokujace_start"]
+    assert dane["klasyfikator"]["provider"] == "openai"
+    assert "z 3 providerów" in dane["klasyfikator"]["porownanie_modeli"]
+
+
+def test_zdrowie_nie_alarmuje_o_kluczu_nieuzywanego_providera(monkeypatch):
+    """`awaria` budzi człowieka w nocy — pusta linijka w .env nie ma prawa jej wywołać."""
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-dziala")
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5-mini")
+
+    powody = klient.get("/zdrowie").json()["powody"]
+    assert not any("ANTHROPIC_API_KEY" in p for p in powody)
+
+
+# ---------------------------------------------------------------------------
 # Lista
 # ---------------------------------------------------------------------------
 def test_lista_liczy_geografie_po_stronie_api(monkeypatch):
