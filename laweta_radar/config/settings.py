@@ -88,12 +88,63 @@ def _float(name: str, default: float) -> float:
 DATABASE_URL = _txt("DATABASE_URL")
 
 # ---------------------------------------------------------------------------
-# Klasyfikator (Anthropic). Model trzymamy w konfiguracji, bo przy zmianie
-# progu jakość/koszt chcemy go podmienić bez deployu — a nie dlatego, że
-# spodziewamy się częstych zmian.
+# Klasyfikator. Model trzymamy w konfiguracji, bo przy zmianie progu
+# jakość/koszt chcemy go podmienić bez deployu — a nie dlatego, że spodziewamy
+# się częstych zmian.
+#
+# LLM_PROVIDER przełącza CAŁĄ implementację wołania modelu (services/llm.py),
+# nie tylko nazwę. Istnieje z powodu pomiarowego: jakości ekstrakcji z polskiego
+# posta bez ogonków nie da się odczytać z żadnego benchmarku, więc mierzymy ją
+# na swoich danych (scripts/porownaj_modele.py). Nieznana wartość degraduje do
+# "anthropic" — jedynego providera, którego zależność jest w requirements.txt.
+#
+# Model per provider, a nie jeden wspólny, bo porównywarka odpala WSZYSTKIE
+# skonfigurowane naraz i musi wiedzieć, co puścić na każdym.
 # ---------------------------------------------------------------------------
 ANTHROPIC_API_KEY = _txt("ANTHROPIC_API_KEY")
 CLASSIFIER_MODEL = _txt("CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
+
+LLM_PROVIDER = _txt("LLM_PROVIDER", "anthropic")
+OPENAI_API_KEY = _txt("OPENAI_API_KEY")
+# BEZ WARTOŚCI DOMYŚLNEJ — świadomie. Nazwy modeli tej rodziny zmieniają się co
+# kilka miesięcy, a domyślna w kodzie znaczyłaby, że po wpisaniu samego klucza
+# system odpala model, którego nikt nie wybrał, i płaci stawkę, której nikt nie
+# sprawdzał. Pusto = `llm.problemy("openai")` mówi wprost, czego brakuje.
+OPENAI_MODEL = _txt("OPENAI_MODEL")
+GEMINI_API_KEY = _txt("GEMINI_API_KEY")
+GEMINI_MODEL = _txt("GEMINI_MODEL", "gemini-2.5-flash")
+
+# --- OpenAI: różnice API, których nie da się schować w jednej implementacji ---
+#
+# OPENAI_JSON_MODE — "off" | "object" | "schema". Opis trybów i ich PUŁAPKI
+# (tryb JSON gwarantuje kształt, NIE prawdziwość wartości) stoi przy
+# `services/llm._response_format`. Domyślne "object" wymusza poprawny JSON bez
+# narzucania schematu.
+OPENAI_JSON_MODE = _txt("OPENAI_JSON_MODE", "object")
+# Nakład rozumowania (`reasoning_effort`). PUSTE = nie wysyłamy parametru wcale.
+# Dopuszczalne wartości ZALEŻĄ OD MODELU (bywa "none", "minimal", "low"...),
+# więc żadnej nie zgadujemy: model, który tego parametru nie przyjmie, dostanie
+# wywołanie bez niego i podniesiony limit tokenów (services/llm.py).
+OPENAI_REASONING = _txt("OPENAI_REASONING")
+# Rola pierwszej wiadomości: "system" (zgodne wstecz) albo "developer" (nazwa
+# używana przez nowsze modele). Anthropic bierze prompt systemowy osobnym
+# parametrem i ta zmienna go nie dotyczy.
+OPENAI_ROLA_SYSTEMOWA = _txt("OPENAI_ROLA_SYSTEMOWA", "system")
+# Sufit czasu jednego wywołania. Trzydzieści sekund to dużo jak na ekstrakcję
+# z jednego posta — wywołanie, które tyle trwa, i tak jest już spóźnione wobec
+# konkurencji, a wisząca sesja blokuje resztę przebiegu.
+OPENAI_TIMEOUT_S = _int("OPENAI_TIMEOUT_S", 30)
+
+# Stawki modeli spoza wbudowanego cennika — JSON
+# {"model": [usd_wejscie, usd_wyjscie]} albo [..., usd_cache] za MILION tokenów.
+# Wbudowane ceny siedzą w config/cennik.py razem z datą sprawdzenia; ta zmienna
+# jest po to, żeby dopisać model bez deployu. Pusto = raport pokaże koszt jako
+# nieznany, i to jest poprawna odpowiedź, dopóki nikt nie sprawdził cennika.
+CENNIK_EXTRA = _txt("CENNIK_EXTRA")
+# Kurs do przeliczenia kosztu runu na złotówki. Wartość domyślna jest
+# ZAOKRĄGLONYM PLACEHOLDEREM — ustaw realny, jeśli liczba ma być czymś więcej
+# niż rzędem wielkości.
+KURS_USD_PLN = _float("KURS_USD_PLN", 4.00)
 
 # ---------------------------------------------------------------------------
 # Telegram — jedyny kanał dowozu do operatora. Brak tokenu wycisza alerty
@@ -108,9 +159,28 @@ TELEGRAM_CHAT_ID = _txt("TELEGRAM_CHAT_ID")
 # się odrzucić zlecenia z drugiego końca Polski, a takie zlecenie jest gorsze niż
 # brak zlecenia: operator traci czas na czytanie alertu, którego i tak nie weźmie.
 # ---------------------------------------------------------------------------
+# BAZA_LNG i BAZA_LON to ta sama rzecz — długość geograficzna. `LON` był tu od
+# pierwszej wersji .env, `LNG` przyszedł z zadania geo i jest formą, którą
+# ludzie kopiują z Map Google. Przyjmujemy OBIE zamiast wybierać jedną, bo
+# jedyny efekt wyboru byłby taki, że czyjaś działająca konfiguracja po cichu
+# przestaje działać i dystanse liczą się od równika.
 BAZA_LAT = _float("BAZA_LAT", 0.0)
-BAZA_LON = _float("BAZA_LON", 0.0)
+BAZA_LON = _float("BAZA_LNG", 0.0) or _float("BAZA_LON", 0.0)
+BAZA_LNG = BAZA_LON
+BAZA_NAZWA = _txt("BAZA_NAZWA", "Krosno")
+
+# UWAGA: ta zmienna NIE JEST bramką i nie wolno jej nią zrobić. Zasada naczelna
+# repo mówi: system pokazuje zlecenia, decyduje kierowca. Dystans jest etykietą
+# na ekranie — przy transporcie międzynarodowym „ile km od bazy" i tak nie znaczy
+# nic, bo liczy się długość kursu odbiór->dostawa (services/geo.py). Zmienna
+# została, bo pokazuje ją /health i bo służy do WYRÓŻNIENIA zleceń blisko bazy.
 MAX_DYSTANS_KM = _int("MAX_DYSTANS_KM", 80)
+
+# Stawki do etykiety „szacunek" przy zleceniu (services/geo.kalkulacja).
+# To ETYKIETA NA EKRANIE, nie wycena i nie bramka — nic się na jej podstawie
+# nie ukrywa ani nie odrzuca. Kierowca patrzy na liczbę i sam decyduje.
+STAWKA_ZA_KM = _float("STAWKA_ZA_KM", 4.0)
+STAWKA_MINIMALNA = _float("STAWKA_MINIMALNA", 250.0)
 
 # Po ilu godzinach post przestaje być zleceniem. Starszy trafia do bazy ze
 # znacznikiem `stale`, ale NIE budzi nikogo powiadomieniem i nie idzie do modelu.
@@ -172,6 +242,80 @@ GATE_PROG = _int("GATE_PROG", 5)
 GATE_TRYB = _txt("GATE_TRYB", "cien")
 
 # ---------------------------------------------------------------------------
+# POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
+# brzęczy telefon. ŻADEN z nich nie usuwa zlecenia z bazy ani z panelu; to jest
+# zasada naczelna repo i najłatwiejsza tutaj do złamania, bo „nie wysyłaj" i
+# „ukryj" wyglądają w kodzie podobnie.
+# ---------------------------------------------------------------------------
+# Poniżej tej pewności klasyfikatora zlecenie trafia do panelu BEZ powiadomienia.
+# Nie do kosza — do panelu. Czterdziestka jest niska celowo: alert o zleceniu,
+# którego model nie jest pewny, kosztuje trzy sekundy uwagi, a niewysłany alert
+# o realnym kursie kosztuje kurs.
+#
+# UWAGA NA DRUGI PRÓG: `workers/classifier.PROG_PEWNOSCI` (50) jest stałą MODUŁU
+# i służy jego własnemu `warto_budzic()` — podpowiedzi dla wołającego, nie decyzji.
+# JEDYNYM miejscem, które rozstrzyga, czy brzęczy telefon, jest
+# `services/powiadomienia.ocen()` i to ono czyta tę zmienną. Gdyby oba progi
+# rozstrzygały naraz, obowiązywałby ostrzejszy, a operator zmieniający
+# `MIN_PEWNOSC` w .env nie zobaczyłby żadnej różnicy i nie miałby jak się
+# dowiedzieć dlaczego.
+MIN_PEWNOSC = _int("MIN_PEWNOSC", 40)
+
+# Cisza nocna [OD, DO) w godzinach lokalnych. W tych godzinach nie brzęczymy —
+# wszystko z nocy idzie jednym zbiorczym podsumowaniem rano. Transport planowany
+# nie ucieka przez osiem godzin, a operator wyciszający bota po trzeciej nocnej
+# pobudce przestaje dostawać także te alerty, które były coś warte.
+CISZA_NOCNA_OD = _int("CISZA_NOCNA_OD", 22)
+CISZA_NOCNA_DO = _int("CISZA_NOCNA_DO", 6)
+
+# Twardy sufit powiadomień na godzinę. Po przekroczeniu leci JEDNA zbiorcza
+# wiadomość „jeszcze N zleceń w panelu" i cisza. Przekroczenie tego limitu prawie
+# zawsze znaczy, że coś się zepsuło w bramce albo w klasyfikatorze — system
+# wysyłający 40 alertów dziennie zostanie wyciszony po tygodniu i przestanie
+# istnieć, a to jest awaria całkowita, tylko rozłożona na dni.
+MAX_POWIADOMIEN_H = _int("MAX_POWIADOMIEN_H", 15)
+
+# Okno dedupu treściowego. Ten sam post crossowany do pięciu grup ma pięć różnych
+# fb_id (hash liczymy z treści, a treść bywa minimalnie inna), więc dedup po
+# identyfikatorze go nie złapie.
+DEDUP_OKNO_H = _int("DEDUP_OKNO_H", 6)
+
+# ---------------------------------------------------------------------------
+# API panelu — JEDEN użytkownik, jeden token w nagłówku. Świadomie bez ról,
+# bez sesji i bez OAuth: system ról dla jednej osoby to warstwa, która potrafi
+# się zepsuć, i zero bezpieczeństwa więcej.
+#
+# Puste = API odpowiada WYŁĄCZNIE na /health i /zdrowie, a każdy endpoint
+# z danymi zwraca 503. Nie 200 z pustą listą — brak tokenu to niedokończona
+# konfiguracja, a nie „brak zleceń".
+# ---------------------------------------------------------------------------
+API_TOKEN = _txt("API_TOKEN")
+
+# Adres panelu — wchodzi do powiadomienia jako link „Otwórz w panelu" i do
+# nagłówka CORS. Puste = przycisk się nie pojawia (lepiej niż link donikąd).
+PANEL_URL = _txt("PANEL_URL").rstrip("/")
+
+# ---------------------------------------------------------------------------
+# WEB PUSH (VAPID) — DRUGI kanał obok Telegrama, nigdy zamiennik.
+#
+# Puste klucze = push po prostu wyłączony i panel mówi to wprost. To jest stan
+# domyślny i całkowicie poprawny: Telegram dowozi sam, a push wymaga zgody
+# przeglądarki, obsługi po jej stronie, a na iOS dodania PWA do ekranu głównego
+# — czyli trzech warunków, z których każdy potrafi przestać być spełniony bez
+# żadnego objawu.
+#
+# Wygenerowanie pary kluczy (raz, na stałe):
+#   python -c "from py_vapid import Vapid01; v=Vapid01(); v.generate_keys(); \
+#     print(v.public_key_urlsafe_base64(), v.private_key_urlsafe_base64())"
+# ---------------------------------------------------------------------------
+VAPID_PUBLIC_KEY = _txt("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = _txt("VAPID_PRIVATE_KEY")
+# Adres kontaktowy wymagany przez specyfikację VAPID — dostawca push używa go,
+# gdy coś jest nie tak z ruchem z tego serwera. Bez niego część dostawców
+# odrzuca żądania.
+VAPID_KONTAKT = _txt("VAPID_KONTAKT", "mailto:admin@example.com")
+
+# ---------------------------------------------------------------------------
 # Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
 # `if not X` w workerach — dzięki temu komunikat o brakach jest wszędzie taki sam
 # i da się go wypisać CAŁY naraz, zamiast wychodzić po pierwszym brakującym
@@ -182,6 +326,8 @@ OPIS_ZMIENNYCH: dict[str, str] = {
     "ANTHROPIC_API_KEY": "klucz API Anthropic — bez niego klasyfikator nie ruszy",
     "TELEGRAM_BOT_TOKEN": "token bota od @BotFather",
     "TELEGRAM_CHAT_ID": "ID czatu operatora (bot musi tam być dodany)",
+    "API_TOKEN": ("token panelu — jeden użytkownik, nagłówek `X-Token`. "
+                  "Wygeneruj: python -c \"import secrets;print(secrets.token_urlsafe(32))\""),
     "APIFY_API_TOKEN1": ("klucz Apify — normalnie przychodzi ze WSPÓLNEGO .env "
                          "(SHARED_ENV_PATH), nie ustawiaj go tutaj bez powodu"),
 }
@@ -227,14 +373,24 @@ def opis_srodowiska() -> str:
     stan = {
         "db": bool(DATABASE_URL),
         "anthropic": bool(ANTHROPIC_API_KEY),
+        "openai": bool(OPENAI_API_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "baza_geo": bool(BAZA_LAT or BAZA_LON),
+        "api_token": bool(API_TOKEN),
     }
+    # Model TEGO providera, nie zawsze Anthropic — inaczej linia startowa przy
+    # LLM_PROVIDER=openai pokazywałaby model, który w tym przebiegu nie ruszy.
+    model_llm = {"openai": OPENAI_MODEL, "gemini": GEMINI_MODEL}.get(
+        LLM_PROVIDER.strip().lower(), CLASSIFIER_MODEL) or "(brak)"
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
-    ) + (f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
+    ) + (f", cisza_nocna={CISZA_NOCNA_OD}-{CISZA_NOCNA_DO}"
+         f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
+         f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
-         f", budzet={POSTY_NA_DOBE} postow/dobe"
+         f", llm={LLM_PROVIDER}/{model_llm}"
+         + (f"(json={OPENAI_JSON_MODE})" if LLM_PROVIDER.strip().lower() == "openai" else "")
+         + f", budzet={POSTY_NA_DOBE} postow/dobe"
          f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 

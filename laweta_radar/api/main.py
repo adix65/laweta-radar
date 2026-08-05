@@ -1,30 +1,56 @@
-"""API panelu — na razie sama diagnostyka: "czy ten system w ogóle jest włączony".
+"""API panelu: dane dla PWA (`panel/`) plus diagnostyka „czy to w ogóle chodzi".
 
-DLACZEGO to istnieje już teraz, zanim jest co pokazywać: pipeline chodzi z crona
-i milczy, gdy czegoś brakuje (taka jest zasada w tym repo — brak konfiguracji to
-czyste wyjście, nie wyjątek). Cisza jest wtedy poprawna, ale nie do odróżnienia od
-ciszy "nikt nic nie wrzucił na grupy". `/health` odpowiada na to jednym zapytaniem,
-bez wchodzenia na VPS i czytania logów PM2.
+TRZY GRUPY ENDPOINTÓW, TRZY RÓŻNE ODPOWIEDZI NA BRAK KONFIGURACJI:
 
-BEZPIECZEŃSTWO: nasłuch WYŁĄCZNIE na 127.0.0.1 (patrz `uvicorn.run` niżej i
-scripts/start_api.sh). Ten serwis nie ma autoryzacji — na zewnątrz wystawia go
-nginx, i to nginx odpowiada za dostęp. Nasłuch na 0.0.0.0 wystawiłby stan bazy
-i konfiguracji na goły internet.
+    /health, /zdrowie   BEZ tokenu, zawsze 200. To są endpointy, których
+                        potrzeba dokładnie wtedy, gdy konfiguracja jest zepsuta
+                        — 503 z powodu złego `API_TOKEN` czyniłoby je
+                        bezużytecznymi w jedynej sytuacji, do której powstały.
+    /zlecenia, /statystyki   WYMAGAJĄ tokenu (`X-Token`). Wychodzą stąd numery
+                        telefonów obcych ludzi z grup FB, a adres panelu jest
+                        publiczny, bo PWA musi być dostępna z telefonu.
 
-Odpowiedzi NIE niosą sekretów: tylko "ustawione/BRAK" (patrz
+BEZPIECZEŃSTWO: nasłuch WYŁĄCZNIE na 127.0.0.1 (patrz `uvicorn.run` niżej
+i scripts/start_api.sh). Na zewnątrz wystawia to nginx z TLS-em i to on odpowiada
+za dostęp; token jest drugą warstwą, nie jedyną. Nasłuch na 0.0.0.0 wystawiłby
+bazę zleceń na goły internet niezależnie od tokenu.
+
+Odpowiedzi diagnostyczne NIE niosą sekretów: tylko "ustawione/BRAK" (patrz
 config/settings.opis_srodowiska) — endpoint diagnostyczny jest pierwszym miejscem,
 przez które wyciekają tokeny, bo wygląda niewinnie.
 """
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from laweta_radar.api.routers import push, statystyki, zdrowie, zlecenia
 from laweta_radar.config import groups, settings
+from laweta_radar.services import geo, llm
 
 app = FastAPI(
     title="Laweta Radar",
     description="Monitoring grup FB pod kątem zleceń dla lawety.",
 )
+
+# CORS wyłącznie dla adresu panelu z `.env`. Świadomie BEZ `allow_origins=["*"]`:
+# API oddaje cudze numery telefonów, a gwiazdka znaczy, że dowolna strona
+# otwarta na telefonie operatora może je odczytać jego tokenem. Puste
+# `PANEL_URL` = zero dozwolonych źródeł, czyli panel serwowany z tej samej
+# domeny co API (przez nginx) — i to jest układ domyślny, w którym CORS
+# w ogóle nie wchodzi w grę.
+if settings.PANEL_URL:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.PANEL_URL],
+        allow_methods=["GET", "PATCH", "OPTIONS"],
+        allow_headers=["X-Token", "Content-Type"],
+    )
+
+app.include_router(zlecenia.router)
+app.include_router(statystyki.router)
+app.include_router(zdrowie.router)
+app.include_router(push.router)
 
 
 def _stan_bazy() -> dict:
@@ -82,9 +108,20 @@ def health() -> dict:
             "do_pobrania": len(groups.grupy_do_pobrania()),
             "wszystkich": len(groups.FB_GRUPY),
         },
+        # Klasyfikator i geo mają własne warunki startu, których nie widać
+        # w `brakujace_zmienne`: brakującą paczkę providera i brakujący plik
+        # z kodami pocztowymi. Obie awarie są CICHE — system wstaje, nie woła
+        # modelu albo nie pokazuje tras, i nic o tym nie mówi.
+        "klasyfikator": {
+            "provider": llm.normalizuj_provider(settings.LLM_PROVIDER),
+            "model": llm.model_domyslny(),
+            "gotowy": not llm.problemy(),
+            "problemy": llm.problemy(),
+        },
         "geo": {
             "baza_ustawiona": bool(settings.BAZA_LAT or settings.BAZA_LON),
             "max_dystans_km": settings.MAX_DYSTANS_KM,
+            "kody": geo.stan_bazy(),
         },
         # Klucze Apify nie należą do tego repo — przychodzą ze wspólnego .env
         # sales-core-engine. Bez tej sekcji „brak kluczy Apify" wyglądałoby na

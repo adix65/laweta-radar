@@ -160,21 +160,59 @@ odpowiadający w ~20% prób — a rendezvous hashing kierował przez ten jeden w
 nalicza. **Pula, której nikt nie odświeża, jest gorsza niż jej brak**, a plik
 leżący na dysku wygląda w logu identycznie w obu przypadkach.
 
-Dlatego:
-
-- nie ustawiaj `APIFY_PROXY_POOL=1`,
-- nie dopisuj wpisu odświeżania do crona,
-- generatora puli świadomie **nie przenieśliśmy** (patrz „Czego tu nie ma").
-
 `APIFY_PROXY_POOL*` jest też celowo **wykluczone z dziedziczenia** ze wspólnego
 `.env` — gdyby ktoś włączył pulę w sales-core-engine, nie włączy jej tutaj po
 cichu.
 
 Kod czytający plik puli został w module nietknięty (jest kopią 1:1) i zadziała,
-jeśli ktoś świadomie ustawi `APIFY_PROXY_POOL=1` i `APIFY_PROXY_POOL_FILE`.
+jeśli świadomie ustawisz `APIFY_PROXY_POOL=1` i `APIFY_PROXY_POOL_FILE`.
 Format: `{"updated_at": "<ISO8601>", "proxies": [{"url": "...", "apify_ok": true}]}`,
-brane są wyłącznie wpisy z `apify_ok: true`. Zanim to zrobisz, przeczytaj akapit
-wyżej jeszcze raz.
+brane są wyłącznie wpisy z `apify_ok: true`.
+
+#### Generator: `scripts/odswiez_proxy.py`
+
+Zdanie „pula, której nikt nie odświeża, jest gorsza niż jej brak" ma drugą
+połowę: **pulę odświeżaną da się w ogóle rozważać.** Generator pobiera publiczną
+listę z GitHuba (domyślnie
+[proxifly/free-proxy-list](https://github.com/proxifly/free-proxy-list)),
+sprawdza KAŻDY adres i zapisuje wyłącznie te, przez które realnie doszedł do
+`api.apify.com`.
+
+```bash
+python laweta_radar/scripts/odswiez_proxy.py --sucho      # plan, bez sieci
+python laweta_radar/scripts/odswiez_proxy.py              # pobierz i zweryfikuj
+python laweta_radar/scripts/odswiez_proxy.py --limit 200  # szybciej, na próbę
+```
+
+Weryfikacja idzie **TLS-em do api.apify.com i bez żadnego klucza**. Poprawny
+handshake z certyfikatem Apify dowodzi, że doszliśmy tam naprawdę; brak klucza
+znaczy, że przez cudze proxy nie leci nic wrażliwego. Odpowiedź `401` jest
+sukcesem — pytanie brzmi „czy dojdę", nie „czy mnie wpuszczą". To rozróżnienie
+jest sednem: „proxy żyje" i „proxy dochodzi do Apify" to dwie różne rzeczy,
+a w puli liczy się wyłącznie druga.
+
+**Zrób najpierw jeden przebieg i spójrz na liczbę.** Pomiar wyżej (0 z 411) to
+nie jest wynik, który generator unieważnia — to jest wynik, który generator
+POKAZUJE, zamiast pozwolić mu gnić w pliku. Jeśli u ciebie wyjdzie podobnie,
+odpowiedź brzmi: płatne proxy (`APIFY_PROXY_URLS` / `APIFY_PROXY_URL`), nie
+częstszy cron.
+
+Cron ma sens **wyłącznie** razem z `APIFY_PROXY_POOL=1` — plik starszy niż
+`APIFY_PROXY_POOL_MAX_AGE_H` (domyślnie 6 h) worker i tak zgłasza jako stary:
+
+```cron
+17 */3 * * * cd /home/ubuntu/laweta-radar && ./venv/bin/python laweta_radar/scripts/odswiez_proxy.py >> /var/log/laweta/proxy.log 2>&1
+```
+
+Dwa zachowania, które są tu decyzją, a nie szczegółem:
+
+- **Brak sieci NIE czyści puli.** Nieudane pobranie listy zostawia stary plik
+  nietknięty i kończy kodem 1. Stara pula jest zła, ale pusta jest gorsza, gdy
+  powodem jest zerwane łącze, a nie martwe adresy.
+- **Zero działających adresów zapisuje pustą pulę**, jawnie, i też kończy kodem
+  1. To jest dokładnie ta sytuacja z pomiaru: pusta pula przy
+  `APIFY_PROXY_REQUIRED=1` zatrzymuje zbieranie, zamiast puścić komplet kont
+  przez jeden przeżyty wpis.
 
 **Uczciwie o darmowych adresach**, gdyby kusiło: żyją krótko, są współdzielone
 przez tysiące ludzi i część jest już spalona na popularnych serwisach. Psują też
@@ -279,11 +317,11 @@ python -m laweta_radar.workers.apify_proxy --check --limit 10
 
 Świadome pominięcia, żeby nikt ich nie szukał:
 
-- **Generatora darmowej puli proxy.** Moduł, który pobierał publiczną listę,
-  weryfikował adresy i zapisywał `.apify_proxy_pool.json`, nie został przeniesiony —
-  i nie ma być. Sama pula jest wyłączona (sekcja 4), więc generator bez niej nie ma
-  zastosowania, a jego obecność kusiłaby do odtworzenia wpisu w cronie, który
-  w repo źródłowym został świadomie usunięty.
+- ~~**Generatora darmowej puli proxy.**~~ Był tu pominięty świadomie; wrócił jako
+  `scripts/odswiez_proxy.py` (sekcja 4), bo pominięcie zostawiało tylko gorszą
+  z dwóch opcji: pulę bez odświeżania. Sama pula nadal jest **domyślnie
+  wyłączona** i nadal nie jest zalecana — zmieniło się to, że da się ją włączyć
+  świadomie, z odświeżaniem i z liczbą działających adresów przed oczami.
 - **Monitora kredytów Apify.** Osobny worker odpytujący saldo **wszystkich** kont
   (i cała rodzina `APIFY_CREDITS_*`) nadal nie jest przeniesiony i nadal nie ma
   być: poll wszystkich kont naraz z jednego adresu to dokładnie ten sygnał, przed

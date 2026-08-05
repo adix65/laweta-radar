@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/*
+ * TO JEST APLIKACJA UŻYWANA JEDNĄ RĘKĄ, NA POSTOJU, CZĘSTO W SŁOŃCU.
+ * Każda wartość niżej wynika z tego zdania, a nie z gustu.
+ *
+ * CIEMNY MOTYW, ale nie „modny ciemny": tło #0A0A0B i tekst #FFFFFF to kontrast
+ * 20:1, czyli prawie trzy razy powyżej wymaganych 7:1. W pełnym słońcu ekran
+ * telefonu traci realny kontrast kilkukrotnie i dopiero taki zapas daje tekst,
+ * który da się przeczytać bez zasłaniania ekranu ręką.
+ *
+ * DWA ROZMIARY ROBOCZE I ANI JEDNEGO WIĘCEJ:
+ *   --text-liczba  duże, do km i zł — te ogląda się z odległości ramienia
+ *   --text-opis    małe, do wszystkiego innego
+ * Trzeci krój znaczy trzecią decyzję przy każdym nowym elemencie, a każda taka
+ * decyzja to szansa, że coś ważnego dostanie rozmiar czegoś nieważnego.
+ */
+@theme {
+  --color-tlo: #0a0a0b;
+  --color-karta: #17171a;
+  --color-karta-akcent: #202024;
+  --color-obrys: #33333a;
+  --color-tekst: #ffffff;
+  /* Tekst drugorzędny: #B8B8C0 na #0A0A0B daje 10.9:1. Typowe "szare" #888
+     dałoby 5.4:1 i wypadłoby poniżej progu — a to jest kolor opisów, czyli
+     tego, co się czyta, gdy liczba nie wystarcza. */
+  --color-tekst-cichy: #b8b8c0;
+
+  /* Kolory pilności dobrane pod ciemne tło i pod daltonizm czerwono-zielony:
+     różnią się nie tylko odcieniem, ale i jasnością. Kolor jest zawsze
+     DODATKIEM do etykiety tekstowej, nigdy jedyną informacją. */
+  --color-pilne: #ff453a;
+  --color-dzis: #ffd60a;
+  --color-planowane: #30d158;
+  --color-biore: #30d158;
+  --color-smiec: #ff453a;
+  --color-ostrzezenie: #ff9f0a;
+
+  --text-liczba: 2rem;
+  --text-liczba--line-height: 1.05;
+  --text-liczba--font-weight: 700;
+  --text-opis: 0.9375rem;
+  --text-opis--line-height: 1.4;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: var(--color-tlo);
+  color: var(--color-tekst);
+  /* Jeden font zmienny. `Inter var` gdy jest w systemie, inaczej systemowy —
+     świadomie BEZ pobierania webfontu: panel ma wstać w miejscu bez zasięgu,
+     a font z sieci znaczy albo tekst niewidoczny do czasu pobrania, albo
+     przeskok układu w momencie, w którym operator już czyta. */
+  font-family: "Inter var", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, system-ui, sans-serif;
+  font-size: var(--text-opis);
+  /* Cyfry o stałej szerokości: kilometry i złotówki przeskakują przy każdym
+     odświeżeniu listy, jeśli „1" jest węższa od „8". */
+  font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: contain;
+}
+
+body {
+  /* Miejsce na dolny pasek nawigacji + safe area iPhone'a. Bez tego ostatnia
+     karta listy chowa się pod przyciskami dokładnie wtedy, gdy jest najświeższa. */
+  padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+/*
+ * MINIMALNA WYSOKOŚĆ ELEMENTU DOTYKOWEGO: 56 px.
+ * Rekomendacje mówią 44-48; tutaj jest 56, bo to nie jest dotyk kciukiem
+ * w spokoju — to dotyk w rękawicy, na mrozie, przy uruchomionym silniku.
+ */
+.dotyk {
+  min-height: 56px;
+  min-width: 56px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  /* Bez podświetlenia systemowego — mamy własne :active, a dwa naraz migają. */
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+/* Reakcja na dotyk MUSI być natychmiastowa i widoczna. Brak potwierdzenia =
+   operator klika drugi raz, a przy „Śmieć" drugie kliknięcie to problem. */
+.dotyk:active {
+  transform: scale(0.97);
+  filter: brightness(1.25);
+}
+
+/* Widoczny fokus dla nawigacji klawiaturą — panel bywa otwierany na laptopie
+   przy rozliczaniu miesiąca. */
+:focus-visible {
+  outline: 3px solid var(--color-tekst);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
