@@ -330,6 +330,29 @@ MAX_POWIADOMIEN_H = _int("MAX_POWIADOMIEN_H", 15)
 DEDUP_OKNO_H = _int("DEDUP_OKNO_H", 6)
 
 # ---------------------------------------------------------------------------
+# PODGLĄD TRASY W ALERCIE (services/mapa.py) — obrazek zamiast samych nazw miast.
+#
+# 1 (domyślnie) = gdy OBA punkty trasy udało się zgeokodować, alert idzie jako
+#                 zdjęcie z mapą, a dotychczasowa treść jako podpis. Przyciski
+#                 bez zmian.
+# 0             = alerty tekstowe, dokładnie jak przed tą funkcją.
+#
+# WŁĄCZONE NIE ZNACZY „NA PEWNO BĘDZIE OBRAZEK". Rysowanie wymaga paczki
+# `staticmap`, która jest OPCJONALNA (jak `pywebpush`, patrz requirements.txt) —
+# bez niej moduł mówi to raz w logu i alerty lecą tekstem. Tak samo kończy się
+# nierozpoznany punkt, wyjątek przy generowaniu i przekroczenie 5 s: obrazek
+# jest dodatkiem i nigdy nie może być powodem, dla którego zlecenie nie dotarło.
+MAPY_W_ALERTACH = _int("MAPY_W_ALERTACH", 1)
+
+# Rozmiar obrazka w pikselach. 700x450 mieści się na ekranie telefonu bez
+# przewijania i przy typowej trasie pokazuje nazwy krajów oraz główne miasta.
+# Wartości spoza zakresu 200-1600 moduł przycina i mówi o tym w logu: MAPA_W
+# z literówki to kilkaset pobranych kafelków na jeden alert, czyli dokładnie to
+# zachowanie, przez które OpenStreetMap blokuje IP.
+MAPA_W = _int("MAPA_W", 700)
+MAPA_H = _int("MAPA_H", 450)
+
+# ---------------------------------------------------------------------------
 # API panelu — JEDEN użytkownik, jeden token w nagłówku. Świadomie bez ról,
 # bez sesji i bez OAuth: system ról dla jednej osoby to warstwa, która potrafi
 # się zepsuć, i zero bezpieczeństwa więcej.
@@ -620,7 +643,11 @@ def opis_srodowiska() -> str:
          # koniu" jest pytaniem, na które inaczej nie ma odpowiedzi bez czytania
          # kodu. Zlecenie JEST w panelu niezależnie od tej wartości.
          f", alert_zwierzeta={'tak' if ALERT_ZWIERZETA else 'nie (tylko panel)'}"
-         f", llm={provider}/{model_llm}"
+         # „Czemu alert przyszedł bez mapy" ma mieć odpowiedź w linii startowej,
+         # a nie dopiero w kodzie: albo wyłączone w .env, albo brak `staticmap`
+         # (to drugie mówi raz services/mapa.py, przy pierwszym alercie).
+         + (f", mapy={MAPA_W}x{MAPA_H}" if MAPY_W_ALERTACH else ", mapy=nie")
+         + f", llm={provider}/{model_llm}"
          + (f"(json={OPENAI_JSON_MODE})" if provider == "openai" else "")
          # Literówka w LLM_PROVIDER degraduje po cichu do domyślnego — ma być
          # WIDOCZNA, bo inaczej operator czyta linię startową i widzi providera,

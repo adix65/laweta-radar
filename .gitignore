@@ -22,6 +22,9 @@ dist/
 # Pula proxy: żyje godziny i każdy VPS ma własną. Nie ma czego commitować.
 .apify_proxy_pool.json
 .apify_proxy_pool.json.tmp
+# Obrazki tras pod alertami (services/mapa.py). Kafelki są cudze i pobrane,
+# a wpisy same kasują się po 7 dniach — to stan maszyny, nie kod.
+laweta_radar/.mapy_cache/
 # Ślad po przerwanym zapisie data/kandydaci_grupy.csv (zapis jest atomowy: tmp
 # + podmiana nazwy, patrz scripts/znajdz_grupy.py). SAM plik .csv jest
 # wersjonowany świadomie — siedzi w nim ręczna weryfikacja grup, patrz data/README.md.

@@ -30,6 +30,15 @@ często zza kierownicy:
 
     [ Trasa w mapach ] [ Otwórz post ] [ Śmieć ]
 
+Gdy OBA punkty trasy udało się zgeokodować, całość idzie jako ZDJĘCIE z mapą
+trasy, a powyższa treść jako podpis pod nim (services/mapa.py). „Żulte →
+Jędrzejów, 1180 km" mówi wszystko o długości kursu i nic o tym, GDZIE ta trasa
+leży, a przy decyzji „brać czy nie" liczy się rzut oka na jej kształt. Przyciski,
+progi, dedup i limity są przy tym BEZ ZMIAN — zmienia się jedna rzecz: metoda
+Bot API. Obrazek jest dodatkiem i nigdy nie może być powodem, dla którego
+zlecenie nie dotarło: każda ścieżka, na której coś z nim nie wychodzi, kończy
+się zwykłym `sendMessage` (patrz `_wyslij_alert`).
+
 Cztery zasady redakcyjne, każda kosztowała konkretny błąd:
 
   - PIERWSZA LINIA TO TRZY LICZBY I NIC WIĘCEJ. Pilność, dystans, szacunek.
@@ -94,7 +103,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from laweta_radar.config import settings
-from laweta_radar.services import geo, telegram_notify
+from laweta_radar.services import geo, mapa, telegram_notify
 # Bramka jest modułem CZYSTYM (bez bazy, bez sieci, bez zależności od services),
 # więc import w tę stronę nie robi cyklu. Bierzemy stąd nazwy kategorii ładunku
 # zamiast przepisywać stringi: „zwierze" wpisane z palca w drugim pliku rozjeżdża
@@ -108,6 +117,13 @@ KTO = "powiadomienia"
 # na ekranie telefonu bez przewijania — a cytat, do którego trzeba przewinąć,
 # przestaje pełnić swoją funkcję (sprawdzenie modelu jednym rzutem oka).
 MAX_CYTAT = 200
+
+# Najkrótszy cytat, który jeszcze do czegoś służy. Poniżej tego progu nie da się
+# sprawdzić, czy model dobrze odczytał markę auta ani czy nie zgubił „nie" przy
+# „nie odpala" — a to jest jedyny powód, dla którego cytat w ogóle jest w alercie.
+# Gdy podpis pod zdjęciem nie mieści treści bez zejścia poniżej, alert idzie
+# tekstem: obrazek jest dodatkiem, cytat nie.
+MIN_CYTAT_W_PODPISIE = 60
 
 # Ikona i etykieta pilności. Trzy poziomy, bo czwartego operator nie odróżni
 # w dwie sekundy. Nieznana wartość degraduje do „ZLECENIE" — brak etykiety jest
@@ -456,6 +472,51 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     return "\n".join(linie)
 
 
+def podpis_pod_zdjeciem(tresc: str, limit: int | None = None) -> str | None:
+    """Ta sama treść, ale zmieszczona w podpisie pod zdjęciem. None = nie da się.
+
+    PODPIS MA CZTEROKROTNIE NIŻSZY LIMIT NIŻ WIADOMOŚĆ (1024 vs 4096 znaków),
+    a Telegram odrzuca CAŁE wywołanie, gdy podpis go przekroczy — czyli
+    zlecenie nie dociera wcale. Dlatego treść przycinamy tutaj, świadomie,
+    zamiast liczyć na to, że się zmieści.
+
+    TNIEMY WYŁĄCZNIE CYTAT Z POSTA. Trasa, telefon, kilometry i wiek posta to
+    rzeczy, po których zapada decyzja — cytat jest kontrolą tego, czy model się
+    nie pomylił, i jako jedyny znosi skrócenie. Poniżej MIN_CYTAT_W_PODPISIE
+    przestaje ją pełnić, więc zamiast kadłubka oddajemy None: wołający wyśle
+    wtedy pełny alert tekstem, bez obrazka. Obrazek jest dodatkiem, cytat nie.
+    """
+    limit = telegram_notify.MAX_CAPTION if limit is None else limit
+    if len(tresc) <= limit:
+        return tresc
+
+    linie = tresc.split("\n")
+    # Cytat to jedyna linia w cudzysłowie (patrz `zbuduj_tresc`).
+    numer = next((i for i, w in enumerate(linie)
+                  if len(w) > 1 and w.startswith('"') and w.endswith('"')), None)
+    if numer is None:
+        return None
+
+    rdzen = linie[numer][1:-1]
+    zostaje = len(rdzen) - (len(tresc) - limit) - 1     # -1 na wielokropek
+    if zostaje < MIN_CYTAT_W_PODPISIE:
+        return None
+    skrocony = rdzen[:zostaje]
+    if " " in skrocony:
+        # Na granicy słowa — urwane w połowie wyrazu wygląda na błąd systemu,
+        # a nie na świadome skrócenie (ta sama zasada co w `_cytat`).
+        skrocony = skrocony.rsplit(" ", 1)[0]
+    # Wiszący backslash to połówka escape'u Markdowna rozcięta w środku
+    # (`\*` z `_escape_md`). Telegram zjadłby wtedy następny znak.
+    skrocony = skrocony.rstrip().rstrip("\\").rstrip()
+    if len(skrocony) < MIN_CYTAT_W_PODPISIE:
+        return None
+
+    linie[numer] = f'"{skrocony}…"'
+    podpis = "\n".join(linie)
+    return podpis if len(podpis) <= limit else None
+
+
 def zbuduj_przyciski(zlecenie: dict, pods: dict | None = None) -> list[list[dict]]:
     """Inline keyboard. Bez „Otwórz post" cała wiadomość jest bezużyteczna.
 
@@ -797,6 +858,11 @@ def powiadom_o_zleceniu(zlecenie: dict) -> bool:
     transport zwierząt, niska pewność, cisza nocna, przekroczony limit, awaria
     transportu. Każdy stoi w logu z nazwą.
 
+    Przy DWÓCH rozpoznanych punktach trasy alert idzie jako zdjęcie z mapą
+    (`_wyslij_alert`). Nie zmienia to ani decyzji o wysyłce, ani przycisków,
+    ani tego, co ląduje w bazie — w `powiadomienia.tresc` zapisujemy PEŁNĄ
+    treść, także wtedy, gdy podpis pod zdjęciem był przycięty.
+
     ŻADNA ze ścieżek tej funkcji nie usuwa niczego z bazy ani z panelu.
     """
     try:
@@ -842,7 +908,8 @@ def _powiadom(zlecenie: dict) -> bool:
         odbior, dostawa = punkty(zlecenie)
         pods = geo.podsumowanie(odbior, dostawa, zlecenie.get("tresc"))
         tresc = zbuduj_tresc(zlecenie, pods)
-        message_id = telegram_notify.wyslij(tresc, zbuduj_przyciski(zlecenie, pods))
+        message_id = _wyslij_alert(tresc, zbuduj_przyciski(zlecenie, pods),
+                                   odbior, dostawa)
         if message_id is None:
             # Transport zawiódł. NIE zapisujemy wiersza — inaczej dedup uznałby
             # zlecenie za obsłużone i alert nigdy by nie poszedł, mimo że nikt
@@ -865,6 +932,46 @@ def _powiadom(zlecenie: dict) -> bool:
             conn.close()
         except Exception:  # noqa: BLE001 — zamknięcie połączenia nie może przesłonić wyniku
             pass
+
+
+def _wyslij_alert(tresc: str, przyciski: list, odbior, dostawa) -> int | None:
+    """Zdjęcie z mapą trasy, a gdy się nie da — zwykła wiadomość jak dotąd.
+
+    JEDNA REGUŁA PONAD WSZYSTKIMI POZOSTAŁYMI: alert MUSI dojść. Obrazek jest
+    dodatkiem i każda ścieżka, na której coś z nim nie wychodzi, kończy się
+    `sendMessage` z pełną treścią — dokładnie tą, którą system wysyłał, zanim
+    mapy w ogóle powstały.
+
+    Powodów jest pięć i wszystkie są normalne:
+      - MAPY_W_ALERTACH=0 albo brak paczki `staticmap` (services/mapa.py),
+      - któryś punkt nierozpoznany — mapa z jednym punktem myli bardziej,
+        niż pomaga, więc `mapa.podglad_trasy` oddaje wtedy None,
+      - wyjątek albo przekroczenie 5 s przy generowaniu,
+      - treść nie mieści się w podpisie bez skasowania cytatu,
+      - Telegram nie przyjął zdjęcia (za duże, 429, zerwana sieć).
+
+    `except Exception` wokół CAŁEJ ścieżki obrazka, mimo że `mapa.podglad_trasy`
+    i `telegram_notify.wyslij_zdjecie` obiecują nie rzucać: obietnica dotyczy
+    dzisiejszego kodu tamtych modułów, a ta linia broni zlecenia operatora.
+    Ostatnia instrukcja tej funkcji ma się wykonać ZAWSZE.
+    """
+    try:
+        sciezka = mapa.podglad_trasy(odbior, dostawa)
+        if sciezka:
+            podpis = podpis_pod_zdjeciem(tresc)
+            if podpis is None:
+                _log("treść nie mieści się w podpisie pod zdjęciem — alert idzie tekstem")
+            else:
+                message_id = telegram_notify.wyslij_zdjecie(sciezka, podpis, przyciski)
+                if message_id is not None:
+                    return message_id
+                # Zdjęcie odrzucone, ale zlecenie nadal czeka na kierowcę.
+                _log("sendPhoto nie przeszło — powtarzam alert jako zwykły tekst")
+    except Exception as e:  # noqa: BLE001 — patrz docstring
+        _log(f"obrazek pominięty ({type(e).__name__}: {str(e)[:200]}) "
+             "— alert idzie tekstem")
+
+    return telegram_notify.wyslij(tresc, przyciski)
 
 
 def _obsluz_pominiecie(conn, fb_id: str, decyzja: Decyzja,
@@ -1144,9 +1251,15 @@ def _main(argv: list[str]) -> int:
     przyklad = dict(PRZYKLAD)
     przyklad["opublikowany_at"] = datetime.now(timezone.utc) - timedelta(minutes=4)
 
+    odbior, dostawa = punkty(przyklad)
+
     if tryb == "--probka":
+        # Przez `_wyslij_alert`, a nie prosto przez `wyslij`: próbka ma pokazać
+        # dokładnie to, co dostanie operator — łącznie z mapą trasy albo z jej
+        # brakiem. Próbka wysyłana inną drogą niż alert nie sprawdza tej drogi.
         tresc = zbuduj_tresc(przyklad)
-        ok = telegram_notify.wyslij(tresc, zbuduj_przyciski(przyklad)) is not None
+        ok = _wyslij_alert(tresc, zbuduj_przyciski(przyklad),
+                           odbior, dostawa) is not None
         print(f"Wysłano: {ok}")
         return 0 if ok else 1
 
@@ -1157,6 +1270,11 @@ def _main(argv: list[str]) -> int:
         print("  " + "  ".join(
             f"[ {p['text']} -> {p.get('url') or p.get('callback_data')} ]"
             for p in wiersz))
+    print()
+    # `--podglad` pokazuje TEŻ, czy pod alertem stanie mapa: „czemu przyszło bez
+    # obrazka" ma mieć odpowiedź bez czytania kodu i bez wysyłania czegokolwiek.
+    sciezka = mapa.podglad_trasy(odbior, dostawa)
+    print(f"--- mapa trasy: {sciezka or 'BRAK — alert pójdzie tekstem'}")
     print()
     print(settings.opis_srodowiska())
     return 0
