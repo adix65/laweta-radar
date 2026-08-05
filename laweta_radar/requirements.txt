@@ -20,7 +20,9 @@ pytest>=8.0.0            # testy offline (laweta_radar/tests/)
 # (scripts/porownaj_modele.py). Brak paczki daje CZYTELNY komunikat przy
 # starcie (`python -m laweta_radar.services.llm`), a nie ImportError w środku
 # runu — dlatego import każdego SDK jest leniwy i lista może zostać krótka.
-# openai>=1.40.0         # LLM_PROVIDER=openai
+# Testy repo przechodzą BEZ nich: ścieżka OpenAI jest testowana na atrapie
+# klienta, bo test wymagający SDK nie chodziłby w konfiguracji domyślnej.
+# openai>=1.40.0         # LLM_PROVIDER=openai (structured outputs od 1.40)
 # google-genai>=1.0.0    # LLM_PROVIDER=gemini
 
 # --- OPCJONALNE: web push z panelu (services/powiadomienia._wyslij_push) -----
