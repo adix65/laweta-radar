@@ -647,12 +647,14 @@ def test_wiersz_do_zapisu_pokrywa_sie_z_sql():
     assert wiersz["ai_model"] == "claude-haiku-4-5-20251001"
 
 
-def test_kolumna_ai_zlecenie_jest_kontraktem_z_raportem_bramki():
-    """Raport bramki liczy macierz pomyłek po TEJ nazwie kolumny.
+def test_werdykt_modelu_ma_jedno_zrodlo_i_raport_zna_je_z_zapisu():
+    """Raport bramki czyta werdykt modelu STĄD, z pary, którą zapisuje zapis.
 
-    Zmiana nazwy tutaj cicho psuje raport z trybu cienia: pokaże rozkład
-    punktów zamiast fałszywych odrzuceń i nikt nie zauważy, że brakuje jedynej
-    liczby, dla której ten raport istnieje.
+    Wcześniej stał na osobnej kolumnie `ai_zlecenie` — nazwie, której żadna
+    ścieżka zapisu nie wypełniała, więc macierz pomyłek w każdym przebiegu
+    mówiła „BRAK DANYCH" i nie dało się stwierdzić, czy bramka gubi zlecenia.
+    Ten test pilnuje, żeby obie strony nazywały tę samą rzecz tak samo:
+    rozjazd tutaj wraca dokładnie do tamtego objawu.
     """
     import importlib.util
     import re
@@ -664,4 +666,23 @@ def test_kolumna_ai_zlecenie_jest_kontraktem_z_raportem_bramki():
     spec.loader.exec_module(raport)
 
     kolumny_w_sql = set(re.findall(r"^\s*(\w+)\s*=\s*%\(", c.SQL_ZAPIS, re.MULTILINE))
-    assert raport.KOLUMNA_AI_DOMYSLNA in kolumny_w_sql
+    assert set(raport.KOLUMNY_WERDYKTU) <= kolumny_w_sql, (
+        f"raport czyta {set(raport.KOLUMNY_WERDYKTU) - kolumny_w_sql}, "
+        f"a zapis tego nie ustawia")
+    # I ta sama nazwa w wartościach, nie tylko w SQL-u — bo to `wiersz_do_zapisu`
+    # decyduje, co realnie wejdzie pod placeholder.
+    wiersz = c.wiersz_do_zapisu(c.zwaliduj({"czy_zlecenie": True}), "fb1")
+    assert wiersz["czy_zlecenie"] is True
+    assert wiersz["zrodlo_decyzji"] == "ai"
+
+
+def test_martwa_kolumna_ai_zlecenie_nie_wraca_do_zapisu():
+    """`ai_zlecenie` jest MARTWA (0009_werdykt_modelu.sql) i ma taka zostać.
+
+    Dopisanie jej z powrotem do zapisu odtwarza dwa źródła prawdy o jednym
+    werdykcie — a wtedy pierwsza ścieżka, która wypełni tylko jedno z nich,
+    znów cicho rozjedzie raport.
+    """
+    wiersz = c.wiersz_do_zapisu(c.zwaliduj({"czy_zlecenie": True}), "fb1")
+    assert "ai_zlecenie" not in wiersz
+    assert "ai_zlecenie" not in c.SQL_ZAPIS

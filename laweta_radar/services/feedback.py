@@ -57,7 +57,13 @@ def zapisz(conn, fb_id: str, ocena: str) -> bool:
                        -- model nie wypełnił: przykład treningowy z piętnastoma
                        -- nullami czyta się gorzej niż z trzema realnymi wartościami.
                        jsonb_strip_nulls(jsonb_build_object(
-                           'czy_zlecenie',  p.ai_zlecenie,
+                           -- Werdykt MODELU, nie decyzja operacyjna: `czy_zlecenie`
+                           -- jest NOT NULL i przy poście odrzuconym przez bramkę
+                           -- niesie `false`, którego model nigdy nie powiedział.
+                           -- Przykład treningowy z cudzym werdyktem uczy prompt
+                           -- czegoś, czego prompt nie zrobił.
+                           'czy_zlecenie',  CASE WHEN p.zrodlo_decyzji = 'ai'
+                                                 THEN p.czy_zlecenie END,
                            'typ',           p.typ,
                            'odbior',        jsonb_strip_nulls(jsonb_build_object(
                                                 'raw', p.odbior_raw,

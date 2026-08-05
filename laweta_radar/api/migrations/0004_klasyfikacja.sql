@@ -27,9 +27,13 @@
 -- =============================================================================
 
 ALTER TABLE posty
-    -- Werdykt SAMEGO MODELU. Nazwa `ai_zlecenie` jest KONTRAKTEM
-    -- z scripts/raport_gate.py (KOLUMNA_AI_DOMYSLNA) — to na niej stoi macierz
-    -- pomyłek bramki, więc nie zmieniaj jej bez --kolumna-ai.
+    -- UWAGA: TA KOLUMNA JEST MARTWA — patrz 0009_werdykt_modelu.sql.
+    -- Rozumowanie poniżej jest prawdziwe o samej kolumnie `czy_zlecenie`
+    -- i nieprawdziwe o tabeli: `zrodlo_decyzji` z 0003 już odróżnia „model
+    -- powiedział: nie" od „modelu nie pytano", więc werdykt modelu to
+    -- `czy_zlecenie` przy `zrodlo_decyzji='ai'`. Kolumny nikt nigdy nie
+    -- wypełnił i nikt jej już nie czyta; zostaje tylko po to, żeby nie kasować
+    -- kolumny na działającej bazie. Nowego kodu na niej NIE stawiaj.
     --
     -- DLACZEGO OSOBNO OD `czy_zlecenie` z 0003: tamta jest NOT NULL DEFAULT
     -- false i niesie decyzję OPERACYJNĄ — bramka odrzuciła, model odrzucił,

@@ -31,12 +31,12 @@ def wiersz(*, werdykt=True, punkty=0, powod="prosba wprost", ai=None, tresc="pos
             "tryb": "cien", "ai": ai}
 
 
-def _wypisz(wiersze, prog=5, kolumna_ai="ai_zlecenie", limit=50) -> str:
+def _wypisz(wiersze, prog=5, ma_werdykt=True, limit=50) -> str:
     """Uruchom raport i przechwyć to, co zobaczy człowiek."""
     buf, stary = io.StringIO(), sys.stdout
     sys.stdout = buf
     try:
-        raport._raport(wiersze, prog, kolumna_ai, limit)
+        raport._raport(wiersze, prog, ma_werdykt, limit)
     finally:
         sys.stdout = stary
     return buf.getvalue()
@@ -117,8 +117,23 @@ def test_zgoda_dopiero_przy_zerze_i_duzej_probce():
 def test_brak_kolumny_ai_nie_udaje_zera_pomylek():
     """Najgroźniejszy możliwy fałsz tego raportu: "0 fałszywych odrzuceń", bo
     nie było z czym porównywać. Ma powiedzieć wprost, że nie wie."""
-    out = _wypisz([wiersz(werdykt=False, powod="wygaszone")] * 300, kolumna_ai=None)
+    out = _wypisz([wiersz(werdykt=False, powod="wygaszone")] * 300, ma_werdykt=False)
     assert "NIEDOSTĘPNA" in out and "NIEPEŁNY" in out
+    assert "MOŻNA PRZEŁĄCZYĆ" not in out
+
+
+def test_kolumny_sa_ale_zaden_post_nie_ma_werdyktu_modelu():
+    """Kolumny są, macierz pusta — to NIE to samo co brak migracji.
+
+    Ta gałąź istnieje po to, żeby wskazać drugą możliwą przyczynę: klasyfikator
+    przeszedł, a jego wynik nie dojechał do bazy. Dokładnie tak wyglądał raport,
+    zanim fetcher zaczął zapisywać komplet pól — i właśnie dlatego bug przeżył
+    cały przebieg niezauważony.
+    """
+    out = _wypisz([wiersz(werdykt=True, ai=None)] * 30, ma_werdykt=True)
+    assert "BRAK DANYCH" in out
+    assert "zrodlo_decyzji='ai'" in out
+    assert "OSTRZEŻENIE" in out          # gdzie szukać, gdy to jednak utrata wyniku
     assert "MOŻNA PRZEŁĄCZYĆ" not in out
 
 
