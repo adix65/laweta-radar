@@ -54,12 +54,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Skrypt leży w laweta_radar/scripts/, a nie jest modułem pakietu — celowo, bo to
-# narzędzie jednorazowe, nie część systemu. Dorzucamy katalog repo do ścieżki, żeby
-# `python laweta_radar/scripts/pomiar_actora.py` działało bez ustawiania PYTHONPATH.
+# Katalog repo na ścieżkę, żeby `python laweta_radar/scripts/pomiar_actora.py`
+# działało bez ustawiania PYTHONPATH — dlaczego, patrz `_sciezka.py`.
+try:                               # pakiet widoczny: -m, import pakietowy, testy
+    from laweta_radar.scripts._sciezka import dodaj_repo_do_sciezki
+except ImportError:                # uruchomienie po ścieżce do pliku
+    from _sciezka import dodaj_repo_do_sciezki
+
+dodaj_repo_do_sciezki()
+
+# Katalog repo przydaje się też jako punkt odniesienia dla ścieżki raportu.
 _ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
 from laweta_radar.config import groups as konfig_grup  # noqa: E402
 from laweta_radar.workers import apify_credits, apify_proxy  # noqa: E402

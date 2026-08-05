@@ -56,7 +56,10 @@ from laweta_radar.config import settings
 ANTHROPIC = "anthropic"
 OPENAI = "openai"
 GEMINI = "gemini"
-PROVIDERY = (ANTHROPIC, OPENAI, GEMINI)
+# Lista i kolejność z konfiguracji — patrz `settings.ZMIENNE_PROVIDERA`. Własna
+# krotka tutaj rozjechałaby się z tamtą przy dołożeniu providera, a rozjazd
+# widać dopiero wtedy, gdy nowy provider po cichu wypada z porównania modeli.
+PROVIDERY = settings.PROVIDERY
 
 # Tryby JSON-a dla OpenAI (OPENAI_JSON_MODE). Opis i pułapka — przy `_response_format`.
 JSON_OFF, JSON_OBJECT, JSON_SCHEMA = "off", "object", "schema"
@@ -190,14 +193,25 @@ def koszt_usd(model: str, tokeny_wejscie: int, tokeny_wyjscie: int,
 # skonfigurowane naraz — jedna wspólna zmienna nie da się do tego użyć.
 # `CLASSIFIER_MODEL` zostaje nazwą modelu Anthropic (tak jest w .env od początku
 # repo i tak wołają go istniejące narzędzia).
+#
+# NAZWY ZMIENNYCH PRZYCHODZĄ Z `config/settings.py` — tam mieszka konfiguracja
+# i tam odpowiada się na pytanie „którego klucza wymaga ten przebieg". Tutaj
+# zostaje JEDYNA rzecz, której settings wiedzieć nie musi: jak nazywa się SDK
+# i paczka do zainstalowania. Dwie kopie tej samej mapy znaczyłyby, że dołożenie
+# providera to dwie zmiany, z których druga bywa zapomniana.
 # ---------------------------------------------------------------------------
+_PAKIETY: dict[str, tuple[str, str]] = {
+    #          provider -> (moduł do importu, nazwa dla `pip install`)
+    ANTHROPIC: ("anthropic",    "anthropic"),
+    OPENAI:    ("openai",       "openai"),
+    GEMINI:    ("google.genai", "google-genai"),
+}
+
 _KONFIGURACJA: dict[str, dict[str, str]] = {
-    ANTHROPIC: {"klucz": "ANTHROPIC_API_KEY", "sdk": "anthropic", "paczka": "anthropic",
-                "model": "CLASSIFIER_MODEL"},
-    OPENAI: {"klucz": "OPENAI_API_KEY", "sdk": "openai", "paczka": "openai",
-             "model": "OPENAI_MODEL"},
-    GEMINI: {"klucz": "GEMINI_API_KEY", "sdk": "google.genai", "paczka": "google-genai",
-             "model": "GEMINI_MODEL"},
+    p: {"klucz": settings.ZMIENNE_PROVIDERA[p][0],
+        "model": settings.ZMIENNE_PROVIDERA[p][1],
+        "sdk": _PAKIETY[p][0], "paczka": _PAKIETY[p][1]}
+    for p in PROVIDERY
 }
 
 
@@ -210,9 +224,12 @@ def normalizuj_provider(surowy: str | None) -> str:
 
     Degradacja, a nie wyjątek: literówka w .env nie może zatrzymać crona, a
     domyślny provider jest jedynym, którego zależność jest w requirements.txt.
+
+    `None` znaczy „nie podano" i też degraduje — TO NIE JEST to samo, co
+    `settings.provider_llm()` bez argumentu, które czyta LLM_PROVIDER. Wołający,
+    który chce providera z .env, podaje go jawnie (i tak robi to całe repo).
     """
-    s = (surowy or "").strip().lower()
-    return s if s in PROVIDERY else ANTHROPIC
+    return settings.provider_llm(surowy or "")
 
 
 def model_domyslny(provider: str | None = None) -> str:
@@ -223,13 +240,11 @@ def model_domyslny(provider: str | None = None) -> str:
     podmianie klucza system odpala model, którego nikt nie wybrał — i płaci za
     niego stawkę, której nikt nie sprawdzał.
     """
-    provider = normalizuj_provider(provider or settings.LLM_PROVIDER)
-    return getattr(settings, _KONFIGURACJA[provider]["model"], "")
+    return settings.model_providera(normalizuj_provider(provider or settings.LLM_PROVIDER))
 
 
 def klucz(provider: str) -> str:
-    nazwa = _KONFIGURACJA[normalizuj_provider(provider)]["klucz"]
-    return getattr(settings, nazwa, "")
+    return settings.klucz_providera(normalizuj_provider(provider))
 
 
 def _sdk_obecny(provider: str) -> bool:
@@ -255,15 +270,21 @@ def problemy(provider: str | None = None) -> list[str]:
     scripts/test_llm.py), bo brak paczki albo pusta nazwa modelu ma się
     objawić jednym zdaniem przed pierwszym postem, a nie tracebackiem
     w połowie runu.
+
+    Pyta o KONKRETNEGO providera i tylko o niego. Braki innych są tu nieobecne
+    z definicji — klucz nieużywanego providera nie jest brakiem (patrz nota przy
+    `settings.ZMIENNE_PROVIDERA`).
+
+    O klucz i nazwę modelu pyta `settings.braki_providera`, bo to konfiguracja.
+    Pakiet dochodzi tutaj: nazwy paczek zna ten moduł, nie .env.
     """
     provider = normalizuj_provider(provider or settings.LLM_PROVIDER)
     cfg = _KONFIGURACJA[provider]
     braki: list[str] = []
-    if not klucz(provider):
-        braki.append(f"brak {cfg['klucz']} w .env")
-    if not model_domyslny(provider):
-        braki.append(f"brak {cfg['model']} w .env — nazwę modelu podaj świadomie, "
-                     f"nie ma wartości domyślnej")
+    for zmienna in settings.braki_providera(provider):
+        braki.append(f"brak {zmienna} w .env" + (
+            " — nazwę modelu podaj świadomie, nie ma wartości domyślnej"
+            if zmienna == cfg["model"] else ""))
     if not _sdk_obecny(provider):
         braki.append(f"brak pakietu `{cfg['paczka']}` — zainstaluj: pip install {cfg['paczka']}")
     return braki
@@ -309,9 +330,13 @@ def opis() -> str:
     braki = problemy(wybrany)
     stan = "OK" if not braki else "; ".join(braki)
     tryb = tryb_json(wybrany)
+    # „z pakietem" nie jest ozdobnikiem: `settings.opis_porownania()` liczy samo
+    # .env i bywa wyższe. Dwie różne liczby w jednym raporcie muszą powiedzieć,
+    # czym się różnią, inaczej wyglądają na sprzeczność.
     return (f"[llm] provider={wybrany} model={model_domyslny(wybrany) or '(brak)'}"
             f"{f' json={tryb}' if wybrany == OPENAI else ''} ({stan}), "
-            f"gotowe do porównania: {', '.join(gotowe_providery()) or 'brak'}")
+            f"gotowe do porównania (z pakietem SDK): "
+            f"{', '.join(gotowe_providery()) or 'brak'}")
 
 
 # ---------------------------------------------------------------------------

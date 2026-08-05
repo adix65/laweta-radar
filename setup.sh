@@ -254,7 +254,17 @@ fi
 sed -i "s|^[[:space:]]*LAWETA_API_URL[[:space:]]*=.*|LAWETA_API_URL=http://127.0.0.1:$API_PORT|" panel/.env.local
 grep -q '^LAWETA_API_URL=' panel/.env.local || printf 'LAWETA_API_URL=http://127.0.0.1:%s\n' "$API_PORT" >> panel/.env.local
 
-for zmienna in ANTHROPIC_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SHARED_ENV_PATH; do
+# Klucz modelu WEDŁUG WYBRANEGO PROVIDERA, nie zawsze Anthropic. Wypominanie
+# ANTHROPIC_API_KEY komuś, kto postawił się na OpenAI, wysyła go po klucz, za
+# który zapłaci i którego ta instalacja nigdy nie użyje. Ta sama zasada, co
+# w config/settings.py: krytyczny jest wyłącznie klucz aktywnego providera.
+# Przy OpenAI dochodzi nazwa modelu — nie ma tam wartości domyślnej.
+case "$(z_env LLM_PROVIDER)" in
+    openai) ZMIENNE_MODELU=(OPENAI_API_KEY OPENAI_MODEL) ;;
+    gemini) ZMIENNE_MODELU=(GEMINI_API_KEY) ;;
+    *)      ZMIENNE_MODELU=(ANTHROPIC_API_KEY) ;;
+esac
+for zmienna in "${ZMIENNE_MODELU[@]}" TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SHARED_ENV_PATH; do
     [[ -z "$(z_env "$zmienna")" ]] && DO_UZUPELNIENIA+=("$zmienna")
 done
 
@@ -385,7 +395,10 @@ if [[ ${#DO_UZUPELNIENIA[@]} -gt 0 ]]; then
     log "Uzupełnij w laweta_radar/.env  (nano laweta_radar/.env):"
     for z in "${DO_UZUPELNIENIA[@]}"; do
         case "$z" in
-            ANTHROPIC_API_KEY)  log "  ANTHROPIC_API_KEY  — bez niego klasyfikator nie ruszy" ;;
+            ANTHROPIC_API_KEY)  log "  ANTHROPIC_API_KEY  — klasyfikator nie oceni postów (fetcher zbiera dalej)" ;;
+            OPENAI_API_KEY)     log "  OPENAI_API_KEY     — klasyfikator nie oceni postów (fetcher zbiera dalej)" ;;
+            OPENAI_MODEL)       log "  OPENAI_MODEL       — nazwa modelu OpenAI; nie ma domyślnej, podaj świadomie" ;;
+            GEMINI_API_KEY)     log "  GEMINI_API_KEY     — klasyfikator nie oceni postów (fetcher zbiera dalej)" ;;
             TELEGRAM_BOT_TOKEN) log "  TELEGRAM_BOT_TOKEN — token od @BotFather" ;;
             TELEGRAM_CHAT_ID)   log "  TELEGRAM_CHAT_ID   — ID czatu operatora (bot musi tam być)" ;;
             SHARED_ENV_PATH)    log "  SHARED_ENV_PATH    — .env sales-core-engine (klucze Apify); zwykle /home/ubuntu/sales-core-engine/.env" ;;

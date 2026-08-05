@@ -56,7 +56,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+try:                               # pakiet widoczny: -m, import pakietowy, testy
+    from laweta_radar.scripts._sciezka import dodaj_repo_do_sciezki
+except ImportError:                # uruchomienie po ścieżce do pliku
+    from _sciezka import dodaj_repo_do_sciezki
+
+dodaj_repo_do_sciezki()
 
 from laweta_radar.workers.apify_proxy import _TRUTHY, _pool_file_path, mask_url  # noqa: E402
 
