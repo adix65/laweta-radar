@@ -346,6 +346,38 @@ def test_telefon_nie_jest_kodem():
     assert geo.znajdz_kody("kontakt 601234567") == []
 
 
+def test_rocznik_pojazdu_nie_jest_kodem():
+    """Rocznik trafia w DWA wzorce naraz i w obu wygląda jak adres.
+
+    „Skoda Octavia 2012" ma kształt kodu austriackiego, a nazwa własna obok jest
+    marką, nie miastem. „Golfa 2015 po stluczce" ma kształt holenderskiego
+    (cztery cyfry i dwie litery), gdzie literami jest polski przyimek. Oba
+    wpadały do pola kodu, a od czasu fallbacku w klasyfikatorze wpadałyby wprost
+    do bazy — bez modelu, który mógłby to wyprostować.
+    """
+    assert geo.znajdz_kody("Skoda Octavia 2012, nie odpala") == []
+    assert geo.znajdz_kody("sprzedam Golfa 2015 po stluczce") == []
+    assert geo.znajdz_kody("auto 1998 na chodzie, pilne") == []
+    # Ten sam rocznik ZE wskazaniem kraju albo skrótem kodu nadal jest kodem —
+    # 2000 to Antwerpia, a wykluczenie ma odsiewać rocznik, nie kasować Belgię.
+    assert ("2000", "BE") in geo.znajdz_kody("odbior Antwerpia 2000, auto na kolach")
+    assert ("2015", "?") in geo.znajdz_kody("odbior spod kodu 2015, auto gotowe")
+
+
+def test_skoda_to_nie_slowacja():
+    """Sygnały krajów zapisane ze spacjami (" sk ", " cz ") to CAŁE SŁOWA.
+
+    Szukane jako fragment siedzą w „Skodzie" i w „częściach" — czyli w dwóch
+    najczęstszych słowach w tych grupach. Skutek był podwójny: liczba obok marki
+    dostawała kontekst „kraj", a czeskie i słowackie kody przypisywały się do
+    kraju na podstawie nazwy auta.
+    """
+    assert geo.znajdz_kody("Skoda Fabia 2011, czesci nowe") == []
+    assert geo._kraj_z_kontekstu("Skoda 110 00 czesci", 6, 12, ("CZ", "SK")) is None
+    # Skrót jako osobne słowo nadal działa.
+    assert geo._kraj_z_kontekstu("odbior 811 01, SK, auto stoi", 7, 13, ("CZ", "SK")) == "SK"
+
+
 def test_niejednoznaczny_kraj_daje_pytajnik():
     """Lepiej oddać kod z krajem "?" niż pominąć go, bo nie wiadomo skąd.
 

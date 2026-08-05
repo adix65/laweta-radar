@@ -465,9 +465,10 @@ laweta_radar/
     test_zapis_klasyfikacji.py  # sam INSERT do `posty`, na prawdziwym Postgresie
     test_przebieg_do_bazy.py    # CAŁY przebieg: Apify -> model -> baza -> alert
     test_uzupelnij_klasyfikacje.py # naprawa wierszy z pustą ekstrakcją
+    test_ekstrakcja_referencyjna.py # dana z treści -> jej pole: fallback + walidacja
     conftest.py                 # krzyczy, gdy testy integracyjne się pominęły —
                                 # bez TEST_DATABASE_URL zielony wynik nic nie znaczy
-    dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
+    dane/posty_referencyjne.jsonl   # zbiór do porównania modeli i pomiaru ekstrakcji
   .env.example
   requirements.txt
 data/kandydaci_grupy.csv  # lista grup do ręcznego sprawdzenia (kolumna `publiczna`)
@@ -725,6 +726,46 @@ w formie oryginalnej, bo idą wprost do geokodera (`docs/WIELOJEZYCZNOSC.md`).
 rozumowania — Haiku robi je równie dobrze za ułamek ceny, a liczy się też czas:
 każda sekunda opóźnienia to przewaga konkurencji.
 
+#### Dwie różne pustki w polu
+
+Produkcja na małym modelu (gpt-5.4-nano) pokazała wzorzec, który w bazie wygląda
+jak brak danych, a jest niedoczytaniem: **pole jest wypełniane, gdy dana stoi
+wprost i prosto, a pomijane, gdy wymaga choćby minimalnej interpretacji** —
+nazwa miejscowości zagranicznej („Zulte"), kod pocztowy wśród innych liczb
+(„z kodu 54-100"), marka w środku zdania („transportu dla Renault Trafic").
+Zlecenia były wykrywane poprawnie; ginęła sama trasa.
+
+Odpowiedź jest dwuwarstwowa, bo prompt można wzmocnić, ale nie da się go
+wymusić:
+
+1. **Prompt rozróżnia dwie pustki.** „Tego w poście NIE MA" (null jest wtedy
+   poprawną odpowiedzią i tak ma zostać) oraz „jest, tylko trzeba przeczytać
+   uważniej" (null jest wtedy błędem). Trzy reguły mówią wprost, że **każda**
+   nazwa miejscowości, **każdy** ciąg wyglądający na kod i **każda** marka
+   z treści mają trafić do swojego pola — a zakaz zgadywania zostaje nietknięty,
+   bo to on broni przed wysłaniem człowieka 80 km w złą stronę. Na końcu promptu
+   stoją cztery pary „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta
+   — kiedy zostawić null. Na modelach tej klasy few-shot działa mocniej niż sama
+   instrukcja, a bez tej czwartej pary zestaw uczyłby wypełniania pól za wszelką
+   cenę, czyli halucynacji geo.
+2. **Fallback regexowy działa POZA modelem.** Po klasyfikacji treść idzie przez
+   `geo.znajdz_kody()` i uzupełnia `odbior_kod`/`dostawa_kod`, **wyłącznie gdy
+   pole jest puste** — model ma pierwszeństwo, bo czyta zdanie, a regex kształt
+   cyfr. Kolejność wystąpienia jest jedyną heurystyką kierunku (pierwszy kod to
+   zwykle odbiór). Każde uzupełnienie leci na stderr ze znacznikiem
+   `fallback-kod`, żeby dało się policzyć, jak często model gubi to, co regex
+   znajduje za darmo — bez tej liczby nie da się ocenić kolejnej zmiany promptu:
+
+   ```bash
+   pm2 logs laweta-fetcher --lines 2000 --nostream | grep -c fallback-kod
+   ```
+
+Pilnuje tego `tests/test_ekstrakcja_referencyjna.py` na tym samym zbiorze, na
+którym wybieramy model. Testy nie mierzą jakości modelu (od tego jest
+`porownaj_modele.py`) — sprawdzają, że kod stojący w treści dojeżdża do pola
+także wtedy, gdy model oddał komplet nulli, i że nic z poprawnie przeczytanego
+posta nie ginie po drodze w walidacji.
+
 Model jest jednak **wymienny bez dotykania logiki**. Cała komunikacja z modelem
 przechodzi przez jedną funkcję w `services/llm.py`, a `LLM_PROVIDER` w `.env`
 wybiera implementację (`anthropic`, `openai`, `gemini`). Parsowanie JSON-a,
@@ -844,6 +885,13 @@ Kryterium jest proste — kodem jest to, z czego geokoder umie zrobić punkt.
 Własna lista po stronie klasyfikatora wyrzucałaby niemieckie „50667" w dniu,
 w którym bramka wpuściła pierwszą grupę DE, i objawiłaby się jako zlecenia
 bez trasy, bez jednego błędu w logu.
+
+`geo.znajdz_kody()` **skanuje surową treść** i jest źródłem fallbacku
+klasyfikatora, więc fałszywe trafienie kosztuje tu tyle, co zgadnięte miasto.
+Formaty dwuznaczne wymagają kontekstu: czterocyfrowa liczba z przedziału
+roczników (1950–2035) potrzebuje słowa wskazującego kraj albo skrótu kodu przed
+sobą — sama nazwa własna obok nie wystarcza, bo w „Skoda Octavia 2012" jest nią
+model auta, a nie miejscowość.
 
 ## Deploy (VPS + PM2 + nginx)
 

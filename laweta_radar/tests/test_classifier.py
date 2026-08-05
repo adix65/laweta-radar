@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
@@ -490,6 +491,40 @@ def test_zwaliduj_znosi_kompletne_smieci():
 # ===========================================================================
 # PROMPT — zasady ekstrakcji SĄ produktem, nie dokumentacją
 # ===========================================================================
+def _przyklady_z_promptu(prompt: str) -> list[str]:
+    """Surowe JSON-y z sekcji PRZYKŁADY: od "WYNIK:" do domykającego nawiasu.
+
+    Liczymy nawiasy zamiast dopasowywać regexem, bo przykład jest zagnieżdżony
+    i łamany na kilka wierszy — a nie chcemy, żeby test wymuszał na promptcie
+    jakiś konkretny sposób zawijania.
+    """
+    przyklady: list[str] = []
+    for m in re.finditer(r"WYNIK:\s*\{", prompt):
+        start = prompt.index("{", m.start())
+        poziom = 0
+        for i in range(start, len(prompt)):
+            if prompt[i] == "{":
+                poziom += 1
+            elif prompt[i] == "}":
+                poziom -= 1
+                if poziom == 0:
+                    przyklady.append(prompt[start:i + 1])
+                    break
+    return przyklady
+
+
+def _prompt_jednym_ciagiem(jezyk: str = "") -> str:
+    """Prompt ze złamaniami wiersza zamienionymi na spacje.
+
+    Reguły sprawdzamy po TREŚCI, nie po zawijaniu tekstu. Wcześniej stała tu
+    fraza z twardym `\\n` w środku i pierwsze przeredagowanie akapitu wywaliło
+    test, choć reguła stała w promptcie nietknięta. Fałszywy alarm w teście
+    pilnującym promptu jest droższy niż wygląda: uczy, żeby go „poprawić",
+    zamiast czytać.
+    """
+    return re.sub(r"\s+", " ", c.zbuduj_system("", jezyk))
+
+
 def test_prompt_niesie_zasady_ekstrakcji():
     """Każda z tych fraz to reguła, której usunięcie zmienia wynik na produkcji.
 
@@ -497,9 +532,10 @@ def test_prompt_niesie_zasady_ekstrakcji():
     rzecz, która powstrzymuje model przed zgadywaniem miasta — a zgadnięte
     miasto wysyła człowieka 80 km w złą stronę.
     """
+    prompt = _prompt_jednym_ciagiem()
     for fraza in [
         "Zgadywanie miasta z kontekstu jest zabronione",
-        "null\n  jest lepszy niż zła współrzędna",
+        "null jest lepszy niż zła współrzędna",
         "toczy_sie",
         "ma_kola",
         "po_wypadku",
@@ -509,7 +545,70 @@ def test_prompt_niesie_zasady_ekstrakcji():
         "polecicie kogoś?",
         "TO JEST ZLECENIE",
     ]:
-        assert fraza in c.SYSTEM, f"prompt zgubił regułę: {fraza!r}"
+        assert fraza in prompt, f"prompt zgubił regułę: {fraza!r}"
+
+
+def test_prompt_kaze_wyciagac_dane_ktore_stoja_w_tresci():
+    """Druga strona zakazu zgadywania — i powód, dla którego powstał ten test.
+
+    Produkcja pokazała, że model zostawia null nie tylko wtedy, gdy danej nie
+    ma, ale też wtedy, gdy dana wymaga minimalnej interpretacji: nazwa
+    miejscowości zagranicznej, kod pocztowy wśród innych liczb, marka w środku
+    zdania. Te trzy reguły są jedyną obroną przed tym po stronie promptu.
+    """
+    prompt = _prompt_jednym_ciagiem()
+    for fraza in [
+        "KAŻDA NAZWA MIEJSCOWOŚCI, KTÓRA PADA W POŚCIE, MA TRAFIĆ DO `miasto`",
+        "KAŻDY CIĄG WYGLĄDAJĄCY NA KOD POCZTOWY MA TRAFIĆ DO `kod`",
+        "KAŻDA MARKA I KAŻDY MODEL, KTÓRE PADAJĄ W POŚCIE, MAJĄ TRAFIĆ DO `pojazd.opis`",
+        # Rozróżnienie, o które w tym wszystkim chodzi.
+        'Cała różnica jest między "TEGO W POŚCIE NIE MA"',
+        'a "JEST, tylko trzeba przeczytać uważniej"',
+        # Zakaz zgadywania MUSI stać obok, inaczej reguły wyżej uczą halucynacji.
+        "Nie dopisujesz miasta z kodu pocztowego, kodu z miasta",
+    ]:
+        assert fraza in prompt, f"prompt zgubił regułę ekstrakcji: {fraza!r}"
+
+
+def test_przyklady_w_promptcie_sa_zgodne_z_kontraktem():
+    """Few-shot uczy FORMATU — przykład niezgodny z walidatorem uczy błędu.
+
+    Każdy przykład przepuszczamy przez naszą własną ścieżkę rozbioru. Gdyby
+    w przykładzie stała kategoria spoza zbioru albo kod w formacie, którego
+    `geo` nie zna, walidator po cichu podmieniłby to na wartość domyślną —
+    a model uczyłby się odpowiadać czymś, co u nas ginie. Ten test jest
+    jedynym miejscem, w którym taki rozjazd widać.
+    """
+    przyklady = _przyklady_z_promptu(c.SYSTEM)
+    assert len(przyklady) >= 3, f"prompt ma tylko {len(przyklady)} przykładów few-shot"
+
+    for surowy in przyklady:
+        dane = json.loads(surowy)
+        wynik = c.zwaliduj(dane)
+        assert wynik["typ"] == dane["typ"]
+        assert wynik["pilnosc"] == dane["pilnosc"]
+        assert wynik["pojazd"]["kategoria"] == dane["pojazd"]["kategoria"]
+        assert wynik["kontakt"]["typ"] == dane["kontakt"]["typ"]
+        for miejsce in ("odbior", "dostawa"):
+            assert wynik[miejsce]["kod"] == dane[miejsce]["kod"], (miejsce, dane[miejsce])
+            assert wynik[miejsce]["miasto"] == dane[miejsce]["miasto"]
+        assert wynik["pojazd"]["opis"] == dane["pojazd"]["opis"]
+
+
+def test_przyklady_nie_powielaja_zbioru_referencyjnego():
+    """Post z promptu w zbiorze referencyjnym mierzy pamięć, nie ekstrakcję.
+
+    Przykłady i zbiór do porównania modeli żyją w dwóch plikach i nikt nie
+    trzyma ich obok siebie na ekranie — dlatego pilnuje tego test, a nie
+    komentarz.
+    """
+    from laweta_radar.scripts import porownaj_modele as pm
+
+    posty, _ = pm.wczytaj(pm.ZBIOR_DOMYSLNY)
+    w_promptcie = re.sub(r"\s+", " ", c.SYSTEM).lower()
+    powtorzone = [p["id"] for p in posty
+                  if re.sub(r"\s+", " ", p["tresc"]).lower()[:60] in w_promptcie]
+    assert not powtorzone, f"treści ze zbioru referencyjnego stoją w promptcie: {powtorzone}"
 
 
 def test_prompt_broni_sie_przed_poleceniami_w_tresci():

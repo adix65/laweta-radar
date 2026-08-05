@@ -74,6 +74,13 @@ Mówi ona trzy rzeczy:
    z błędną pozycją jest gorsze niż brak zlecenia, bo zjada uwagę operatora i wysyła
    go nie tam.
 
+Prompt klasyfikatora dokłada do tego jedną zasadę, która NIE JEST tłumaczeniem:
+nazwę zapisuje się w **mianowniku** („z Dębicy" → „Dębica", „pod Krosnem" →
+„Krosno"). Odmiana to końcówka przypadka, a nie inny język — i to na niej wykłada
+się dopasowanie do bazy kodów, bo `geo.normalizuj_nazwe` zdejmuje ogonki
+i wielkość liter, ale nie odmienia. Nazwa zagraniczna zwykle w polskim zdaniu
+i tak stoi nieodmieniona („z Belgii Zulte"), więc obie zasady się nie gryzą.
+
 Kontrakt wywołania (szew w fetcherze: `_klasyfikuj`; wypełniony przez
 `workers/classifier.py`):
 

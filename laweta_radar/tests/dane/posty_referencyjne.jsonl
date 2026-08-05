@@ -11,14 +11,31 @@
 #                 ISTOTNA: seedy są napisane przez tego, kto pisał prompt, więc
 #                 model może na nich wyglądać lepiej, niż jest.
 #   tresc       — treść posta, dokładnie tak jak w bazie (bez ogonków, z literówkami)
-#   oczekiwane  — RĘCZNIE wpisany poprawny wynik. Oceniane są cztery pola:
-#                 czy_zlecenie, odbior_miasto, dostawa_miasto, pilnosc.
-#                 Wartość `null` znaczy "TU NIC NIE MA" (np. brak drugiego
-#                 miejsca) i jest oceniana normalnie. Pole POMINIĘTE w słowniku
-#                 nie jest oceniane wcale — używaj tego tam, gdzie post jest
-#                 realnie dwuznaczny i człowiek też by się wahał. Wpisanie
-#                 zgadywanki jako "poprawnej odpowiedzi" psuje pomiar ciszej,
-#                 niż go poprawia.
+#   oczekiwane  — RĘCZNIE wpisany poprawny wynik. Porównywarka modeli ocenia
+#                 cztery pola: czy_zlecenie, odbior_miasto, dostawa_miasto,
+#                 pilnosc. Wartość `null` znaczy "TU NIC NIE MA" (np. brak
+#                 drugiego miejsca) i jest oceniana normalnie. Pole POMINIĘTE
+#                 w słowniku nie jest oceniane wcale — używaj tego tam, gdzie
+#                 post jest realnie dwuznaczny i człowiek też by się wahał.
+#                 Wpisanie zgadywanki jako "poprawnej odpowiedzi" psuje pomiar
+#                 ciszej, niż go poprawia.
+#   uwaga       — opcjonalnie: skąd wziął się ten wpis. Nic nie ocenia, ma
+#                 pilnować, żeby za rok dało się odróżnić realny post od
+#                 rekonstrukcji.
+#
+# POLA EKSTRAKCJI (opcjonalne, dopisane po produkcyjnej diagnozie): odbior_kod,
+# dostawa_kod, pojazd_opis. Porównywarka modeli ich NIE punktuje — czyta je
+# tests/test_ekstrakcja_referencyjna.py, który pilnuje, że dana STOJĄCA W TREŚCI
+# dojeżdża do swojego pola. Produkcja pokazała wzorzec: mały model wypełnia pole,
+# gdy dana jest podana wprost i prosto, a pomija je, gdy wymaga choćby minimalnej
+# interpretacji (nazwa zagraniczna, kod wśród innych liczb, marka w środku
+# zdania). Wpisuj tam WYŁĄCZNIE to, co realnie stoi w poście — te pola są
+# ćwiczeniem z czytania, nie ze zgadywania.
+#
+# NIE WPISUJ TU TREŚCI, KTÓRE STOJĄ JAKO PRZYKŁADY W PROMPCIE (sekcja PRZYKŁADY
+# w workers/classifier.py). Post, którego odpowiedź model ma podaną w promptcie,
+# mierzy pamięć, a nie ekstrakcję — i zawyża każdą liczbę, dla której ten zbiór
+# istnieje.
 #
 # JAK DOPISAĆ REALNE POSTY (robota do zrobienia RAZ, po pierwszym tygodniu
 # produkcji — dopóki jej nie ma, poniższe seedy służą tylko do sprawdzenia,
@@ -53,3 +70,19 @@
 {"id": "ref-020", "zrodlo": "seed", "tresc": "Mialem dzis stluczke ale juz zalatwione, dziekuje wszystkim za pomoc i szybka reakcje", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null}}
 {"id": "ref-021", "zrodlo": "seed", "tresc": "pilne!!! laweta w okolicy tarnobrzega? stoje na krajowce, ciezarowka 12t, nie odpala, +48 505 606 707", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Tarnobrzeg", "dostawa_miasto": null, "pilnosc": "teraz"}}
 {"id": "ref-022", "zrodlo": "seed", "tresc": "Szukam kogos kto przywiezie quada z Zamoscia do Krosna. Moze byc w przyszlym tygodniu, dogadamy sie co do ceny", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Zamosc", "dostawa_miasto": "Krosno", "pilnosc": "elastycznie"}}
+
+# --- POSTY DO POMIARU EKSTRAKCJI (kod pocztowy / miasto / marka) ---
+# Dopisane po diagnozie z produkcji: klasyfikator poprawnie wykrywal zlecenia,
+# ale gubil pola wymagajace choc minimalnej interpretacji. Kazdy z tych postow
+# niesie dane, ktore STOJA W TRESCI — pusta wartosc przy nich jest bledem,
+# nie ostroznoscia. Sprawdza je tests/test_ekstrakcja_referencyjna.py.
+{"id": "ref-023", "zrodlo": "prod", "tresc": "Szukam lawety z Belgii Zulte do Świętokrzyskie Jędrzejów", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Zulte", "dostawa_miasto": "Jędrzejów", "pilnosc": "elastycznie", "odbior_kod": null, "dostawa_kod": null, "pojazd_opis": null}, "uwaga": "realny post z tabeli posty; model zostawil odbior_miasto NULL mimo \"Zulte\" w tresci"}
+{"id": "ref-024", "zrodlo": "seed", "tresc": "Dzien dobry, szukam transportu dla Renault Master z kodu 39-200 do 38-400 Krosno, auto nie odpala. Prosze o wycene na pw", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": null, "dostawa_miasto": "Krosno", "pilnosc": "elastycznie", "odbior_kod": "39-200", "dostawa_kod": "38-400", "pojazd_opis": "Renault Master"}, "uwaga": "wzorowany na realnym poscie, w ktorym model zgubil pojazd_opis i odbior_kod; wartosci zmienione, zeby nie powielac przykladu z promptu"}
+{"id": "ref-025", "zrodlo": "seed", "tresc": "Przewiezie ktos mikrosamochodu Ligier z Mielca do Tarnobrzega? Nie odpala, moze byc w tym tygodniu. 601 234 567", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Mielec", "dostawa_miasto": "Tarnobrzeg", "pilnosc": "elastycznie", "odbior_kod": null, "dostawa_kod": null, "pojazd_opis": "Ligier"}, "uwaga": "wzorowany na realnym poscie z mikrosamochodem, na ktorym model wyciagnal komplet"}
+{"id": "ref-026", "zrodlo": "seed", "tresc": "Kupilem BMW e46 w Niemczech, PLZ 50667 Koln, kto przywiezie do Jasla? Cena do dogadania", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Koln", "dostawa_miasto": "Jaslo", "pilnosc": "elastycznie", "odbior_kod": "50667", "dostawa_kod": null, "pojazd_opis": "BMW e46"}, "uwaga": "kod niemiecki stoi po skrocie PLZ, nie po nazwie miasta"}
+{"id": "ref-027", "zrodlo": "seed", "tresc": "Transport busa z Ostrawy, kod 702 00, do Rzeszowa. Iveco Daily, nie toczy sie, skrzynia zablokowana", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Ostrawa", "dostawa_miasto": "Rzeszow", "pilnosc": "elastycznie", "odbior_kod": "702 00", "dostawa_kod": null, "pojazd_opis": "Iveco Daily"}, "uwaga": "kod czeski w formacie trzy-spacja-dwie, w srodku zdania"}
+{"id": "ref-028", "zrodlo": "seed", "tresc": "Auto stoi w Holandii, adres 5678 AB Eindhoven, potrzebny transport do Krosna. Vw Passat b6, nie odpala", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Eindhoven", "dostawa_miasto": "Krosno", "pilnosc": "elastycznie", "odbior_kod": "5678 AB", "dostawa_kod": null, "pojazd_opis": "Vw Passat b6"}, "uwaga": "kod holenderski: cztery cyfry i dwie litery"}
+{"id": "ref-029", "zrodlo": "seed", "tresc": "Kupilem quada w Austrii, Wieden 1010, kto przywiezie do Rzeszowa? Termin dowolny", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Wieden", "dostawa_miasto": "Rzeszow", "pilnosc": "elastycznie", "odbior_kod": "1010", "dostawa_kod": null, "pojazd_opis": null}, "uwaga": "czterocyfrowy kod austriacki obok nazwy miasta; marki pojazdu w tresci NIE MA"}
+{"id": "ref-030", "zrodlo": "seed", "tresc": "Sprzedam przyczepe lawete 2018 rok, cena 12000 zl, przebieg 180000 km, Krosno", "oczekiwane": {"czy_zlecenie": false, "odbior_miasto": null, "dostawa_miasto": null, "odbior_kod": null, "dostawa_kod": null, "pojazd_opis": null}, "uwaga": "kontrola negatywna: rocznik, cena i przebieg NIE SA kodami pocztowymi"}
+{"id": "ref-031", "zrodlo": "seed", "tresc": "Potrzebna laweta z Bratislavy 811 01 do Krosna, ciezarowka iveco po awarii, nie toczy sie. Pilne", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Bratislava", "dostawa_miasto": "Krosno", "pilnosc": "teraz", "odbior_kod": "811 01", "dostawa_kod": null, "pojazd_opis": "Iveco"}, "uwaga": "kod slowacki oraz marka zapisana z malej litery"}
+{"id": "ref-032", "zrodlo": "seed", "tresc": "Odbior 38-400 Krosno ul. Bieszczadzka 12, dostawa 35-001 Rzeszow. Skoda Octavia 2012, nie odpala, moze byc jutro", "oczekiwane": {"czy_zlecenie": true, "odbior_miasto": "Krosno", "dostawa_miasto": "Rzeszow", "pilnosc": "jutro", "odbior_kod": "38-400", "dostawa_kod": "35-001", "pojazd_opis": "Skoda Octavia 2012"}, "uwaga": "dwa kody polskie w kolejnosci odbior-dostawa, obok numeru budynku"}

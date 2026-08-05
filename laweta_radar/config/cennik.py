@@ -44,8 +44,14 @@ from laweta_radar.config import settings
 #   Anthropic — platform.claude.com/docs/en/about-claude/pricing
 #   OpenAI    — openai.com/api/pricing
 # Trafienie w cache kosztuje u obu 10% stawki wejściowej; zapis do cache
-# (Anthropic, 1.25x wejścia) NIE ma tu osobnej pozycji, bo ten system nie
-# używa cache'owania promptu — prompt systemowy jest krótszy niż próg opłacalności.
+# (Anthropic, 1.25x wejścia) NIE ma tu osobnej pozycji, bo ten system nadal nie
+# cache'uje promptu.
+#
+# UWAGA NA PRZYSZŁOŚĆ: po dołożeniu przykładów few-shot prompt klasyfikatora
+# urósł do ~2,7 tys. tokenów, czyli przestał być „krótszy niż próg opłacalności"
+# — jest identyczny przy każdym wywołaniu i mieści się w minimum cache'owania.
+# Włączenie cache to osobna zmiana (w `services/llm.py`), ale liczba, dla której
+# warto ją rozważyć, stoi już po tej stronie: dziesiąta część stawki wejściowej.
 #
 # DATA MA ZNACZENIE. Stawka sprzed roku nie wywali niczego — po cichu przekłamie
 # jedyną liczbę, dla której porównywarka modeli istnieje. Aktualizując wpis,
