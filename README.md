@@ -411,9 +411,11 @@ laweta_radar/
     feedback.py        # zapis oceny operatora — wspólny dla API i bota
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
     llm.py             # JEDNA funkcja `zapytaj` — provider wymienny w .env
+    schemat.py         # kontrakt klasyfikatora jako JSON Schema (OPENAI_JSON_MODE=schema)
     geo.py             # kody -> współrzędne, kilometry, deep linki do map
   config/
     settings.py        # jedyne miejsce czytające środowisko
+    cennik.py          # stawki modeli + DATA sprawdzenia — jedyne miejsce z cenami
     shared_env.py      # dociąga klucze Apify ze WSPÓLNEGO .env sales-core-engine
     groups.py          # lista grup FB — dane, nie kod
     frazy_grup.py      # frazy wyszukiwania grup (PL/DE/CS/SK) — dane, nie kod
@@ -440,6 +442,7 @@ laweta_radar/
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
     raport_gate.py     # rozliczenie trybu cienia bramki
     raport_feedback.py # co operator odrzucił i co model o tym sądził
+    test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
   tests/               # testy offline (bez sieci i bez bazy)
@@ -669,14 +672,60 @@ z benchmarków, bo żaden nie mierzy „wyciąganie miejscowości z posta
 laweciarskiego". Dlatego mierzymy na swoich danych:
 
 ```bash
+python laweta_radar/scripts/test_llm.py                  # czy klucz i model w ogóle działają
 python laweta_radar/scripts/porownaj_modele.py --sucho   # plan i koszt, BEZ sieci
 python laweta_radar/scripts/porownaj_modele.py           # tabela porównawcza
 ```
 
-Skrypt puszcza `tests/dane/posty_referencyjne.jsonl` przez wszystkie
-skonfigurowane providery i liczy per model: trafność `czy_zlecenie`, trafność
-miasta odbioru i dostawy, trafność `pilnosc`, ile razy wynik nie dał się
-sparsować, medianę czasu odpowiedzi i realny koszt runu.
+Kolejność jest celowa. `test_llm.py` wysyła JEDNO krótkie pytanie na providera
+i odpowiada na pytania „czy klucz działa", „czy nazwa modelu istnieje" i „czy
+tryb JSON nie wywala błędu 400" — za ułamek ceny pełnego porównania. Trwały
+błąd (zły klucz, nieznany model, odrzucony parametr) jest tam nazwany trwałym
+i nie jest ponawiany.
+
+`porownaj_modele.py` puszcza `tests/dane/posty_referencyjne.jsonl` przez
+wszystkie skonfigurowane providery **w jednym przebiegu** i liczy per model:
+trafność `czy_zlecenie`, trafność miasta odbioru i dostawy, trafność `pilnosc`,
+**halucynacje geo**, **zgodność ze schematem**, ile razy wynik nie dał się
+sparsować, medianę czasu odpowiedzi i realny koszt runu (z tokenami rozumowania
+wliczonymi do rachunku, ale raportowanymi osobno).
+
+**Halucynacja geo** to odsetek wpisanych miast, których w treści posta nie było
+— najdroższy błąd tego systemu, bo zgadnięte miasto wysyła człowieka 80 km
+w złą stronę, a puste pole tylko każe mu przeczytać post. **Zgodność ze
+schematem** mówi, ile odpowiedzi mieści się w kontrakcie BEZ napraw walidatora:
+wysoka trafność przy niskiej zgodności znaczy, że wynik ratuje nasz kod, a nie
+model — i przestanie ratować przy pierwszej zmianie kontraktu.
+
+#### OpenAI: co jest inne i dlaczego jest w konfiguracji
+
+Anthropic bierze prompt systemowy osobnym parametrem, OpenAI wkłada go
+pierwszą wiadomością (`OPENAI_ROLA_SYSTEMOWA`, domyślnie `system`). Nowe modele
+OpenAI odrzucają `max_tokens` i wymagają `max_completion_tokens` — kod próbuje
+nowszej nazwy, przy odmowie powtarza ze starszą i **zapamiętuje wynik na czas
+procesu**, zamiast zgadywać z nazwy modelu. Część tych modeli generuje
+wewnętrzne **tokeny rozumowania**: rozliczane jak wyjściowe i wliczane do
+limitu, więc `OPENAI_REASONING` ustawia najniższy poziom, jaki dany model
+przyjmuje, a gdy go nie przyjmuje — limit tokenów dostaje zapas, żeby
+odpowiedź nie urwała się w środku JSON-a (co w raporcie wyglądałoby jak „model
+nie umie w JSON").
+
+`OPENAI_JSON_MODE` ma trzy wartości: `off` (najuczciwsze porównanie z Haiku —
+obie strony dostają dokładnie to samo), `object` (wymuszony poprawny JSON, bez
+schematu; domyślne) i `schema` (pełne structured outputs ze schematem
+klasyfikatora, `services/schemat.py`).
+
+> **Tryb JSON gwarantuje KSZTAŁT odpowiedzi, nie jej PRAWDZIWOŚĆ.** Model nadal
+> może wpisać do `odbior.miasto` nazwę, której w poście nie było — dostaniesz ją
+> tylko ładnie sformatowaną. Kolumny `halucyn.` tryb JSON nie poprawia i nie
+> zastępuje. Przy `schema` nie porównujesz zresztą dwóch modeli, tylko dwa
+> stacki: jeden z gwarancją schematu i jeden bez. Dlatego raport wypisuje tryb
+> obok nazwy modelu — nie zestawiaj tabel zrobionych przy różnych ustawieniach.
+
+Stawki modeli siedzą w `config/cennik.py` **razem z datą sprawdzenia**, nigdy
+w kodzie providerów. Model spoza cennika daje koszt `None` i ostrzeżenie w logu,
+nigdy cichą zerową kwotę — zero czyta się jako „za darmo" i przesuwa decyzję
+o wyborze modelu na zmyślonych danych.
 
 Zbiór w repo to na razie **22 seedy napisane razem z promptem** — dość, żeby
 sprawdzić, że skrypt chodzi, za mało na decyzję i skrypt mówi to wprost.

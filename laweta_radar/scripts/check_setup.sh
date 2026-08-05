@@ -63,6 +63,10 @@ echo "=== 7. Klasyfikator (provider modelu, bez sieci) ==="
 # bramkę i czekają w bazie, a nikt nie dostaje alertu. Ma się to objawić tutaj,
 # a nie tracebackiem w środku przebiegu o trzeciej w nocy.
 "$PY" -m laweta_radar.services.llm
+# Tego, czy klucz jest DOBRY i czy nazwa modelu ISTNIEJE, nie da się sprawdzić
+# bez sieci — dlatego to osobne polecenie, a nie kolejna sekcja tutaj.
+echo "  Czy klucz i nazwa modelu realnie działają (jedno wywołanie na providera):"
+echo "    $PY laweta_radar/scripts/test_llm.py"
 
 echo
 echo "=== 8. Baza kodów pocztowych (services/geo.py, bez sieci) ==="

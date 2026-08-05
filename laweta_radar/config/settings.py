@@ -106,15 +106,40 @@ CLASSIFIER_MODEL = _txt("CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
 
 LLM_PROVIDER = _txt("LLM_PROVIDER", "anthropic")
 OPENAI_API_KEY = _txt("OPENAI_API_KEY")
-OPENAI_MODEL = _txt("OPENAI_MODEL", "gpt-5-mini")
+# BEZ WARTOŚCI DOMYŚLNEJ — świadomie. Nazwy modeli tej rodziny zmieniają się co
+# kilka miesięcy, a domyślna w kodzie znaczyłaby, że po wpisaniu samego klucza
+# system odpala model, którego nikt nie wybrał, i płaci stawkę, której nikt nie
+# sprawdzał. Pusto = `llm.problemy("openai")` mówi wprost, czego brakuje.
+OPENAI_MODEL = _txt("OPENAI_MODEL")
 GEMINI_API_KEY = _txt("GEMINI_API_KEY")
 GEMINI_MODEL = _txt("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Stawki providerów spoza Anthropic — JSON {"model": [usd_wejscie, usd_wyjscie]}
-# za MILION tokenów. Świadomie NIE są zaszyte w kodzie: zła stawka nie wywala
-# niczego, tylko po cichu przekłamuje jedyną liczbę, dla której porównywarka
-# istnieje. Pusto = raport pokaże koszt jako nieznany, i to jest poprawna
-# odpowiedź, dopóki nikt nie sprawdził cennika.
+# --- OpenAI: różnice API, których nie da się schować w jednej implementacji ---
+#
+# OPENAI_JSON_MODE — "off" | "object" | "schema". Opis trybów i ich PUŁAPKI
+# (tryb JSON gwarantuje kształt, NIE prawdziwość wartości) stoi przy
+# `services/llm._response_format`. Domyślne "object" wymusza poprawny JSON bez
+# narzucania schematu.
+OPENAI_JSON_MODE = _txt("OPENAI_JSON_MODE", "object")
+# Nakład rozumowania (`reasoning_effort`). PUSTE = nie wysyłamy parametru wcale.
+# Dopuszczalne wartości ZALEŻĄ OD MODELU (bywa "none", "minimal", "low"...),
+# więc żadnej nie zgadujemy: model, który tego parametru nie przyjmie, dostanie
+# wywołanie bez niego i podniesiony limit tokenów (services/llm.py).
+OPENAI_REASONING = _txt("OPENAI_REASONING")
+# Rola pierwszej wiadomości: "system" (zgodne wstecz) albo "developer" (nazwa
+# używana przez nowsze modele). Anthropic bierze prompt systemowy osobnym
+# parametrem i ta zmienna go nie dotyczy.
+OPENAI_ROLA_SYSTEMOWA = _txt("OPENAI_ROLA_SYSTEMOWA", "system")
+# Sufit czasu jednego wywołania. Trzydzieści sekund to dużo jak na ekstrakcję
+# z jednego posta — wywołanie, które tyle trwa, i tak jest już spóźnione wobec
+# konkurencji, a wisząca sesja blokuje resztę przebiegu.
+OPENAI_TIMEOUT_S = _int("OPENAI_TIMEOUT_S", 30)
+
+# Stawki modeli spoza wbudowanego cennika — JSON
+# {"model": [usd_wejscie, usd_wyjscie]} albo [..., usd_cache] za MILION tokenów.
+# Wbudowane ceny siedzą w config/cennik.py razem z datą sprawdzenia; ta zmienna
+# jest po to, żeby dopisać model bez deployu. Pusto = raport pokaże koszt jako
+# nieznany, i to jest poprawna odpowiedź, dopóki nikt nie sprawdził cennika.
 CENNIK_EXTRA = _txt("CENNIK_EXTRA")
 # Kurs do przeliczenia kosztu runu na złotówki. Wartość domyślna jest
 # ZAOKRĄGLONYM PLACEHOLDEREM — ustaw realny, jeśli liczba ma być czymś więcej
@@ -348,18 +373,24 @@ def opis_srodowiska() -> str:
     stan = {
         "db": bool(DATABASE_URL),
         "anthropic": bool(ANTHROPIC_API_KEY),
+        "openai": bool(OPENAI_API_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "baza_geo": bool(BAZA_LAT or BAZA_LON),
         "api_token": bool(API_TOKEN),
     }
+    # Model TEGO providera, nie zawsze Anthropic — inaczej linia startowa przy
+    # LLM_PROVIDER=openai pokazywałaby model, który w tym przebiegu nie ruszy.
+    model_llm = {"openai": OPENAI_MODEL, "gemini": GEMINI_MODEL}.get(
+        LLM_PROVIDER.strip().lower(), CLASSIFIER_MODEL) or "(brak)"
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
     ) + (f", cisza_nocna={CISZA_NOCNA_OD}-{CISZA_NOCNA_DO}"
          f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
          f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
-         f", llm={LLM_PROVIDER}/{CLASSIFIER_MODEL}"
-         f", budzet={POSTY_NA_DOBE} postow/dobe"
+         f", llm={LLM_PROVIDER}/{model_llm}"
+         + (f"(json={OPENAI_JSON_MODE})" if LLM_PROVIDER.strip().lower() == "openai" else "")
+         + f", budzet={POSTY_NA_DOBE} postow/dobe"
          f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
 
