@@ -1,25 +1,284 @@
 """Offline testy wyszukiwarki grup — bez sieci i bez wydawania kredytu.
 
-Trzy rzeczy muszą być pewne, zanim ktokolwiek odpali płatną serię:
+Pięć rzeczy musi być pewnych, zanim ktokolwiek odpali płatną serię:
 
-  1. LICZBA CZŁONKÓW czytana z podpisu FB. Pomyłka o rząd wielkości w jedną stronę
+  1. NAZWY PÓL WEJŚCIA. Actor przyjmuje `startUrls`/`maxGroups`, a nie
+     `search`/`maxItems` — i to jest różnica, której NIE WIDAĆ po runie: pole,
+     którego actor nie zna, zostaje zignorowane bez błędu i płaci się pełną cenę
+     za run bez filtra.
+  2. CIASTECZKA. Bez sesji wyszukiwarka FB oddaje ścianę logowania, więc run
+     kosztuje tyle samo i nie zwraca nic. Ich WARTOŚCI nie mają prawa wyjść
+     do logu ani do podglądu `--sucho` — to żywa sesja Facebooka.
+  3. LICZBA CZŁONKÓW czytana z podpisu FB. Pomyłka o rząd wielkości w jedną stronę
      wpuszcza do listy szum, w drugą — wycina grupę, która była tu najlepsza.
-  2. DEDUP PO URL-u. Ta sama grupa wraca z każdej frazy w innej postaci; bez
+  4. DEDUP PO URL-u. Ta sama grupa wraca z każdej frazy w innej postaci; bez
      normalizacji CSV puchnie o duplikaty, których człowiek nie ma jak odsiać.
-  3. SCALANIE Z PRACĄ RĘCZNĄ. To jedyny nieodwracalny błąd tego skryptu:
+  5. SCALANIE Z PRACĄ RĘCZNĄ. To jedyny nieodwracalny błąd tego skryptu:
      nadpisanie kolumny `publiczna` kasuje godziny klikania po Facebooku i po
      drugim razie nikt narzędzia nie odpali.
 """
 from __future__ import annotations
 
+import importlib
+import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
 from laweta_radar.config import frazy_grup as cfg  # noqa: E402
+from laweta_radar.config import settings  # noqa: E402
 from laweta_radar.scripts import znajdz_grupy as z  # noqa: E402
+from laweta_radar.workers import apify_run  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# WEJŚCIE ACTORA — jedyny błąd tego skryptu, który kosztuje pieniądze po cichu
+# ---------------------------------------------------------------------------
+# Schemat WZIĘTY Z PRODUKCJI (`--schema`, memo23~facebook-search-groups-scraper,
+# sprawdzony 2026-08-05): dokładnie sześć pól, ani `search`, ani `maxItems`.
+# Stoi tutaj, a nie w kodzie, ŚWIADOMIE — rozjazd nazw ma być czerwonym testem
+# na sucho, a nie rachunkiem za serię runów bez filtra.
+SCHEMAT_ACTORA = {"properties": {
+    "cookies":   {"type": "array"},
+    "maxDelay":  {"type": "integer"},
+    "maxGroups": {"type": "integer"},
+    "minDelay":  {"type": "integer"},
+    "proxy":     {"type": "object"},
+    "startUrls": {"type": "array"},
+}}
+
+
+def test_wejscie_uzywa_wylacznie_pol_ktore_actor_deklaruje():
+    wejscie = z._wejscie("giełda lawet", 30, [{"name": "c_user", "value": "1"}])
+    assert apify_run.nieznane_pola(wejscie, SCHEMAT_ACTORA) == []
+
+
+def test_wejscie_nie_ma_pol_ktorych_ten_actor_nigdy_nie_mial():
+    """`search` i `maxItems` nie istnieją w tym actorze. Zła nazwa pola nie
+    zwraca błędu — zwraca run BEZ FILTRA, za pełną cenę."""
+    wejscie = z._wejscie("giełda lawet", 30)
+    assert "search" not in wejscie
+    assert "maxItems" not in wejscie
+    assert wejscie[cfg.POLE_LIMITU] == 30
+
+
+def test_fraza_jedzie_jako_adres_wyszukiwarki_w_startUrls():
+    """Actor nie ma pola na frazę — szukanie wyraża się adresem."""
+    wejscie = z._wejscie("giełda lawet", 30)
+    assert wejscie[cfg.POLE_STARTOWE] == [
+        {"url": "https://www.facebook.com/search/groups/?q=gie%C5%82da%20lawet"}]
+
+
+def test_url_frazy_koduje_spacje_i_znaki_narodowe():
+    """Frazy mają spacje i ogonki w czterech językach. Niezakodowane rozwalają
+    adres, a actor dostaje URL, który nie jest wyszukiwaniem."""
+    for fraza in ("giełda lawet", "odtahová služba", "Autotransport Börse",
+                  "odťah vozidla", "přeprava vozidel Německo"):
+        url = z.url_frazy(fraza)
+        assert url.startswith("https://www.facebook.com/search/groups/?q=")
+        assert " " not in url
+        assert url.isascii()        # nic niezakodowanego nie wyszło na zewnątrz
+
+
+def test_url_frazy_koduje_znaki_ktore_sa_skladnia_adresu():
+    """`&`, `?` i `/` w treści frazy to znaki, nie separatory — inaczej reszta
+    frazy zostaje przez FB przeczytana jako kolejny parametr."""
+    ogon = z.url_frazy("laweta & pomoc/drogowa?").split("q=", 1)[1]
+    assert "&" not in ogon and "?" not in ogon and "/" not in ogon
+
+
+def test_odstepy_przewijania_ida_z_konfiguracji():
+    """minDelay/maxDelay to nie pokrętło wydajności: zbyt agresywne przewijanie
+    wygląda dla FB jak bot i psuje sesję, czyli wszystkie NASTĘPNE runy."""
+    wejscie = z._wejscie("giełda lawet", 30)
+    assert wejscie[cfg.POLE_MIN_ODSTEPU] == settings.FB_SEARCH_MIN_DELAY_S
+    assert wejscie[cfg.POLE_MAX_ODSTEPU] == settings.FB_SEARCH_MAX_DELAY_S
+    assert wejscie[cfg.POLE_MIN_ODSTEPU] <= wejscie[cfg.POLE_MAX_ODSTEPU]
+
+
+def test_odwrocona_para_odstepow_nie_zatrzymuje_przebiegu(monkeypatch):
+    """Zasada tego repo: zła wartość w .env degraduje, nie wysadza crona."""
+    monkeypatch.setenv("FB_SEARCH_MIN_DELAY_S", "9")
+    monkeypatch.setenv("FB_SEARCH_MAX_DELAY_S", "2")
+    try:
+        swieze = importlib.reload(settings)
+        assert swieze.FB_SEARCH_MIN_DELAY_S == 9
+        assert swieze.FB_SEARCH_MAX_DELAY_S == 9      # sufit dociągnięty do dołu
+    finally:
+        monkeypatch.undo()
+        importlib.reload(settings)
+
+
+def test_nazwy_pol_niosa_date_sprawdzenia_schematu():
+    """Actory zmieniają wejście między wersjami. Bez daty nie da się odróżnić
+    nazw, które ktoś sprawdził, od nazw, które ktoś zgadł."""
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", cfg.SCHEMAT_SPRAWDZONY)
+
+
+def test_jezyk_frazy_rozpoznaje_blok_jezykowy():
+    """Kolumna `jezyk` bierze się z tego, która fraza znalazła grupę — przy
+    `--fraza` wpisanej z ręki nie ma innego źródła."""
+    assert z.jezyk_frazy("giełda lawet") == "pl"
+    assert z.jezyk_frazy("odtahová služba") == "cs"
+    assert z.jezyk_frazy("coś wpisanego z ręki") == "?"
+
+
+# ---------------------------------------------------------------------------
+# CIASTECZKA — bez nich actor dostaje ścianę logowania, a rachunek jest ten sam
+# ---------------------------------------------------------------------------
+CIASTECZKA_FB = [
+    {"name": "c_user", "value": "100000000000001", "domain": ".facebook.com"},
+    {"name": "xs", "value": "TAJNA-SESJA", "domain": ".facebook.com"},
+]
+
+
+def _plik_ciastek(tmp_path, dane, nazwa="ciasteczka.json"):
+    plik = tmp_path / nazwa
+    plik.write_text(json.dumps(dane), encoding="utf-8")
+    return plik
+
+
+def test_wczytuje_oba_formaty_eksportu(tmp_path):
+    """Rozszerzenia przeglądarki zapisują raz gołą listę, raz `{"cookies": [...]}`."""
+    lista, _ = z.wczytaj_ciasteczka(_plik_ciastek(tmp_path, CIASTECZKA_FB))
+    obiekt, _ = z.wczytaj_ciasteczka(
+        _plik_ciastek(tmp_path, {"cookies": CIASTECZKA_FB}, "obiekt.json"))
+    assert lista == obiekt == CIASTECZKA_FB
+
+
+def test_brak_pliku_to_ostrzezenie_a_nie_wyjatek(tmp_path):
+    """Brak sesji ma zatrzymać człowieka PYTANIEM przed serią, a nie tracebackiem
+    w środku opłaconego przebiegu."""
+    for sciezka in ("", None, tmp_path / "nie-ma-mnie.json"):
+        ciasteczka, komunikat = z.wczytaj_ciasteczka(sciezka)
+        assert ciasteczka == []
+        assert komunikat.startswith("BRAK")
+
+
+def test_zepsuty_plik_nie_wysadza_skryptu_i_nie_cytuje_tresci(tmp_path):
+    """Treść wyjątku z JSON-a bywa fragmentem pliku, a plik jest sesją."""
+    plik = tmp_path / "polamany.json"
+    plik.write_text('[{"name": "xs", "value": "TAJNA-SESJA"', encoding="utf-8")
+    ciasteczka, komunikat = z.wczytaj_ciasteczka(plik)
+    assert ciasteczka == []
+    assert "TAJNA-SESJA" not in komunikat
+
+
+def test_ciasteczka_spoza_facebooka_nie_jada_do_cudzego_actora(tmp_path):
+    """Eksport bywa eksportem CAŁEJ przeglądarki. Plik idzie w całości do obcego
+    actora, więc jedzie wyłącznie to, co dotyczy Facebooka — i widać, ile zostało
+    w domu."""
+    plik = _plik_ciastek(tmp_path, [
+        *CIASTECZKA_FB,
+        {"name": "sid", "value": "SESJA-BANKU", "domain": ".bank.example"},
+    ])
+    ciasteczka, komunikat = z.wczytaj_ciasteczka(plik)
+    assert ciasteczka == CIASTECZKA_FB
+    assert "SESJA-BANKU" not in komunikat
+    assert "1 spoza Facebooka POMINIĘTO" in komunikat
+
+
+def test_komunikat_niesie_liczbe_a_nigdy_wartosci(tmp_path):
+    ciasteczka, komunikat = z.wczytaj_ciasteczka(
+        _plik_ciastek(tmp_path, CIASTECZKA_FB))
+    assert len(ciasteczka) == 2
+    assert komunikat.startswith("2 z ")
+    assert "TAJNA-SESJA" not in komunikat
+    assert "100000000000001" not in komunikat
+
+
+def test_plik_bez_ciasteczek_sesji_jest_oznaczony(tmp_path):
+    """Eksport z niezalogowanej karty wygląda jak poprawny plik i przechodzi
+    wszystko poza tym jednym sprawdzeniem."""
+    _, komunikat = z.wczytaj_ciasteczka(_plik_ciastek(
+        tmp_path, [{"name": "datr", "value": "x", "domain": ".facebook.com"}]))
+    assert "UWAGA" in komunikat and "c_user" in komunikat
+
+
+def test_ciasteczka_doklejane_tylko_gdy_sa():
+    """Pole wysłane pusto znaczy dla actora to samo co brak pola, ale w podglądzie
+    `--sucho` wyglądałoby jak sesja, której nie ma."""
+    assert cfg.POLE_CIASTECZEK not in z._wejscie("fraza", 5)
+    assert cfg.POLE_CIASTECZEK not in z._wejscie("fraza", 5, [])
+    assert z._wejscie("fraza", 5, CIASTECZKA_FB)[cfg.POLE_CIASTECZEK] == CIASTECZKA_FB
+
+
+def test_podglad_wejscia_nie_pokazuje_wartosci_ciasteczek():
+    """`--sucho` ma pozwolić porównać wejście ze schematem gołym okiem — i ani
+    razu nie wypisać sesji, bo log bywa wklejany do zgłoszeń."""
+    wejscie = z._wejscie("giełda lawet", 30, CIASTECZKA_FB)
+    podglad = z.podglad_wejscia(wejscie)
+    assert "TAJNA-SESJA" not in podglad
+    assert "2 ciasteczek" in podglad
+    assert cfg.POLE_STARTOWE in podglad          # reszta wejścia widoczna...
+    assert cfg.POLE_CIASTECZEK in podglad        # ...razem z SAMYM polem cookies
+    # Maskowanie jest kopią: wejście, które faktycznie leci do actora, nietknięte.
+    assert wejscie[cfg.POLE_CIASTECZEK] == CIASTECZKA_FB
+
+
+# ---------------------------------------------------------------------------
+# Seria i próba — pętla fraz bez sieci
+# ---------------------------------------------------------------------------
+class _AtrapaRotatora:
+    """Rotator sprowadzony do jednego klucza — tu testujemy pętlę fraz, nie rotację."""
+
+    def call(self, fn):
+        return fn("token-testowy")
+
+
+def _atrapa_runu(itemy):
+    return type("RunAtrapa", (), {
+        "itemy": itemy, "ile_itemow": len(itemy), "koszt_usd": 0.01, "blad": None,
+    })()
+
+
+def _przechwyc_wywolania(monkeypatch, itemy):
+    """Podmienia actora na atrapę; oddaje listę, do której wpadają WEJŚCIA."""
+    wywolania: list[dict] = []
+
+    def atrapa(token, actor, wejscie, **kw):  # noqa: ARG001
+        wywolania.append(wejscie)
+        return _atrapa_runu(itemy)
+
+    monkeypatch.setattr(z.apify_run, "uruchom", atrapa)
+    monkeypatch.setattr(z.time, "sleep", lambda _s: None)
+    return wywolania
+
+
+def test_ciasteczka_dojezdzaja_do_wejscia_actora(monkeypatch):
+    wywolania = _przechwyc_wywolania(
+        monkeypatch, [{"url": "https://facebook.com/groups/1", "name": "G"}])
+    z._szukaj(_AtrapaRotatora(), [("pl", "giełda lawet")], 5, lambda *_: None,
+              CIASTECZKA_FB)
+    assert wywolania[0][cfg.POLE_CIASTECZEK] == CIASTECZKA_FB
+
+
+def test_seria_przerywa_sie_gdy_pierwsza_fraza_zwraca_zero(monkeypatch):
+    """Bez sesji KAŻDE wywołanie zwróci to samo zero i zostanie policzone tak
+    samo jak udane. Jedno stracone wywołanie zamiast dwudziestu ośmiu."""
+    wywolania = _przechwyc_wywolania(monkeypatch, [])
+    seria = z._szukaj(_AtrapaRotatora(),
+                      [("pl", "a"), ("pl", "b"), ("pl", "c")], 5, lambda *_: None)
+    assert len(wywolania) == 1
+    assert any("sesję" in b for b in seria.bledy)
+
+
+def test_werdykt_proby_wskazuje_sesje_gdy_nie_ma_itemow(capsys):
+    z._wynik_proby(z._Seria(), byly_ciasteczka=False)
+    wyjscie = capsys.readouterr().out
+    assert "ZERO itemów" in wyjscie and "FB_COOKIES_PATH" in wyjscie
+
+
+def test_werdykt_proby_odroznia_brak_sesji_od_zmiany_pol_wyjscia(capsys):
+    """Itemy bez adresów grup to inna awaria niż brak itemów — i co innego się
+    po niej robi (POLA_URL, nie ciasteczka)."""
+    z._wynik_proby(z._Seria(surowe=[{"zupelnie": "inny kształt"}]),
+                   byly_ciasteczka=True)
+    wyjscie = capsys.readouterr().out
+    assert "POLA_URL" in wyjscie
 
 
 # ---------------------------------------------------------------------------

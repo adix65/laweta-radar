@@ -98,8 +98,37 @@ SLOWA_SPRZEDAZOWE = (
 # i sprawdza się je PRZED serią:
 #     python -m laweta_radar.scripts.znajdz_grupy --schema
 ACTOR = "memo23~facebook-search-groups-scraper"
-POLE_FRAZY = "search"          # pole, do którego wchodzi szukana fraza
-POLE_LIMITU = "maxItems"       # pole ograniczające liczbę wyników
+
+# SCHEMAT SPRAWDZONY 2026-08-05 na produkcji (`--schema`). Actor przyjmuje
+# DOKŁADNIE sześć pól:
+#     cookies (array)  maxDelay (int)  maxGroups (int)
+#     minDelay (int)   proxy (object)  startUrls (array)
+#
+# NIE MA pola `search` ANI `maxItems` — i to jest cała historia tej sekcji.
+# Frazy nie podaje się osobnym polem: zamienia się ją na ADRES wyszukiwarki FB
+# i wkłada do `startUrls` (patrz URL_WYSZUKIWARKI niżej).
+#
+# DATA JEST TU CZĘŚCIĄ TREŚCI, nie ozdobą. Wejście actora zmienia się między
+# wersjami, a jedynym objawem rozjazdu jest rachunek: pole, którego actor nie
+# zna, zostaje po cichu zignorowane i dostajesz run bez filtra za pełną cenę.
+# Przy każdej zmianie tych nazw podmień datę na dzień, w którym `--schema`
+# potwierdził stan.
+SCHEMAT_SPRAWDZONY = "2026-08-05"
+
+POLE_STARTOWE = "startUrls"       # adresy do otwarcia — tu wchodzą frazy
+POLE_LIMITU = "maxGroups"         # sufit liczby zwróconych grup
+POLE_CIASTECZEK = "cookies"       # sesja FB; bez niej wyszukiwarka nie działa
+POLE_MIN_ODSTEPU = "minDelay"     # sekundy między przewinięciami — dolna granica
+POLE_MAX_ODSTEPU = "maxDelay"     # sekundy między przewinięciami — górna granica
+# Szóste pole schematu, `proxy`, ŚWIADOMIE nie jest wysyłane: actor bierze wtedy
+# swoją domyślną konfigurację proxy Apify. Nasza rotacja proxy (workers/
+# apify_proxy.py) dotyczy ruchu DO API Apify, czyli czegoś innego — wpisanie jej
+# tutaj wysłałoby nasze poświadczenia do cudzego actora bez żadnego zysku.
+
+# Adres wyszukiwarki grup FB. `{q}` wypełnia fraza zakodowana PROCENTOWO
+# (`urllib.parse.quote`) — frazy mają spacje i znaki narodowe („giełda lawet",
+# „odtahová služba", „Autotransport Börse"), a niezakodowane rozwalają adres.
+URL_WYSZUKIWARKI = "https://www.facebook.com/search/groups/?q={q}"
 
 # Ile wyników bierzemy z jednej frazy. Wyszukiwarka FB i tak sortuje po trafności,
 # więc ogon jest szumem — a każdy wynik kosztuje.

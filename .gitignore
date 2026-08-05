@@ -4,6 +4,12 @@
 !.env.example
 *.key
 *.pem
+# Sesja Facebooka dla wyszukiwarki grup (FB_COOKIES_PATH, patrz
+# scripts/znajdz_grupy.py). Plik ma leżeć POZA repo — te wzorce są zabezpieczeniem
+# na wypadek, gdyby ktoś mimo to upuścił go tutaj. Zacommitowana sesja to
+# zalogowane konto operatora w historii gita, a historii się nie cofa.
+*cookies*.json
+*ciasteczka*.json
 
 # === Python ===
 __pycache__/
