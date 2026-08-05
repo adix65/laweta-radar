@@ -39,23 +39,68 @@ nikt stąd nie pojedzie.
 """
 from __future__ import annotations
 
-# Wszystkie wpisy startują jako "unverified" — repo nie zna jeszcze regionu
-# operatora ani tego, które grupy są publiczne. Odblokowuj pojedynczo, po
-# weryfikacji opisanej wyżej.
+# SKĄD SIĘ WZIĄŁ PODZIAŁ NA "ok" I "unverified" NA TEJ LIŚCIE
+#
+# Rozstrzygnął go JEDEN sygnał: czy w wynikach wyszukiwarki dało się zobaczyć
+# TREŚĆ postów z grupy. To jedyny dowód publiczności dostępny z zewnątrz, bo
+# grupa prywatna nie ma zindeksowanych treści — nie ma czego pokazać, nawet gdy
+# sama grupa istnieje i ma dziesięć tysięcy członków. Skoro więc wyszukiwarka
+# oddaje posty, to samo zobaczy actor Apify i taki wpis dostaje "ok".
+# Tam, gdzie w wynikach była SAMA NAZWA grupy bez treści, publiczność jest
+# niepotwierdzona: wpis zostaje "unverified", żeby nie płacić za run, który
+# może nie zwrócić ani jednego posta.
+#
+# CZEGO TEN SYGNAŁ NIE MÓWI: czy grupa jest ZGŁOSZENIOWA (ludzie proszą
+# o przewóz auta) czy OGŁOSZENIOWA (firmy reklamują swoje wolne miejsca na
+# lawecie). Indeksują się tak samo, kosztują tak samo — a ogłoszeniowa nie
+# dowiezie ani jednego zlecenia, bo w środku nie ma klientów, tylko konkurencja.
+# Statusu "ok" nie należy więc czytać jako "grupa wartościowa", tylko jako
+# "grupa da się pobrać". Rozstrzyga to dopiero raport wydajności
+# (zlecenia / pobrane posty w oknie OKNO_WYDAJNOSCI_DNI) albo dwie minuty
+# człowieka zalogowanego na FB, który spojrzy na ostatnie posty.
 FB_GRUPY: list[dict[str, str]] = [
-    # ── POMOC DROGOWA / LAWETY — grupy zgłoszeniowe ──
-    {"url": "", "name": "Pomoc drogowa — Twoje województwo", "region": "lokalny", "status": "unverified"},
-    {"url": "", "name": "Laweta / transport aut — Twoje województwo", "region": "lokalny", "status": "unverified"},
+    # ── PUBLICZNOŚĆ POTWIERDZONA (treść postów widoczna w wyszukiwarce) ──
+    {"url": "https://www.facebook.com/groups/132548385153051/",
+     "name": "Wolne miejsca na lawetach BE/NL/DE",
+     "region": "zagranica", "status": "ok"},
+    {"url": "https://www.facebook.com/groups/856010917787518/",
+     "name": "Wolne miejsce Belgia-Holandia-Niemcy-Polska",
+     "region": "zagranica", "status": "ok"},
+    {"url": "https://www.facebook.com/groups/330577835353723/",
+     "name": "Wolna laweta BE/NL/DE do Polski",
+     "region": "zagranica", "status": "ok"},
+    {"url": "https://www.facebook.com/groups/422508107838058/",
+     "name": "Transport aut Niemcy Belgia Holandia",
+     "region": "zagranica", "status": "ok"},
+    {"url": "https://www.facebook.com/groups/2369283210002047/",
+     "name": "Auto laweta Transport HO/BE/DE",
+     "region": "zagranica", "status": "ok"},
 
-    # ── MOTORYZACJA REGIONALNA — tu padają "zepsułem się pod...", nawet gdy
-    #    grupa nie jest o pomocy drogowej ──
-    {"url": "", "name": "Motoryzacja — Twoje miasto", "region": "lokalny", "status": "unverified"},
-    {"url": "", "name": "Ogłoszenia / kupię-sprzedam — Twoje miasto", "region": "lokalny", "status": "unverified"},
-
-    # ── TRANSPORT AUT / GIEŁDY ZLECEŃ — zlecenia planowane (przewóz auta
-    #    z komisu, z zagranicy), inny rytm niż awaria: mniej pilne, ale
-    #    większa wartość pojedynczego kursu ──
-    {"url": "", "name": "Transport aut / giełda zleceń", "region": "krajowy", "status": "unverified"},
+    # ── PUBLICZNOŚĆ NIEPOTWIERDZONA (w wynikach była sama nazwa grupy) ──
+    {"url": "https://www.facebook.com/groups/1412593546181060/",
+     "name": "Transport LAWETA Niemcy-Polska | Przerzuty DE/NL/BE",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/478394099303683/",
+     "name": "Laweciarze | Wolne lawety | Wolne ladunki",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/625258040958010/",
+     "name": "Gielda Lawet | Zlece przewoz",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/gieldatransportu/",
+     "name": "Laweciarze Gielda Transportu",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/gieldatransportowa/",
+     "name": "Polski Transport Gielda Transportowa",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/2036193719947874/",
+     "name": "Gielda Transportowa - TRANS Polska",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/262962694265908/",
+     "name": "Gielda Transportowa",
+     "region": "krajowy", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/www.autopomoc.eu/",
+     "name": "Bezplatna Gielda Ladunkow",
+     "region": "krajowy", "status": "unverified"},
 ]
 
 # ── Parametry pobierania per grupa ──────────────────────────────────────────
