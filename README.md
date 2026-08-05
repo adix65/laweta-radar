@@ -252,6 +252,55 @@ python -m laweta_radar.services.powiadomienia --probka    # wyślij przykład
 python -m laweta_radar.services.powiadomienia --noc       # podsumowanie ranne
 ```
 
+### Podgląd trasy jako obrazek
+
+Gdy **oba** punkty trasy udało się zgeokodować, alert idzie jako **zdjęcie**
+z mapą, a powyższa treść jako podpis pod nim. Przyciski, progi, dedup i limity
+bez zmian — zmienia się jedna rzecz: metoda Bot API.
+
+Po co: „Żulte → Jędrzejów · 1180 km" mówi wszystko o długości kursu i nic o tym,
+**gdzie** ta trasa leży, a przy decyzji „brać czy nie" liczy się rzut oka na jej
+kształt. Dotąd odpowiedź na to pytanie wymagała wyjścia z Telegrama.
+
+Trasa jest niebieska, odbiór zielony, dostawa czerwona, a punkt o źródle
+`miasto_niepewne` — **pomarańczowy**: ostrzeżenie z podpisu („⚠ Dębica?
+(niepewne)") musi być widoczne w tym samym rzucie oka co kształt trasy, inaczej
+obrazek wygląda na pewniejszy niż tekst pod nim.
+
+**Kiedy obrazka NIE MA i to jest ważniejsze niż sam obrazek** — w każdym z tych
+przypadków leci zwykły `sendMessage` z pełną treścią:
+
+- którykolwiek punkt nierozpoznany (mapa z jednym punktem myli bardziej,
+  niż pomaga),
+- brak paczki `staticmap` — jest **poza requirements.txt**, jak `pywebpush`;
+  moduł mówi to RAZ w logu,
+- wyjątek przy generowaniu albo przekroczone **5 s** (budżet liczony zegarem
+  ściennym, w osobnym wątku),
+- treść nie mieści się w podpisie (limit **1024** znaków, czterokrotnie niższy
+  niż limit wiadomości) bez skrócenia cytatu poniżej progu czytelności. Tniemy
+  **wyłącznie cytat** — trasa, telefon i kilometry to rzeczy, po których zapada
+  decyzja,
+- `MAPY_W_ALERTACH=0`.
+
+Powiadomienie **musi** dojść; obrazek jest dodatkiem i nigdy nie może być
+powodem, dla którego zlecenie nie dotarło do kierowcy.
+
+Kafelki bierzemy z OpenStreetMap — utrzymuje je projekt społeczny z darowizn,
+więc wychodzimy z własnym `User-Agent` (anonimowy ruch bywa blokowany hurtem)
+i **cache'ujemy** obrazki na dysku: klucz to para współrzędnych zaokrąglona do
+3 miejsc po przecinku, czyli ten sam kurs crossowany do pięciu grup pobiera
+kafelki RAZ. Wpisy starsze niż 7 dni kasują się same.
+
+Styl kafelków jest zweryfikowany ręcznie na trasie Żulte (BE) → Jędrzejów (PL):
+przy zoomie dobranym do trasy widać nazwy krajów i główne miasta. Sprawdzone
+i **odrzucone**: carto-positron, carto-voyager, opentopo oraz domalowywanie
+granic z Natural Earth — nie poprawiają czytelności, a dokładają zależności.
+
+```bash
+pip install staticmap                                    # opcjonalnie, na VPS-ie
+python -m laweta_radar.services.mapa Krosno Rzeszow       # czy kafelki dochodzą
+```
+
 ### Progi sterują brzęczeniem, nigdy widocznością
 
 **Żaden próg nie usuwa zlecenia z bazy ani z panelu.** To jest zasada naczelna
@@ -456,6 +505,7 @@ laweta_radar/
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate + wyslij/wywolaj)
     powiadomienia.py   # TREŚĆ alertu, progi wysyłki, antyspam, cisza nocna
+    mapa.py            # podgląd trasy jako obrazek pod alertem + cache kafelków
     geo.py             # dystans od bazy, linki do map, pewność lokalizacji
     feedback.py        # zapis oceny operatora — wspólny dla API i bota
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify

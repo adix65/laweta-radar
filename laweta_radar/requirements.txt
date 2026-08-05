@@ -31,5 +31,14 @@ pytest>=8.0.0            # testy offline (laweta_radar/tests/)
 # korzystający wyłącznie z Telegrama (czyli domyślny) nie ma powodu jej budować:
 # pywebpush>=2.0.0       # web push (VAPID); bez niej push po prostu milczy
 
+# --- OPCJONALNE: podgląd trasy w alercie (services/mapa.py) ------------------
+# Ta sama zasada trzeci raz. `staticmap` ciągnie Pillow, czyli kolejną paczkę
+# z kompilacją; alert bez obrazka jest dokładnie tym alertem, który system
+# wysyłał przedtem, więc jej brak NIE jest awarią — moduł mówi o tym raz w logu
+# i wysyła tekst. Testy repo przechodzą BEZ niej (render jest podstawiany
+# atrapą), bo test wymagający paczki spoza requirements.txt nie chodziłby
+# w konfiguracji domyślnej:
+# staticmap>=0.5.4       # mapa trasy w alercie (MAPY_W_ALERTACH=1)
+
 # socks5:// w APIFY_PROXY_* wymaga dodatkowo: pip install "httpx[socks]"
 # Dla http:// i https:// nic nie trzeba dokładać — patrz docs/APIFY-PROXY.md.

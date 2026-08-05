@@ -131,6 +131,50 @@ def test_edycja_zdejmuje_przyciski(telegram, monkeypatch):
     assert "stara treść" in edycja["text"]      # oryginał zostaje widoczny
 
 
+def _callback_ze_zdjeciem(dane: str, podpis: str = "stary podpis") -> dict:
+    """Callback spod alertu wysłanego jako ZDJĘCIE z mapą trasy.
+
+    Telegram oddaje wtedy `caption`, a pola `text` NIE MA W OGÓLE — i to jest
+    cała różnica, przez którą `editMessageText` odpowiada „there is no text in
+    the message to edit".
+    """
+    return {"id": "cb1", "data": dane,
+            "message": {"message_id": 99, "caption": podpis,
+                        "photo": [{"file_id": "AgAC"}], "chat": {"id": 12345}}}
+
+
+def test_alert_ze_zdjeciem_edytuje_podpis_a_nie_tekst(telegram, monkeypatch):
+    """Alert z mapą trasy nie ma pola `text`. Bez tej gałęzi edycja pada,
+    przyciski zostają na ekranie — a alert, który po kliknięciu wygląda
+    identycznie, uczy klikać jeszcze raz. Przy „Śmieć" drugie kliknięcie to
+    zlecenie wyrzucone przez pomyłkę."""
+    monkeypatch.setattr(bot.feedback, "zapisz", lambda *a, **k: True)
+    bot.obsluz_callback(_Polaczenie([("abc",)]), _callback_ze_zdjeciem("smiec:abc"))
+
+    metody = [m for m, _ in telegram]
+    assert "editMessageCaption" in metody
+    assert "editMessageText" not in metody
+
+    edycja = [p for m, p in telegram if m == "editMessageCaption"][0]
+    assert "reply_markup" not in edycja        # przyciski znikają, jak przy tekście
+    assert "śmieć" in edycja["caption"]
+    assert "stary podpis" in edycja["caption"]  # oryginał zostaje widoczny
+
+
+def test_dopisek_pod_zdjeciem_miesci_sie_w_limicie_podpisu(telegram, monkeypatch):
+    """Podpis ma limit 1024 znaków i alert potrafi go dotykać. Doklejony dopisek
+    przekroczyłby limit, Telegram odrzuciłby edycję i przyciski zostałyby na
+    ekranie — czyli dokładnie ten skutek, przed którym ta gałąź broni."""
+    monkeypatch.setattr(bot.feedback, "zapisz", lambda *a, **k: True)
+    pod_korek = "x" * bot.telegram_notify.MAX_CAPTION
+    bot.obsluz_callback(_Polaczenie([("abc",)]),
+                        _callback_ze_zdjeciem("smiec:abc", pod_korek))
+
+    edycja = [p for m, p in telegram if m == "editMessageCaption"][0]
+    assert len(edycja["caption"]) <= bot.telegram_notify.MAX_CAPTION
+    assert "śmieć" in edycja["caption"]
+
+
 def test_biore_ustawia_dzwonie(telegram, monkeypatch):
     monkeypatch.setattr(bot.feedback, "zapisz", lambda *a, **k: True)
     conn = _Polaczenie([("abc",)])
