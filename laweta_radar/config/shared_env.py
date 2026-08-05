@@ -62,9 +62,20 @@ WSPOLNE_WZORCE = (
 WYKLUCZONE_ZE_WSPOLNEGO = re.compile(r"^APIFY_PROXY_POOL")
 
 
+# Jawne WYŁĄCZENIE dziedziczenia. Puste SHARED_ENV_PATH znaczy „szukaj pod
+# domyślną ścieżką", więc bez tego sentinela nie da się powiedzieć „nie bierz
+# stamtąd NIC" — a własne APIFY_API_TOKEN1..5 w .env nadpisują tylko pierwsze
+# pięć nazw i reszta puli wchodzi dalej. Instancja testowa z własnymi kontami
+# skończyłaby więc z pięcioma swoimi i trzydziestoma czterema produkcyjnymi,
+# nie widząc po niczym, że tak się stało.
+WYLACZONE_WARTOSCI = frozenset({"brak", "none", "off", "0", "-"})
+
+
 def sciezka_wspolnego_env() -> Path | None:
-    """Gdzie leży .env z pulą Apify. None, gdy nie ustawiono i nie ma domyślnego."""
+    """Gdzie leży .env z pulą Apify. None, gdy wyłączone albo pliku nie ma."""
     raw = (os.environ.get("SHARED_ENV_PATH") or "").strip()
+    if raw.lower() in WYLACZONE_WARTOSCI:
+        return None
     kandydat = Path(raw) if raw else Path(DOMYSLNY_SHARED_ENV)
     return kandydat if kandydat.is_file() else None
 

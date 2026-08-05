@@ -248,7 +248,11 @@ przeladuj() {
     # repo), więc PM2 trzyma go w pętli `waiting restart` i odbija `pm2 restart`
     # przez "Process not found". Nowy kod podejmie sam przy najbliższym
     # nawrocie — traktowanie tego jak błędu uczy operatora ignorować błędy.
-    stan="$(pm2 jlist 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const a=JSON.parse(d).find(p=>p.name===process.argv[1]);process.stdout.write(a?String(a.pm2_env.status):"")}catch(e){}})' "$proc" 2>/dev/null)"
+    # Wycinamy tablicę od pierwszego [ do ostatniego ], bo `pm2 jlist` potrafi
+    # dokleić na stdout baner (np. "In-memory PM2 is out-of-date"), na którym
+    # JSON.parse całości się wywala — a wtedy stan wychodzi pusty i proces, który
+    # po prostu nie chodził, jest raportowany jako awaria.
+    stan="$(pm2 jlist 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=d.indexOf("["),j=d.lastIndexOf("]");const a=JSON.parse(d.slice(i,j+1)).find(p=>p.name===process.argv[1]);process.stdout.write(a?String(a.pm2_env.status):"")}catch(e){}})' "$proc" 2>/dev/null)"
     if [[ -n "$stan" && "$stan" != "online" ]]; then
         log "pominięty: $proc (stan: $stan — nie chodzi, podejmie nowy kod sam)"
         log "           dlaczego nie chodzi:  pm2 logs $proc --lines 30 --nostream"

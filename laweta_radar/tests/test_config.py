@@ -196,6 +196,30 @@ def test_brak_wspolnego_pliku_to_nie_awaria(monkeypatch):
     assert ile == 0 and skad == "nie znaleziono"
 
 
+def test_shared_env_path_brak_wylacza_dziedziczenie(tmp_path, monkeypatch):
+    """`SHARED_ENV_PATH=brak` ma odciąć wspólną pulę, choć plik ISTNIEJE.
+
+    Instancja testowa z własnymi kontami Apify nie ma innego sposobu, żeby
+    powiedzieć „nie bierz stamtąd nic": puste SHARED_ENV_PATH znaczy „szukaj pod
+    domyślną ścieżką", a własne APIFY_API_TOKEN1..5 nadpisują tylko pierwsze
+    pięć nazw — reszta cudzej puli weszłaby dalej i nie byłoby tego po czym
+    poznać poza liczbą kluczy w rotatorze.
+    """
+    p = _wspolny_env(tmp_path, "APIFY_API_TOKEN1=cudzy\nAPIFY_API_TOKEN2=cudzy2\n")
+    monkeypatch.delenv("APIFY_API_TOKEN1", raising=False)
+    monkeypatch.delenv("APIFY_API_TOKEN2", raising=False)
+
+    monkeypatch.setenv("SHARED_ENV_PATH", str(p))
+    assert settings.sciezka_wspolnego_env() == p        # plik jest i normalnie działa
+
+    for wartosc in ("brak", "BRAK", "none", "off", "0", "-"):
+        monkeypatch.setenv("SHARED_ENV_PATH", wartosc)
+        assert settings.sciezka_wspolnego_env() is None, wartosc
+        ile, skad = settings._wczytaj_wspolne_apify()
+        assert (ile, skad) == (0, "nie znaleziono"), wartosc
+        assert "APIFY_API_TOKEN1" not in os.environ, wartosc
+
+
 def test_powtorne_wczytanie_raportuje_TE_SAME_liczby(tmp_path, monkeypatch):
     """Drugie wywołanie w tym samym procesie ma dać ten sam wynik, co pierwsze.
 
