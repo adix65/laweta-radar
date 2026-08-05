@@ -786,7 +786,7 @@ bez trasy, bez jednego błędu w logu.
 git clone <repo> /home/ubuntu/laweta-radar && cd /home/ubuntu/laweta-radar
 ./setup.sh                    # venv, zależności, .env, baza, migracje, panel, PM2
 $EDITOR laweta_radar/.env     # klucze: ANTHROPIC_API_KEY, TELEGRAM_*, SHARED_ENV_PATH
-./update.sh --force           # przeładuj z uzupełnioną konfiguracją
+./update.sh --force --bez-panelu   # przeładuj API i bota z uzupełnioną konfiguracją
 pm2 startup                   # żeby wstało po reboocie (pm2 save robi setup.sh)
 ```
 

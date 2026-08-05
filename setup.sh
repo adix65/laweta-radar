@@ -325,7 +325,9 @@ if [[ ${#DO_UZUPELNIENIA[@]} -gt 0 ]]; then
             SHARED_ENV_PATH)    log "  SHARED_ENV_PATH    — .env sales-core-engine (klucze Apify); zwykle /home/ubuntu/sales-core-engine/.env" ;;
         esac
     done
-    log "Potem:  ./update.sh --force     (przeładuje procesy z nową konfiguracją)"
+    # --bez-panelu, bo panel nie czyta laweta_radar/.env — przebudowa po wklejeniu
+    # kluczy to trzy minuty za nic.
+    log "Potem:  ./update.sh --force --bez-panelu     (przeładuje API i bota z nową konfiguracją)"
 else
     log "Konfiguracja kompletna."
 fi
