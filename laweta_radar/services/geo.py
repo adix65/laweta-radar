@@ -211,11 +211,17 @@ def czy_kod_pocztowy(kod: str | None) -> bool:
     return any(w.match(s) for w in FORMATY_KODU.values())
 
 
-def _normalizuj_kod(kod: str) -> str:
+def normalizuj_kod(kod: str | None) -> str:
     """Kod do postaci indeksowanej: wielkie litery, bez spacji i myślników.
 
     "110 00", "11000" i "110-00" to ten sam czeski kod; "38-400" i "38400" to
     ten sam polski. Indeksujemy formę bez separatorów, a wyświetlamy oryginalną.
+
+    PUBLICZNE, bo pyta o to także klasyfikator: fallback regexowy musi wiedzieć,
+    czy kod znaleziony w treści to TEN SAM kod, który oddał model — inaczej
+    "38-400" od nas i "38400" od modelu wyglądają jak dwa różne miejsca i drugie
+    z nich ląduje w polu dostawy. Druga implementacja tej normalizacji po stronie
+    klasyfikatora rozjechałaby się przy pierwszym dołożonym formacie.
     """
     return re.sub(r"[\s.-]", "", (kod or "")).upper()
 
@@ -252,7 +258,7 @@ def _wczytaj(sciezka: Path | None = None) -> tuple[dict, dict]:
                 "lng": lng,
             }
             if rekord["kod"]:
-                po_kodzie.setdefault(_normalizuj_kod(rekord["kod"]), []).append(rekord)
+                po_kodzie.setdefault(normalizuj_kod(rekord["kod"]), []).append(rekord)
             if rekord["miejscowosc"]:
                 po_nazwie.setdefault(normalizuj_nazwe(rekord["miejscowosc"]), []).append(rekord)
     return po_kodzie, po_nazwie
@@ -309,7 +315,7 @@ def geokoduj(kod: str | None, miasto: str | None) -> Punkt | None:
     po_kodzie, po_nazwie = _indeksy()
 
     # --- 1. kod pocztowy ---
-    klucz = _normalizuj_kod(kod or "")
+    klucz = normalizuj_kod(kod)
     if klucz and klucz in po_kodzie:
         trafienia = po_kodzie[klucz]
         # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne: "39200" to polska
@@ -495,6 +501,13 @@ _WZORCE = [
 # Słowa, które przesądzają kraj. Szukane w oknie wokół kodu, po normalizacji.
 # Zapisane jako RDZENIE, nie pełne formy: post odmienia ("w Wiedniu", "z Niemiec",
 # "pod Kolonią"), więc "wieden" nie trafiłoby w "wiedniu", a "praga" w "pradze".
+# Rdzeń dopasowujemy od POCZĄTKU SŁOWA (`_sygnal_w_oknie`), bo odmienia się
+# końcówka, nie początek.
+#
+# SYGNAŁY ZE SPACJAMI (" de ", " cz ", " sk ") to skróty krajów i znaczą coś
+# WYŁĄCZNIE jako całe słowo. To nie jest kosmetyka zapisu: "sk" wyszukiwane jako
+# fragment siedzi w „Skodzie", a "cz" w „częściach" — czyli w dwóch
+# najczęstszych słowach w tych grupach.
 _SYGNALY_KRAJU: dict[str, tuple[str, ...]] = {
     "DE": ("niemiec", "niemczech", "niemieck", "deutschland", "aus ", " de ", "germany",
            "koln", "kolon", "hamburg", "berlin", "monachium", "munchen", "drezn", "dresden"),
@@ -525,6 +538,40 @@ _PRZED_LICZBA_TO_KOD = re.compile(
 # Nazwa miejscowości obok kodu: słowo z wielkiej litery, min. 3 znaki.
 _NAZWA_OBOK = re.compile(r"(?:^|\s)([A-ZÄÖÜŚŻŹĆŃŁÓĄĘ][\wäöüßśżźćńłóąę-]{2,})")
 
+# Przedział, w którym czterocyfrowa liczba jest w tych postach rocznikiem auta
+# częściej niż kodem. Co z tego wynika i dlaczego nie wykluczamy jej twardo —
+# patrz `_wykluczone`. Słowo „rocznik" obok liczby łapie osobno
+# `_PRZED_LICZBA_NIE_KOD`, ale w realnym poście prawie nigdy nie pada.
+_ROCZNIKI = range(1950, 2036)
+
+# Granica słowa w oknie wokół kodu. Okno jest już po `normalizuj_nazwe`, więc
+# zostają w nim tylko małe litery bez ogonków, cyfry i interpunkcja.
+_NIE_ALFANUM = re.compile(r"[^0-9a-z]+")
+
+
+def _czy_rocznik(dopasowanie: str) -> bool:
+    return dopasowanie.isdigit() and len(dopasowanie) == 4 and int(dopasowanie) in _ROCZNIKI
+
+
+def _sygnal_w_oknie(sygnal: str, okno: str) -> bool:
+    """Czy sygnał kraju pada w oknie (już znormalizowanym) wokół kodu.
+
+    Dwie klasy sygnałów, dwie różne reguły — patrz komentarz przy
+    `_SYGNALY_KRAJU`:
+      • otoczony spacjami (" sk ") to skrót kraju i liczy się TYLKO jako całe
+        słowo, inaczej „Skoda" robi ze Słowacji sygnał kraju;
+      • bez spacji ("wiedn", "bratislav") to rdzeń, który ma trafiać w odmienione
+        formy — dopasowujemy go od POCZĄTKU słowa, bo odmienia się końcówka.
+    """
+    rdzen = sygnal.strip()
+    # Dzielimy po ZNAKACH NIEALFANUMERYCZNYCH, nie po spacjach: „SK," na końcu
+    # zdania to nadal skrót kraju, a przy podziale po spacjach zostaje z przecinkiem
+    # i nie pasuje do niczego.
+    slowa = [s for s in _NIE_ALFANUM.split(okno) if s]
+    if sygnal != rdzen:
+        return rdzen in slowa
+    return any(slowo.startswith(rdzen) for slowo in slowa)
+
 
 def _dlugosc_ciagu_cyfr(tekst: str, start: int, koniec: int) -> int:
     """Ile cyfr ma CAŁY ciąg, którego częścią jest dopasowanie.
@@ -547,13 +594,41 @@ def _dlugosc_ciagu_cyfr(tekst: str, start: int, koniec: int) -> int:
     return sum(1 for c in tekst[lewy:prawy] if c.isdigit())
 
 
+def _mocny_sygnal_kodu(tekst: str, start: int, koniec: int) -> bool:
+    """Przesłanki NIEZALEŻNE od nazwy własnej stojącej obok liczby.
+
+    Osobne od reszty kontekstu, bo w tych postach obok liczby równie często stoi
+    marka auta („Skoda Octavia 2012"), co miejscowość („Köln 50667") — a jedno
+    i drugie jest słowem z wielkiej litery. Tam, gdzie pomyłka jest realna
+    (rocznik), żądamy właśnie tych mocniejszych przesłanek:
+      • przyimek albo skrót kodu bezpośrednio przed liczbą („z 50667", „PLZ 50667");
+      • słowo wskazujące kraj w oknie wokół niej.
+    """
+    przed = tekst[max(0, start - 30):start]
+    po = tekst[koniec:koniec + 30]
+    if _PRZED_LICZBA_TO_KOD.search(przed):
+        return True
+    okno = normalizuj_nazwe(przed + " " + po)
+    return any(_sygnal_w_oknie(s, okno) for sygnaly in _SYGNALY_KRAJU.values() for s in sygnaly)
+
+
 def _wykluczone(tekst: str, start: int, koniec: int, koniec_cyfr: int) -> bool:
     """Twarde wykluczenia — sprawdzane dla KAŻDEGO wzorca, także bezkontekstowego.
 
-    Trzy sytuacje, w których ciąg cyfr na pewno nie jest kodem:
+    Cztery sytuacje, w których ciąg cyfr na pewno nie jest kodem:
       • jednostka albo waluta zaraz po cyfrach ("2500 zł", "180 km");
       • słowo ceny/telefonu przed nimi ("cena 2500", "tel 502");
-      • cyfry są fragmentem dłuższego numeru (dziewięć cyfr i więcej).
+      • cyfry są fragmentem dłuższego numeru (dziewięć cyfr i więcej);
+      • wyglądają na ROCZNIK POJAZDU i nic mocniejszego za nimi nie stoi.
+
+    Rocznik jest tu osobnym przypadkiem, bo trafia w DWA wzorce naraz: „2012"
+    wygląda jak kod austriacki albo belgijski, a „2015 po stluczce" — jak
+    holenderski (cztery cyfry i dwie litery, gdzie literami jest polski
+    przyimek). Kolizja jest realna w obie strony (2000 to Antwerpia), więc nie
+    wykluczamy tych liczb bezwarunkowo: przepuszczamy je, gdy obok pada słowo
+    wskazujące kraj albo skrót kodu. Bez tego rocznik z opisu auta wchodzi do
+    pola kodu — a zła współrzędna wysyła człowieka 80 km w złą stronę i wygląda
+    przy tym dokładnie tak samo jak trafiona.
 
     `koniec_cyfr` to koniec SAMYCH CYFR, nie całego dopasowania — inaczej
     holenderskie "cztery cyfry + dwie litery" zjadłoby "2500 zl" i sprawdzało
@@ -564,7 +639,10 @@ def _wykluczone(tekst: str, start: int, koniec: int, koniec_cyfr: int) -> bool:
         return True
     if _PRZED_LICZBA_NIE_KOD.search(przed):
         return True
-    return _dlugosc_ciagu_cyfr(tekst, start, koniec) >= 9
+    if _dlugosc_ciagu_cyfr(tekst, start, koniec) >= 9:
+        return True
+    return (_czy_rocznik(tekst[start:koniec_cyfr])
+            and not _mocny_sygnal_kodu(tekst, start, koniec))
 
 
 def _kontekst_wskazuje_kod(tekst: str, start: int, koniec: int) -> bool:
@@ -572,21 +650,16 @@ def _kontekst_wskazuje_kod(tekst: str, start: int, koniec: int) -> bool:
 
     Trzy niezależne przesłanki, wystarczy jedna:
       • przyimek albo skrót kodu bezpośrednio przed ("z 50667", "PLZ 50667");
-      • nazwa miejscowości z wielkiej litery tuż obok ("50667 Köln", "Köln 50667");
-      • słowo wskazujące kraj w oknie.
+      • słowo wskazujące kraj w oknie;
+      • nazwa miejscowości z wielkiej litery tuż obok ("50667 Köln", "Köln 50667").
     Wykluczenia (`_wykluczone`) są sprawdzane WCZEŚNIEJ i osobno, bo "2500 zł"
     ma obok siebie i przyimek, i nazwę własną, a kodem nie jest.
     """
+    if _mocny_sygnal_kodu(tekst, start, koniec):
+        return True
     przed = tekst[max(0, start - 30):start]
     po = tekst[koniec:koniec + 30]
-
-    if _PRZED_LICZBA_TO_KOD.search(przed):
-        return True
-    if _NAZWA_OBOK.search(po[:20]) or _NAZWA_OBOK.search(" " + przed[-20:]):
-        return True
-
-    okno = normalizuj_nazwe(przed + " " + po)
-    return any(s.strip() in okno for sygnaly in _SYGNALY_KRAJU.values() for s in sygnaly)
+    return bool(_NAZWA_OBOK.search(po[:20]) or _NAZWA_OBOK.search(" " + przed[-20:]))
 
 
 def _kraj_z_kontekstu(tekst: str, start: int, koniec: int,
@@ -594,7 +667,7 @@ def _kraj_z_kontekstu(tekst: str, start: int, koniec: int,
     """Który z `dozwolone` krajów wskazuje otoczenie kodu. None = żaden."""
     okno = normalizuj_nazwe(tekst[max(0, start - 40):koniec + 40])
     for kraj in dozwolone:
-        if any(s.strip() in okno for s in _SYGNALY_KRAJU.get(kraj, ())):
+        if any(_sygnal_w_oknie(s, okno) for s in _SYGNALY_KRAJU.get(kraj, ())):
             return kraj
     return None
 
