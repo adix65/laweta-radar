@@ -172,7 +172,13 @@ def szczegol(fb_id: str) -> dict:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT {', '.join(POLA_LISTY)}, tresc, autor, gate_powod, "  # noqa: S608
-                "       zrodlo_decyzji, ai_zlecenie, ai_at, ai_model "
+                "       zrodlo_decyzji, ai_at, ai_model, "
+                # Werdykt modelu ma w tym repo JEDNO źródło: `czy_zlecenie`
+                # przy `zrodlo_decyzji='ai'`. Panel dostaje je pod dotychczasową
+                # nazwą, ale liczone z pary — NULL znaczy „modelu nie pytano",
+                # a nie „model powiedział nie".
+                "       CASE WHEN zrodlo_decyzji = 'ai' THEN czy_zlecenie END "
+                "            AS ai_zlecenie "
                 "  FROM posty WHERE fb_id = %s", (fb_id,))
             wiersz = cur.fetchone()
     if wiersz is None:

@@ -437,6 +437,7 @@ laweta_radar/
       0006_powiadomienia.sql # dedup, limity, callbacki z przycisków
       0007_feedback.sql    # zbiór treningowy do poprawiania promptu
       0008_push.sql        # subskrypcje web push
+      0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
@@ -447,6 +448,8 @@ laweta_radar/
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
     odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
   tests/               # testy offline (bez sieci i bez bazy)
+    test_zapis_klasyfikacji.py  # JEDYNY test dotykający Postgresa; bez
+                                # TEST_DATABASE_URL część integracyjna się pomija
     dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
   .env.example
   requirements.txt
@@ -587,6 +590,16 @@ Sprawdź, czego jeszcze brakuje, i odpal API:
 ```bash
 bash laweta_radar/scripts/check_setup.sh
 python -m pytest laweta_radar/tests/ -q
+
+# Zapis wyniku klasyfikatora ma JEDEN test na prawdziwej bazie — bez DSN-a się
+# pomija. Warto go puścić po każdej zmianie w kolumnach `posty`: sprawdza, czy
+# komplet pól z ekstrakcji realnie dojeżdża do tabeli, a nie tylko do SQL-a.
+#
+# OSOBNA BAZA, NIGDY PRODUKCYJNA — test kasuje i zakłada tabele od zera.
+# Nazwa MUSI zawierać "test", inaczej test odmawia startu.
+createdb laweta_test    # raz
+TEST_DATABASE_URL="postgresql://user:haslo@localhost/laweta_test" \
+    python -m pytest laweta_radar/tests/test_zapis_klasyfikacji.py -q
 
 export PYTHONPATH=$PWD
 python -m uvicorn laweta_radar.api.main:app --host 127.0.0.1 --port 8002
