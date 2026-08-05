@@ -26,11 +26,14 @@ kolejny tydzień zbierania i bez płacenia Apify po raz drugi.
 """
 from __future__ import annotations
 
-import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+try:                               # pakiet widoczny: -m, import pakietowy, testy
+    from laweta_radar.scripts._sciezka import dodaj_repo_do_sciezki
+except ImportError:                # uruchomienie po ścieżce do pliku
+    from _sciezka import dodaj_repo_do_sciezki
+
+dodaj_repo_do_sciezki()
 
 from laweta_radar.config import settings  # noqa: E402
 from laweta_radar.workers import gate as gate_mod  # noqa: E402
