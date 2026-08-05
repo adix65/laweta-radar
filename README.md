@@ -576,17 +576,22 @@ awarii mieszałoby dwie zupełnie różne sytuacje.
 
 ### Zanim cokolwiek pobierze
 
-Świeży klon **nie strzela do Apify** — wszystkie wpisy w `config/groups.py` są bez
-adresu i ze statusem `unverified`. Żeby ruszyło:
+`config/groups.py` niesie 13 grup, z czego **5 ma status `ok`** i tylko te fetcher
+pobiera. Podział wziął się z widoczności treści w wyszukiwarce — jedynego sygnału
+publiczności dostępnego bez logowania na FB — i nie mówi nic o tym, czy w grupie
+padają zgłoszenia, czy same reklamy lawet (szczegóły w komentarzu nad `FB_GRUPY`).
+Żeby ruszyło:
 
 1. wskaż wspólny `.env` z pulą Apify — `SHARED_ENV_PATH` w `.env` lawety albo
    symlink. Sprawdź, że działa:
    `python -m laweta_radar.workers.apify_keys` ma pokazać niezerową liczbę kluczy.
    Własnych `APIFY_API_TOKEN*` **nie wpisujesz** (patrz sekcja o współdzieleniu),
-2. dodaj realne grupy w `config/groups.py`, zweryfikuj każdą ręcznie
-   (publiczna? żywa? zgłoszeniowa czy sama reklama lawet?) i dopiero wtedy przestaw
-   `status` na `"ok"`. Listy kandydatów nie wpisuj z pamięci — zbuduj ją
-   wyszukiwarką: `python -m laweta_radar.scripts.znajdz_grupy` (patrz sekcja
+2. przejrzyj `config/groups.py`: wpisy `unverified` sprawdź ręcznie (publiczna?
+   żywa? zgłoszeniowa czy sama reklama lawet?) i dopiero wtedy przestaw `status`
+   na `"ok"`. To samo pytanie o treść zadaj piątce, która już ma `ok` — indeks
+   wyszukiwarki dowiódł, że da się je pobrać, nie że warto. Kolejnych kandydatów
+   nie wpisuj z pamięci — zbuduj listę wyszukiwarką:
+   `python -m laweta_radar.scripts.znajdz_grupy` (patrz sekcja
    „Zanim powstanie fetcher").
 
 3. zmierz actora, zanim zbudujesz wokół niego fetcher:

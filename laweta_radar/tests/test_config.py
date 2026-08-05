@@ -44,18 +44,25 @@ def test_brak_statusu_znaczy_ok():
     assert len(groups.grupy_do_pobrania(src)) == 1
 
 
-def test_domyslna_lista_nie_pobiera_niczego():
-    """Repo po sklonowaniu NIE strzela do Apify.
+def test_z_realnej_listy_pobieramy_tylko_status_ok():
+    """Na produkcyjnej liście filtr też musi trzymać, nie tylko na atrapie.
 
-    Wszystkie wpisy startują bez adresu i jako "unverified" — świeży klon nie
-    zna regionu operatora, a pobieranie z przykładowych grup to wydany kredyt
-    za zlecenia, po które nikt nie pojedzie.
+    Wpisy "unverified" są tam dlatego, że wyszukiwarka pokazała samą nazwę
+    grupy, bez treści — czyli nie wiadomo, czy actor cokolwiek z niej pobierze,
+    a run zostanie policzony tak samo jak udany.
     """
-    assert groups.grupy_do_pobrania() == []
+    do_pobrania = groups.grupy_do_pobrania()
+    assert do_pobrania, "lista nie ma ani jednej grupy do pobrania"
+    assert all(g.get("status") == "ok" for g in do_pobrania)
+    assert all((g.get("url") or "").strip() for g in do_pobrania)
 
 
-def test_opis_listy_liczy_braki():
-    assert "0 grup do pobrania" in groups.opis_listy()
+def test_opis_listy_liczy_gotowe_i_niezweryfikowane():
+    """Linia startowa ma nieść OBIE liczby — sam licznik pobieranych grup nie
+    mówi operatorowi, ile jeszcze czeka na jego dwie minuty na Facebooku."""
+    opis = groups.opis_listy()
+    assert f"{len(groups.grupy_do_pobrania())} grup do pobrania" in opis
+    assert f"z {len(groups.FB_GRUPY)} wpisów" in opis
 
 
 # ---------------------------------------------------------------------------
