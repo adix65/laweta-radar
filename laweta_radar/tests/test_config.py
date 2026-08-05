@@ -66,6 +66,50 @@ def test_opis_listy_liczy_gotowe_i_niezweryfikowane():
     assert f"z {len(groups.FB_GRUPY)} wpisów" in opis
 
 
+# Stałe, po które sięga `workers/fb_fetcher.py`. Dopisanie grupy do FB_GRUPY jest
+# czynnością OPERACYJNĄ — robi ją człowiek, który zna region, niekoniecznie
+# Pythona — więc najłatwiejsza pomyłka to zjedzenie nawiasu albo linijki poniżej
+# listy. Objawem jest `AttributeError` przy starcie fetchera, czyli pod cronem
+# awaria powtarzana co kilka minut, a pod PM2 pętla restartów.
+STALE_CZYTANE_PRZEZ_FETCHERA = (
+    "APIFY_ACTOR", "APIFY_SORT", "APIFY_TIMEOUT", "CENA_USD_ZA_POST",
+    "POSTOW_NA_GRUPE", "PULA_STARTOWA_POSTOW", "OKNO_WYDAJNOSCI_DNI",
+    "MIN_INTERWAL_MIN_A", "MIN_INTERWAL_MIN_B", "MAX_INTERWAL_MIN",
+    "OKNO_TEMPA_H", "MIN_POSTOW_NA_GRUPE", "DOMYSLNIE_POSTOW_NA_GRUPE",
+    "ZAPAS_NA_PACZKE", "MAX_POSTOW_NA_GRUPE_A", "MAX_POSTOW_NA_GRUPE_B",
+    "MNOZNIK_OKNA", "MIN_OKNO_MIN",
+)
+
+
+def test_stale_czytane_przez_fetchera_sa_na_miejscu():
+    brakujace = [s for s in STALE_CZYTANE_PRZEZ_FETCHERA
+                 if not hasattr(groups, s)]
+    assert not brakujace, f"config/groups.py stracił stałe: {brakujace}"
+
+
+def test_kazdy_wpis_ma_komplet_pol_i_ZNANY_status():
+    """Status spoza {"ok", "unverified"} nie jest błędem — jest CISZĄ.
+
+    `grupy_do_pobrania` porównuje dokładnie z "ok", więc literówka („OK", „Ok",
+    spacja na końcu) po prostu wyłącza grupę: nikt nie dostaje wyjątku, nikt nie
+    dostaje ostrzeżenia, grupa po prostu przestaje być pobierana. Odwrotny
+    kierunek jest droższy — status wpisany do wpisu, którego nikt nie otworzył
+    na FB, to płacone runy do grupy, która może być prywatna.
+    """
+    for wpis in groups.FB_GRUPY:
+        assert set(wpis) == {"url", "name", "region", "status"}, wpis
+        assert wpis["status"] in ("ok", "unverified"), wpis
+        assert wpis["url"].startswith("https://www.facebook.com/groups/"), wpis
+        assert wpis["name"].strip(), wpis
+
+
+def test_lista_grup_nie_ma_duplikatow():
+    """Ten sam adres dwa razy to podwójny rachunek za te same posty — dedup
+    w bazie chroni model i Telegram, ale nie chroni rachunku za Apify."""
+    adresy = [g["url"].rstrip("/") for g in groups.FB_GRUPY]
+    assert len(adresy) == len(set(adresy))
+
+
 # ---------------------------------------------------------------------------
 # settings — brak konfiguracji to nie awaria
 # ---------------------------------------------------------------------------

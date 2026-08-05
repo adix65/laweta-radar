@@ -101,6 +101,65 @@ FB_GRUPY: list[dict[str, str]] = [
     {"url": "https://www.facebook.com/groups/www.autopomoc.eu/",
      "name": "Bezplatna Gielda Ladunkow",
      "region": "krajowy", "status": "unverified"},
+
+    # ── DOPISANE Z WYSZUKIWARKI: ZNANE SĄ TYLKO NAZWA I OPIS ────────────────
+    #
+    # Wszystkie dziewięć wchodzi jako "unverified", bo o żadnej nie wiadomo
+    # nawet tyle, co o wpisach wyżej: źródłem są SAME NAZWY I OPISY z wyników
+    # wyszukiwania, a stamtąd grupa prywatna wygląda identycznie jak publiczna.
+    # Fetcher ich nie tknie, dopóki człowiek nie otworzy każdej i nie przestawi
+    # statusu ręcznie — trzy pytania z nagłówka pliku, dwie minuty na grupę.
+    #
+    # DWIE Z NICH SĄ OPISYWANE JAKO OGŁOSZENIOWE: 115713589110289 („freie
+    # Platze") i 986826041656582. Przewoźnicy publikują tam WOLNE MIEJSCA na
+    # swoich lawetach, czyli w środku siedzi konkurencja, a nie klienci szukający
+    # transportu. Taka grupa kosztuje DOKŁADNIE TYLE SAMO za pobrany post co
+    # zgłoszeniowa i nie dowozi ani jednego zlecenia — a po samym statusie "ok"
+    # tego nie widać, bo "da się pobrać" i "warto pobierać" to dwa różne pytania.
+    # Nazwa też nie rozstrzyga: „Autotransport Börse" bywa jednym i drugim.
+    #
+    # ROZSTRZYGA RAPORT WYDAJNOŚCI (zlecenia / pobrane posty w oknie
+    # OKNO_WYDAJNOSCI_DNI), nie przeczucie i nie nazwa — po TYGODNIU, bo krótsze
+    # okno porównuje grupy zmierzone w różnych dniach tygodnia. Grupa, która po
+    # tygodniu ma wydajność ZERO, WRACA na "unverified". Cofnięcie statusu jest
+    # tu normalną czynnością operacyjną, a nie przyznaniem się do błędu:
+    # zostawiona na "ok" pali budżet po cichu, bo każdy przebieg to jej osobne
+    # wywołanie, a jedynym śladem jest rachunek na koniec miesiąca.
+    {"url": "https://www.facebook.com/groups/carcarrier",
+     "name": "Car Carrier (europejska)",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/115713589110289",
+     "name": "Autotransport - freie Platze (DE, ~2,8 tys.)",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/986826041656582",
+     "name": "Autotransport Borse Europa (DE)",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/vytazovaky",
+     "name": "Vytazovaky CZ/SK - odtah a preprava vozidel",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/124130551433438",
+     "name": "Trh preprav CZ/SK",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/412859025748614",
+     "name": "Auftragsborse fur Abschleppauftrage (DE)",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/transport.gmbh",
+     "name": "TransportBorse Europa (DE)",
+     "region": "zagranica", "status": "unverified"},
+
+    # NAZWA DO UZUPEŁNIENIA PRZY WERYFIKACJI — źródło podało same adresy.
+    # Placeholder nie jest kosmetyką do odłożenia na potem: `name` idzie do
+    # promptu klasyfikatora jako kontekst i na etykietę w alercie, więc póki tu
+    # stoi „do ustalenia", model nie dostaje żadnej podpowiedzi o treści grupy,
+    # operator nie wie, skąd przyszło zlecenie, a raport wydajności rozlicza
+    # pozycję, której nikt nie potrafi nazwać. Nazwę przepisz z FB przy tych
+    # samych dwóch minutach, w których sprawdzasz publiczność.
+    {"url": "https://www.facebook.com/groups/508320149820356",
+     "name": "Grupa transportowa (do ustalenia)",
+     "region": "zagranica", "status": "unverified"},
+    {"url": "https://www.facebook.com/groups/246094456933898",
+     "name": "Grupa transportowa (do ustalenia)",
+     "region": "zagranica", "status": "unverified"},
 ]
 
 # ── Parametry pobierania per grupa ──────────────────────────────────────────
