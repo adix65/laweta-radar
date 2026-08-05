@@ -258,6 +258,22 @@ for zmienna in ANTHROPIC_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SHARED_ENV_
     [[ -z "$(z_env "$zmienna")" ]] && DO_UZUPELNIENIA+=("$zmienna")
 done
 
+# SDK providera modelu — DOPIERO TU, bo dopiero teraz istnieje .env, z którego
+# wiadomo, którego providera używamy. requirements.txt trzyma świadomie tylko
+# `anthropic` (krótka lista = mniej rzeczy, które mogą się nie zbudować na
+# świeżym VPS-ie), ale brak paczki wybranego providera to awaria CICHA: fetcher
+# wstaje, posty czekają w bazie, alertów nie ma.
+case "$(z_env LLM_PROVIDER)" in
+    openai) PAKIET_LLM="openai>=1.40.0";      MODUL_LLM="openai" ;;
+    gemini) PAKIET_LLM="google-genai>=1.0.0"; MODUL_LLM="google.genai" ;;
+    *)      PAKIET_LLM=""; MODUL_LLM="" ;;
+esac
+if [[ -n "$PAKIET_LLM" ]] && ! venv/bin/python3 -c "import $MODUL_LLM" 2>/dev/null; then
+    log "Provider modelu wymaga pakietu $PAKIET_LLM — dokładam."
+    venv/bin/python3 -m pip install --quiet "$PAKIET_LLM" \
+        || { ostrzez "nie udało się doinstalować $PAKIET_LLM"; BLEDY=1; }
+fi
+
 # --- 4. Baza -----------------------------------------------------------------
 
 if [[ $BAZA -eq 1 ]]; then

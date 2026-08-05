@@ -197,6 +197,31 @@ if [[ $PIP -eq 1 ]]; then
     fi
 fi
 
+# SDK providera modelu. requirements.txt trzyma tylko `anthropic` i to jest
+# świadome: krótka lista to mniej rzeczy, które mogą się nie zbudować na świeżym
+# VPS-ie o drugiej w nocy. Ale skoro .env MÓWI, którego providera używamy, deploy
+# ma go dowieźć — brak paczki jest awarią CICHĄ: fetcher wstaje, posty przechodzą
+# przez bramkę i czekają w bazie, a nikt nie dostaje alertu.
+#
+# Sprawdzamy import, nie `pip show`: liczy się to, czy proces zaraz to zaimportuje.
+sdk_providera() {
+    local provider pakiet modul
+    provider="$(z_env LLM_PROVIDER anthropic)"
+    case "$provider" in
+        openai) pakiet="openai>=1.40.0";      modul="openai" ;;
+        gemini) pakiet="google-genai>=1.0.0"; modul="google.genai" ;;
+        *)      return 0 ;;   # anthropic (i nieznane, które do niego degraduje) jest w requirements.txt
+    esac
+    [[ -x "$PY" ]] || return 0
+    "$PY" -c "import $modul" 2>/dev/null && return 0
+    log "LLM_PROVIDER=$provider — brakuje pakietu, dokładam $pakiet"
+    if ! "$PY" -m pip install --quiet "$pakiet"; then
+        ostrzez "nie udało się doinstalować $pakiet — klasyfikator będzie milczeć."
+        BLEDY=1
+    fi
+}
+sdk_providera
+
 # --- 5. Migracje -----------------------------------------------------------
 
 # Kolejność jest tu istotna: schemat MUSI być gotowy, zanim procesy pójdą na
