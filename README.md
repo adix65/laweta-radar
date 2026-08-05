@@ -61,7 +61,10 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
 - **geo** — liczy dystans i trasę, żeby **pokazać** je przy zleceniu. Nie ukrywa
   rekordów: o tym, czy kurs pod Kolonię się opłaca, decyduje kierowca.
 - **Telegram** — jedyny kanał dowozu. Alert niesie link do posta; odpowiada
-  **człowiek**, z własnego konta.
+  **człowiek**, z własnego konta. Wysyła go **fetcher**, zaraz po udanym zapisie
+  posta (`workers/fb_fetcher._powiadom` -> `services/powiadomienia`) — dedup
+  alertów stoi na wierszu w bazie, więc alert o poście, którego w `posty` nie ma,
+  poszedłby ponownie w każdym kolejnym przebiegu.
 
 ### Stan repo
 
@@ -259,6 +262,16 @@ podobnie.
 | `CISZA_NOCNA` (22-6) | nocne zlecenia idą jednym podsumowaniem rano | nie gubi ich |
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
 
+**BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
+działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
+w kolumnie, pusty string, śmieć) przechodzi próg i idzie na telefon, a alert
+mówi wprost, czego nie wiemy: „⚠️ pewność nieznana · trasa nieustalona".
+Napisane raz wprost, bo najprostsza wersja tego kodu (`int(pewnosc or 0)`)
+zamienia brak danych w zero, zero jest poniżej każdego progu — i tak właśnie
+15 zleceń nie dostało ani jednego powiadomienia, przy zerze w tabeli
+`powiadomienia` i logu bez jednej linijki o pominięciu. Cisza jest tu najgorszym
+trybem awarii: wygląda jak brak zleceń na rynku, a jest utratą wszystkich.
+
 **Nie ma progu na kilometry ani na kierunek.** Trasa Kolonia-Kraków to 1100 km
 i normalny dzień pracy tego operatora. Filtr „do 50 km" istnieje w panelu jako
 pigułka, którą operator włącza i wyłącza sam.
@@ -443,13 +456,17 @@ laweta_radar/
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
     raport_gate.py     # rozliczenie trybu cienia bramki
     raport_feedback.py # co operator odrzucił i co model o tym sądził
+    uzupelnij_klasyfikacje.py # dopisuje ekstrakcję wierszom, które ją zgubiły
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
     odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
-  tests/               # testy offline (bez sieci i bez bazy)
-    test_zapis_klasyfikacji.py  # JEDYNY test dotykający Postgresa; bez
-                                # TEST_DATABASE_URL część integracyjna się pomija
+  tests/               # testy offline (bez sieci) + integracyjne (z bazą)
+    test_zapis_klasyfikacji.py  # sam INSERT do `posty`, na prawdziwym Postgresie
+    test_przebieg_do_bazy.py    # CAŁY przebieg: Apify -> model -> baza -> alert
+    test_uzupelnij_klasyfikacje.py # naprawa wierszy z pustą ekstrakcją
+    conftest.py                 # krzyczy, gdy testy integracyjne się pominęły —
+                                # bez TEST_DATABASE_URL zielony wynik nic nie znaczy
     dane/posty_referencyjne.jsonl   # zbiór do porównania modeli
   .env.example
   requirements.txt
@@ -1018,6 +1035,9 @@ pm2 restart laweta-api laweta-bot
 | jak wygląda alert, bez wysyłania | `python -m laweta_radar.services.powiadomienia --podglad` |
 | czemu to zlecenie pokazuje 900 km | `python -m laweta_radar.services.geo "nazwa z posta"` |
 | czemu ten alert nie przyszedł | log fetchera — `[powiadomienia] <fb_id>: pomijam (...)` |
+| zlecenia są, alertów zero | log fetchera — linia `UWAGA: N zleceń i ANI JEDNEGO wysłanego alertu` |
+| zlecenie bez typu, miasta i telefonu | log fetchera — `OSTRZEŻENIE: post <fb_id> ma w bazie werdykt modelu i ZERO pól z ekstrakcji` |
+| jak odzyskać stare zlecenia bez ekstrakcji | `python laweta_radar/scripts/uzupelnij_klasyfikacje.py --sucho` |
 | czy powiadomienia nie są wyciszone | `/stop` czy `/start` — ostatni wpis w tabeli `powiadomienia` |
 | które grupy wyrzucić z konfiguracji | `curl -s localhost:8002/statystyki` albo `/statystyki` w panelu |
 | co operator odrzucił i czemu model się mylił | `python laweta_radar/scripts/raport_feedback.py` |

@@ -1,4 +1,11 @@
-"""Zapis wyniku klasyfikatora do bazy — jedyny test w repo, który dotyka Postgresa.
+"""Zapis wyniku klasyfikatora do bazy — sam INSERT, na prawdziwym Postgresie.
+
+CAŁY PRZEBIEG (`run()`: Apify -> bramka -> model -> zapis -> alert) sprawdza
+`test_przebieg_do_bazy.py`. Ten podział nie jest kosmetyczny: testy z tego pliku
+przechodziły na zielono przez cały czas, gdy produkcja zapisywała 27 postów
+z werdyktem modelu i kompletem NULL-i — bo wołają `_zapisz_post` wprost, a bug
+siedział w tym, co do tej funkcji dociera i co się dzieje z jej wynikiem dalej.
+
 
 PO CO ISTNIEJE. Pierwszy realny przebieg fetchera zapisał 26 postów
 z `zrodlo_decyzji='ai'` i KOMPLETEM pól ekstrakcji na NULL. Model odpowiedział,
@@ -95,13 +102,23 @@ def _klasyfikator(odpowiedz: dict | None = None):
 # 1. OFFLINE — komplet pól dochodzi do parametrów INSERT-a
 # ---------------------------------------------------------------------------
 class _Kursor:
-    """Atrapa kursora zapamiętująca ostatnie zapytanie i jego parametry."""
+    """Atrapa kursora: zapamiętuje zapytania i ODDAJE zadany wiersz.
 
-    def __init__(self, sklad):
+    `fetchone` jest tu nie dla wygody, tylko dlatego, że zapis PYTA TERAZ BAZĘ,
+    co w wierszu naprawdę stoi. Atrapa, która na `RETURNING` oddaje zawsze
+    komplet, potwierdzałaby każdą wersję kodu — łącznie z tą, która zgubiła 27
+    klasyfikacji. Dlatego wiersz podaje test, a nie atrapa.
+    """
+
+    def __init__(self, sklad, wiersz):
         self.sklad = sklad
+        self.wiersz = wiersz
 
     def execute(self, sql, params=None):
         self.sklad.append((" ".join(sql.split()), params))
+
+    def fetchone(self):
+        return self.wiersz
 
     def __enter__(self):
         return self
@@ -111,22 +128,36 @@ class _Kursor:
 
 
 class _Polaczenie:
-    def __init__(self):
+    """`wiersz` = to, co baza oddaje na RETURNING/SELECT: (fb_id, *ekstrakcja)."""
+
+    def __init__(self, wiersz=None):
         self.zapytania: list = []
         self.commity = 0
+        self.wiersz = wiersz
 
     def cursor(self):
-        return _Kursor(self.zapytania)
+        return _Kursor(self.zapytania, self.wiersz)
 
     def commit(self):
         self.commity += 1
 
 
-def _zapisz(decyzja, identyfikator="fb1", log=lambda *_: None):
-    conn = _Polaczenie()
-    pusto = f._zapisz_post(conn, identyfikator, _post(), decyzja, log=log)
-    sql, params = conn.zapytania[-1]
-    return sql, params, pusto, conn
+def _wiersz_zwrotny(decyzja) -> tuple | None:
+    """Wiersz, jaki oddałaby poprawnie działająca baza po tym zapisie."""
+    if decyzja.wynik_ai is None:
+        return ("fb1", *[None] * len(c.KOLUMNY_EKSTRAKCJI))
+    dane = c.wiersz_do_zapisu(decyzja.wynik_ai, "fb1")
+    return ("fb1", *[dane[k] for k in c.KOLUMNY_EKSTRAKCJI])
+
+
+_DOMYSLNY = object()   # „podaj wiersz, jaki oddałaby poprawna baza"
+
+
+def _zapisz(decyzja, identyfikator="fb1", log=lambda *_: None, wiersz=_DOMYSLNY):
+    conn = _Polaczenie(_wiersz_zwrotny(decyzja) if wiersz is _DOMYSLNY else wiersz)
+    zapis = f._zapisz_post(conn, identyfikator, _post(), decyzja, log=log)
+    sql, params = conn.zapytania[0]
+    return sql, params, zapis, conn
 
 
 def _decyzja_ai(odpowiedz: dict | None = None) -> f.Decyzja:
@@ -195,11 +226,11 @@ def test_parametry_insertu_niosa_realne_wartosci():
 def test_bez_klasyfikacji_kolumny_ekstrakcji_ida_puste_ale_ida():
     """Jedna ścieżka SQL dla obu przypadków — nie ma drugiej do zapomnienia."""
     decyzja = f.decyzja_o_poscie(_post(), TERAZ, klasyfikuj=lambda *_: None)
-    sql, params, pusto, _ = _zapisz(decyzja)
+    sql, params, zapis, _ = _zapisz(decyzja)
     assert "pojazd_opis" in sql
     assert params[params.index(decyzja.zrodlo) + 1] is False   # czy_zlecenie
     # Bez werdyktu modelu NIE ostrzegamy — nie ma czego zgubić.
-    assert pusto is False
+    assert zapis.bez_ekstrakcji is False
 
 
 def test_on_conflict_dopisuje_klasyfikacje_do_istniejacego_wiersza():
@@ -220,32 +251,81 @@ def test_on_conflict_dopisuje_klasyfikacje_do_istniejacego_wiersza():
     assert "posty.zrodlo_decyzji IS DISTINCT FROM 'ai'" in sql
 
 
+def test_on_conflict_naprawia_wiersz_z_werdyktem_i_pusta_ekstrakcja():
+    """Wiersz z `zrodlo_decyzji='ai'` i kompletem NULL-i NIE MA CZEGO CHRONIĆ.
+
+    Sam warunek „nie ruszaj wiersza z werdyktem" zamroził 27 postów z pierwszych
+    przebiegów: werdykt mają, ekstrakcji nie mają i nigdy nie dostaną, bo każdy
+    kolejny zapis odbija się od tego warunku. Naprawa musi być częścią zwykłego
+    zapisu — skrypt migracyjny odpalany ręcznie nie zadziała w dniu, w którym
+    problem wraca.
+    """
+    sql, _, _, _ = _zapisz(_decyzja_ai())
+    warunek = sql.split("WHERE EXCLUDED.zrodlo_decyzji = 'ai'", 1)[1]
+    for kolumna in c.KOLUMNY_EKSTRAKCJI:
+        assert f"posty.{kolumna} IS NULL" in warunek, (
+            f"warunek naprawy nie sprawdza `{kolumna}` — wiersz z pustą "
+            f"ekstrakcją zostanie pusty na zawsze")
+    assert "RETURNING" in sql, "bez RETURNING nie wiadomo, co się realnie zapisało"
+
+
 # ---------------------------------------------------------------------------
 # 2. OFFLINE — głośna reakcja na cichą utratę
 # ---------------------------------------------------------------------------
 def test_ostrzezenie_gdy_werdykt_jest_a_ekstrakcji_nie_ma():
-    """DOKŁADNIE ten stan przeżył pierwszy przebieg bez jednej linijki w logu.
+    """DOKŁADNIE ten stan przeżył dwa przebiegi bez jednej linijki w logu.
 
-    Odtwarzamy go wprost: `Decyzja` z `zrodlo='ai'`, ale bez `wynik_ai` — czyli
-    to, co produkowała poprzednia wersja `decyzja_o_poscie`.
+    Wiersz w bazie ma werdykt modelu i komplet NULL-i. Poprzednia wersja pytała
+    o to słownik zbudowany w Pythonie — a ten był PEŁNY, bo wynik modelu istniał;
+    ginął dopiero po drodze do tabeli. Ostrzeżenie stało więc na warunku, którego
+    ta awaria nie potrafiła spełnić, i milczało przy 27 wierszach.
     """
-    kaleka = f.Decyzja(zrodlo="ai", czy_zlecenie=True, jezyk="pl", status="nowe",
-                       stale=False, powod="zlecenie", pytano_model=True,
-                       wynik_ai=None)
     linie: list[str] = []
-    _, _, pusto, _ = _zapisz(kaleka, identyfikator="fb-zgubiony", log=linie.append)
+    pusty = ("fb-zgubiony", *[None] * len(c.KOLUMNY_EKSTRAKCJI))
+    _, _, zapis, _ = _zapisz(_decyzja_ai(), identyfikator="fb-zgubiony",
+                             log=linie.append, wiersz=pusty)
 
-    assert pusto is True
+    assert zapis.bez_ekstrakcji is True
     assert len(linie) == 1
     assert "OSTRZEŻENIE" in linie[0]
     assert "fb-zgubiony" in linie[0], "bez fb_id nie da się dojść, który post przepadł"
 
 
+def test_ostrzezenie_gdy_baza_nie_oddaje_wiersza():
+    """Zapis, po którym w tabeli nie ma nic, jest utratą — nie ciszą.
+
+    `ON CONFLICT ... WHERE` nie zwraca wiersza, gdy warunek go nie przepuścił.
+    Tą właśnie drogą uciekał zablokowany zapis: baza milczy, kod czyta to jako
+    sukces, wiersz zostaje taki, jaki był.
+    """
+    linie: list[str] = []
+    _, _, zapis, _ = _zapisz(_decyzja_ai(), identyfikator="fb-brak",
+                             log=linie.append, wiersz=None)
+    assert zapis.bez_ekstrakcji is True
+    assert "fb-brak" in linie[0]
+
+
+def test_ostrzezenie_gdy_insert_nie_ma_kolumn_ekstrakcji(monkeypatch):
+    """INSERT bez kolumn ekstrakcji zapisuje sam werdykt i wygląda poprawnie.
+
+    To jest druga ścieżka, którą `czy_zlecenie` dojeżdża do bazy, a reszta
+    wyniku nie: kolumny werdyktu są w kodzie na sztywno, kolumny ekstrakcji
+    liczą się w czasie działania — i pusta lista nie jest błędem dla żadnej
+    linijki SQL-a.
+    """
+    monkeypatch.setattr(f, "_kolumny_ekstrakcji", lambda: ())
+    linie: list[str] = []
+    _, _, zapis, _ = _zapisz(_decyzja_ai(), identyfikator="fb-bez-kolumn",
+                             log=linie.append, wiersz=("fb-bez-kolumn",))
+    assert zapis.bez_ekstrakcji is True
+    assert "fb-bez-kolumn" in linie[0] and "ANI JEDNEJ kolumny" in linie[0]
+
+
 def test_poprawny_zapis_nie_ostrzega():
     """Ostrzeżenie, które pada zawsze, jest tym samym co brak ostrzeżenia."""
     linie: list[str] = []
-    _, _, pusto, _ = _zapisz(_decyzja_ai(), log=linie.append)
-    assert pusto is False
+    _, _, zapis, _ = _zapisz(_decyzja_ai(), log=linie.append)
+    assert zapis.bez_ekstrakcji is False
     assert linie == []
 
 
@@ -258,8 +338,8 @@ def test_ubogi_wynik_modelu_to_nie_utrata():
     """
     linie: list[str] = []
     decyzja = _decyzja_ai({"czy_zlecenie": False, "pewnosc": 0})
-    _, _, pusto, _ = _zapisz(decyzja, log=linie.append)
-    assert pusto is False
+    _, _, zapis, _ = _zapisz(decyzja, log=linie.append)
+    assert zapis.bez_ekstrakcji is False
     assert linie == []
 
 
@@ -363,9 +443,11 @@ def test_integracja_komplet_pol_jest_w_bazie_po_zapisie(polaczenie):
     """
     decyzja = _decyzja_ai()
     linie: list[str] = []
-    pusto = f._zapisz_post(polaczenie, "fb-integracja", _post(), decyzja,
+    zapis = f._zapisz_post(polaczenie, "fb-integracja", _post(), decyzja,
                            log=linie.append)
-    assert pusto is False and linie == []
+    assert zapis.bez_ekstrakcji is False and linie == []
+    # `Zapis.wiersz` niesie to, co ODDAŁA BAZA — i to z niego powstaje alert.
+    assert zapis.wiersz["odbior_miasto"] == "Krosno"
 
     w = _wiersz_z_bazy(polaczenie, "fb-integracja")
     puste = [k for k in c.KOLUMNY_EKSTRAKCJI if w[k] is None]
@@ -450,6 +532,56 @@ def test_integracja_gotowego_werdyktu_nie_nadpisujemy(polaczenie):
 
     w = _wiersz_z_bazy(polaczenie, "fb-gotowy")
     assert w["typ"] == "holowanie" and int(w["pewnosc"]) == 88
+
+
+@baza
+def test_integracja_wiersz_z_werdyktem_bez_ekstrakcji_daje_sie_naprawic(polaczenie):
+    """STAN Z PRODUKCJI: 27 wierszy z `zrodlo_decyzji='ai'` i kompletem NULL-i.
+
+    Poprzednia wersja odbijała taki zapis (warunek `posty.zrodlo_decyzji IS
+    DISTINCT FROM 'ai'` chronił wiersz, który nie miał czego chronić) i NIE
+    zgłaszała tego — bo pytała słownik z pamięci, a ten był pełny. Wiersz
+    zostawał pusty na zawsze, a log wyglądał na czysty.
+    """
+    with polaczenie.cursor() as cur:
+        cur.execute(
+            "INSERT INTO posty (fb_id, tresc, grupa_url, zrodlo_decyzji, "
+            "czy_zlecenie, status) VALUES ('fb-kaleki', 'laweta', 'g', 'ai', "
+            "true, 'nowe')")
+    polaczenie.commit()
+
+    linie: list[str] = []
+    zapis = f._zapisz_post(polaczenie, "fb-kaleki", _post(), _decyzja_ai(),
+                           log=linie.append)
+
+    w = _wiersz_z_bazy(polaczenie, "fb-kaleki")
+    assert [k for k in c.KOLUMNY_EKSTRAKCJI if w[k] is None] == []
+    assert w["typ"] == "holowanie" and int(w["pewnosc"]) == 88
+    assert zapis.bez_ekstrakcji is False and linie == []
+
+
+@baza
+def test_integracja_dedup_nie_zamraza_wierszy_do_naprawy(polaczenie):
+    """Post uszkodzony MUSI wypaść z dedupu, inaczej naprawa jest nieosiągalna.
+
+    `_istniejace_id` zwraca komplet fb_id — gdyby uszkodzony wiersz był w nim
+    tylko jako „znany", pętla przebiegu pomijałaby go jako duplikat i ścieżka
+    naprawcza nigdy by się nie wykonała.
+    """
+    with polaczenie.cursor() as cur:
+        cur.execute(
+            "INSERT INTO posty (fb_id, tresc, grupa_url, zrodlo_decyzji, "
+            "czy_zlecenie, status) VALUES "
+            "('fb-kaleki', 'a', 'g', 'ai', true, 'nowe'), "
+            "('fb-zdrowy', 'b', 'g', 'ai', true, 'nowe'), "
+            "('fb-bramka', 'c', 'g', 'gate', false, 'smiec')")
+        cur.execute("UPDATE posty SET typ = 'holowanie', pewnosc = 70 "
+                    " WHERE fb_id = 'fb-zdrowy'")
+    polaczenie.commit()
+
+    istniejace, do_naprawy = f._istniejace_id(polaczenie)
+    assert istniejace == {"fb-kaleki", "fb-zdrowy", "fb-bramka"}
+    assert do_naprawy == {"fb-kaleki"}
 
 
 @baza

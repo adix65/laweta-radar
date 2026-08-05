@@ -498,8 +498,21 @@ def warto_budzic(wynik: dict) -> bool:
     To decyzja o DOSTARCZENIU, nie o widoczności: post z niską pewnością nadal
     jest w bazie i nadal go widać. Zasada naczelna repo mówi o ukrywaniu
     rekordów, a nie o tym, czy budzimy kogoś w nocy.
+
+    NIEZNANA PEWNOŚĆ BUDZI. `int(pewnosc or 0)` zamieniłoby brak danych w zero,
+    czyli w wartość poniżej każdego progu — i tak właśnie znikło 15 zleceń
+    z `pewnosc IS NULL` po stronie powiadomień. Progiem odsiewamy model, który
+    powiedział „mało pewne", a nie sytuację, w której nie powiedział nic.
     """
-    return bool(wynik.get("czy_zlecenie")) and int(wynik.get("pewnosc") or 0) >= PROG_PEWNOSCI
+    if not bool(wynik.get("czy_zlecenie")):
+        return False
+    surowa = wynik.get("pewnosc")
+    if surowa is None or isinstance(surowa, bool):
+        return True
+    try:
+        return int(surowa) >= PROG_PEWNOSCI
+    except (TypeError, ValueError):
+        return True
 
 
 # ---------------------------------------------------------------------------
