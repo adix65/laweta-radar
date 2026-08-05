@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from laweta_radar.scripts import odswiez_proxy as op
 from laweta_radar.workers import apify_proxy
 
@@ -170,3 +168,30 @@ def test_dzialajace_trafiaja_do_pliku(tmp_path, monkeypatch):
     zapisane = json.loads(plik.read_text())["proxies"]
     assert [r["url"] for r in zapisane] == ["http://1.2.3.4:8080"]
     assert all(r["apify_ok"] is True for r in zapisane)
+
+
+def test_ostrzega_gdy_pula_zapisana_ale_wylaczona(tmp_path, monkeypatch, capsys):
+    """Świeży plik obok "BRAK proxy" z workera wygląda na sprzeczność — nie jest.
+
+    Worker czyta plik WYŁĄCZNIE przy APIFY_PROXY_POOL=1, a odświeżenie samo
+    niczego nie włącza (włączenie jest decyzją podejmowaną PO zobaczeniu, ile
+    adresów przeżyło). Bez tego ostrzeżenia operator ma dwa narzędzia mówiące
+    coś przeciwnego i żadnej podpowiedzi, które kłamie.
+    """
+    plik = tmp_path / "pula.json"
+    monkeypatch.delenv("APIFY_PROXY_POOL", raising=False)
+    monkeypatch.setattr(op, "pobierz_liste", lambda *_, **__: ["http://1.2.3.4:8080"])
+    monkeypatch.setattr(op, "sprawdz", lambda u, _t: (u, True, "HTTP 401"))
+
+    assert op.main(["--plik", str(plik), "--rownolegle", "1"]) == 0
+    assert "APIFY_PROXY_POOL nie jest ustawione na 1" in capsys.readouterr().out
+
+
+def test_bez_ostrzezenia_gdy_pula_wlaczona(tmp_path, monkeypatch, capsys):
+    plik = tmp_path / "pula.json"
+    monkeypatch.setenv("APIFY_PROXY_POOL", "1")
+    monkeypatch.setattr(op, "pobierz_liste", lambda *_, **__: ["http://1.2.3.4:8080"])
+    monkeypatch.setattr(op, "sprawdz", lambda u, _t: (u, True, "HTTP 401"))
+
+    assert op.main(["--plik", str(plik), "--rownolegle", "1"]) == 0
+    assert "APIFY_PROXY_POOL nie jest ustawione" not in capsys.readouterr().out

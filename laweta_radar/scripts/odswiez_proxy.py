@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from laweta_radar.workers.apify_proxy import _pool_file_path, mask_url  # noqa: E402
+from laweta_radar.workers.apify_proxy import _TRUTHY, _pool_file_path, mask_url  # noqa: E402
 
 # Ścieżkę pliku bierzemy z workera (funkcja prywatna, import świadomy): gdyby
 # generator i czytelnik liczyły ją osobno, rozjechałyby się przy pierwszej
@@ -156,6 +156,11 @@ def zapisz(plik: Path, dzialajace: list[str]) -> None:
         raise
 
 
+def pula_wlaczona() -> bool:
+    """Czy worker w ogóle sięgnie po ten plik (APIFY_PROXY_POOL)."""
+    return (os.environ.get("APIFY_PROXY_POOL") or "").strip().lower() in _TRUTHY
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Odśwież i zweryfikuj darmową pulę proxy dla Apify.",
@@ -181,8 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[proxy] SUCHO — nic nie pobieram i nic nie zapisuję.")
         print(f"[proxy] Sprawdziłbym: {'wszystkie' if not a.limit else a.limit} kandydatów, "
               f"po {a.rownolegle} naraz, timeout {a.timeout}s")
-        wl = (os.environ.get("APIFY_PROXY_POOL") or "").strip().lower() in {"1", "true", "tak", "yes", "on"}
-        print(f"[proxy] APIFY_PROXY_POOL={'1 (pula WŁĄCZONA)' if wl else '0 — worker i tak NIE użyje tego pliku'}")
+        print(f"[proxy] APIFY_PROXY_POOL="
+              f"{'1 (pula WŁĄCZONA)' if pula_wlaczona() else '0 — worker i tak NIE użyje tego pliku'}")
         return 0
 
     try:
@@ -233,6 +238,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"[proxy] Zapisane: {plik}")
+
+    # Bez tego świeżo zapisana pula i „BRAK proxy" z workera wyglądają na
+    # sprzeczność. Nie są nią: worker czyta ten plik WYŁĄCZNIE przy
+    # APIFY_PROXY_POOL=1, a odświeżenie samo niczego nie włącza — bo włączenie
+    # puli jest decyzją, którą podejmuje się PO zobaczeniu, ile adresów przeżyło.
+    if not pula_wlaczona():
+        print("[proxy] UWAGA: APIFY_PROXY_POOL nie jest ustawione na 1 — worker NIE użyje")
+        print("[proxy]        tego pliku i dalej pokaże 'BRAK proxy'. Żeby włączyć, dopisz")
+        print("[proxy]        do laweta_radar/.env:  APIFY_PROXY_POOL=1")
+        print("[proxy]        oraz (bezpiecznik):    APIFY_PROXY_REQUIRED=1")
+        print("[proxy]        i dodaj odświeżanie do crona — pula bez odświeżania jest")
+        print("[proxy]        gorsza niż jej brak (docs/APIFY-PROXY.md).")
+
     print("[proxy] Sprawdź przypisanie:  python -m laweta_radar.workers.apify_proxy")
     return 0
 
