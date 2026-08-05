@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start -p ${PANEL_PORT:-6200}",
+    "start": "next start -p ${PANEL_PORT:-6200} -H ${PANEL_HOST:-0.0.0.0}",
     "lint": "eslint"
   },
   "dependencies": {

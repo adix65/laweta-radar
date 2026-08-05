@@ -82,7 +82,10 @@ module.exports = {
       // `next start` bez wcześniejszego builda kończy się błędem od razu. Pauza
       // jak przy bocie: pętla restartów zapchałaby logi w sekundy.
       restart_delay: 10000,
-      env: { PANEL_PORT: zEnv('PANEL_PORT', '6200') },
+      env: {
+        PANEL_PORT: zEnv('PANEL_PORT', '6200'),
+        PANEL_HOST: zEnv('PANEL_HOST', '0.0.0.0'),
+      },
     },
     // Fetcher NIE jest procesem PM2 — chodzi z crona co kilka minut i kończy się
     // po jednym przebiegu. Proces w pętli musiałby sam pilnować odstępów, a przy
