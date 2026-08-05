@@ -178,9 +178,16 @@ def _werdykt(grupy: list[dict], pula: dict, blad_bazy: str | None) -> tuple[str,
             powody.append(f"{len(pula['nieodpowiadajace'])} kluczy nie odpowiada "
                           "(zły token albo martwe proxy)")
 
-    braki = settings.brakujace(*settings.OPIS_ZMIENNYCH)
-    if braki:
-        powody.append("brakuje zmiennych w .env: " + ", ".join(braki))
+    # DWIE KLASY BRAKÓW, DWA RÓŻNE WERDYKTY (settings.stan_konfiguracji).
+    # Wrzucenie ich do jednego worka kazało budzić człowieka w nocy z powodu
+    # pustej linijki w .env — a przy LLM_PROVIDER=openai także z powodu klucza
+    # Anthropic, którego ta instalacja nigdy nie tknie.
+    konfiguracja = settings.stan_konfiguracji()
+    if konfiguracja["blokujace_start"]:
+        powody.append("brak w .env: " + ", ".join(konfiguracja["blokujace_start"])
+                      + " — system nie dowozi")
+    for nazwa in konfiguracja["degradujace"]:
+        powody.append(f"brak {nazwa} w .env — {konfiguracja['skutki'][nazwa]}")
 
     if not powody:
         return "ok", []

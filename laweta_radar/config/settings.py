@@ -114,6 +114,41 @@ OPENAI_MODEL = _txt("OPENAI_MODEL")
 GEMINI_API_KEY = _txt("GEMINI_API_KEY")
 GEMINI_MODEL = _txt("GEMINI_MODEL", "gemini-2.5-flash")
 
+# KTÓRY KLUCZ JEST WYMAGANY, ZALEŻY OD `LLM_PROVIDER` — i nie ma innej poprawnej
+# odpowiedzi. Sprawdzanie ANTHROPIC_API_KEY bezwarunkowo zgłasza brak krytyczny
+# na maszynie, na której klasyfikator DZIAŁA — tylko na OpenAI. Klucz nieużywanego
+# providera jest wtedy pustą linijką w .env, a nie awarią.
+#
+# Klucze POZOSTAŁYCH providerów są OPCJONALNE. Ich brak zawęża dokładnie jedną
+# rzecz: `scripts/porownaj_modele.py` puści porównanie na mniejszej liczbie
+# modeli. Tyle ma o nim mówić raport („porównanie modeli obejmie 1 z 3
+# providerów") i nigdy nie jest to powód, żeby cokolwiek zatrzymać.
+#
+# Para (klucz, nazwa modelu), bo przy OpenAI wymagane jest OBOJE: nazwa modelu
+# nie ma tam wartości domyślnej (patrz nota przy OPENAI_MODEL), więc pusta
+# znaczy „nie ma czym wołać". U pozostałych domyślna siedzi w kodzie, więc pusta
+# zmienna środowiskowa NIE jest brakiem — dlatego `braki_providera()` patrzy na
+# wartość SKUTECZNĄ, a nie na to, czy ktoś wpisał linijkę w .env.
+#
+# To jest też jedyne miejsce, w którym mieszkają nazwy zmiennych per provider:
+# `services/llm.py` czyta je stąd, żeby dołożenie providera było jedną zmianą,
+# a nie dwiema, z których druga zostaje zapomniana.
+ZMIENNE_PROVIDERA: dict[str, tuple[str, str]] = {
+    # provider  -> (zmienna z kluczem,   zmienna z nazwą modelu)
+    "anthropic": ("ANTHROPIC_API_KEY",   "CLASSIFIER_MODEL"),
+    "openai":    ("OPENAI_API_KEY",      "OPENAI_MODEL"),
+    "gemini":    ("GEMINI_API_KEY",      "GEMINI_MODEL"),
+}
+
+# Kolejność jest kolejnością sekcji w .env.example i w tej kolejności wchodzą
+# do raportów.
+PROVIDERY: tuple[str, ...] = tuple(ZMIENNE_PROVIDERA)
+
+# Nieznana wartość LLM_PROVIDER degraduje TUTAJ — do jedynego providera, którego
+# zależność siedzi w requirements.txt. Literówka w .env nie może zatrzymać crona
+# ani przełączyć systemu na coś, czego na maszynie nie ma.
+PROVIDER_DOMYSLNY = "anthropic"
+
 # --- OpenAI: różnice API, których nie da się schować w jednej implementacji ---
 #
 # OPENAI_JSON_MODE — "off" | "object" | "schema". Opis trybów i ich PUŁAPKI
@@ -316,14 +351,39 @@ VAPID_PRIVATE_KEY = _txt("VAPID_PRIVATE_KEY")
 VAPID_KONTAKT = _txt("VAPID_KONTAKT", "mailto:admin@example.com")
 
 # ---------------------------------------------------------------------------
-# Czego wymaga który kawałek systemu. Trzymane jako dane, a nie rozsiane po
-# `if not X` w workerach — dzięki temu komunikat o brakach jest wszędzie taki sam
-# i da się go wypisać CAŁY naraz, zamiast wychodzić po pierwszym brakującym
-# kluczu i wracać po poprawce po kolejny.
+# CZEGO BRAKUJE — I CZY TO W OGÓLE JEST POWÓD, ŻEBY SIĘ ZATRZYMAĆ
+#
+# Braki trzymamy jako dane, a nie rozsiane po `if not X` w workerach: dzięki temu
+# komunikat jest wszędzie taki sam i da się wypisać CAŁY naraz, zamiast wychodzić
+# po pierwszym brakującym kluczu i wracać po poprawce po kolejny.
+#
+# Ale ważniejsze od listy jest to, że braki dzielą się na DWIE KLASY:
+#
+#   BLOKUJĄCE START  Bez tego nie ma czego pokazywać ani gdzie zapisać. Pozycja
+#                    jest JEDNA: DATABASE_URL.
+#   DEGRADUJĄCE      Cała reszta — klucz modelu, Telegram, klucze Apify, token
+#                    panelu. Każde z nich wyłącza JEDEN podsystem, a system stoi
+#                    dalej: bez klucza modelu fetcher wciąż zbiera posty do bazy,
+#                    bramka wciąż punktuje, panel wciąż pokazuje to, co zebrane,
+#                    a Telegram wciąż dowozi.
+#
+# DLACZEGO TO JEST OSOBNY BYT, A NIE JEDNA LISTA. Brak opcjonalnego klucza, który
+# kładzie API, daje najgorszy możliwy tryb pracy: proces kończy się „czysto", PM2
+# podnosi go z powrotem, i po chwili w `pm2 status` stoi pętla restartów ze
+# statusem `errored`. W logach wygląda to na awarię kodu, a jest brakiem jednej
+# linijki w .env — czyli szuka się tego w najgorszym możliwym miejscu.
+#
+# Klasa braku NIE zależy od tego, kto pyta. Zależy od niej natomiast reakcja:
+# worker z crona kończy czysto (`wyjscie_bez_konfiguracji`), a API wstaje
+# ZAWSZE i mówi prawdę w `/health` — bo endpoint diagnostyczny jest potrzebny
+# dokładnie wtedy, gdy konfiguracja jest niepełna.
 # ---------------------------------------------------------------------------
 OPIS_ZMIENNYCH: dict[str, str] = {
     "DATABASE_URL": "DSN do bazy `laweta` — OSOBNEJ od sales-core-engine",
-    "ANTHROPIC_API_KEY": "klucz API Anthropic — bez niego klasyfikator nie ruszy",
+    "ANTHROPIC_API_KEY": "klucz API Anthropic (LLM_PROVIDER=anthropic)",
+    "OPENAI_API_KEY": "klucz API OpenAI (LLM_PROVIDER=openai)",
+    "OPENAI_MODEL": "nazwa modelu OpenAI — bez wartości domyślnej, podaj świadomie",
+    "GEMINI_API_KEY": "klucz API Gemini (LLM_PROVIDER=gemini)",
     "TELEGRAM_BOT_TOKEN": "token bota od @BotFather",
     "TELEGRAM_CHAT_ID": "ID czatu operatora (bot musi tam być dodany)",
     "API_TOKEN": ("token panelu — jeden użytkownik, nagłówek `X-Token`. "
@@ -332,13 +392,158 @@ OPIS_ZMIENNYCH: dict[str, str] = {
                          "(SHARED_ENV_PATH), nie ustawiaj go tutaj bez powodu"),
 }
 
+# Co PRZESTAJE DZIAŁAĆ przy tym braku — zdanie, nie nazwa zmiennej. To jest
+# jedyna treść, która odpowiada na pytanie zadawane przy `/health`: „czy mogę
+# z tym żyć do jutra". Bez niej lista braków wygląda jednakowo groźnie, więc
+# operator albo naprawia wszystko naraz, albo nie naprawia nic.
+SKUTEK_BRAKU: dict[str, str] = {
+    "DATABASE_URL": "BLOKUJE: nie ma gdzie zapisać ani czego pokazać",
+    "ANTHROPIC_API_KEY": "klasyfikator nie ocenia postów — lecą do bazy surowe",
+    "OPENAI_API_KEY": "klasyfikator nie ocenia postów — lecą do bazy surowe",
+    "OPENAI_MODEL": "klasyfikator nie ma czym wołać — posty lecą do bazy surowe",
+    "GEMINI_API_KEY": "klasyfikator nie ocenia postów — lecą do bazy surowe",
+    "TELEGRAM_BOT_TOKEN": "alerty nie wychodzą; zlecenia widać w panelu",
+    "TELEGRAM_CHAT_ID": "alerty nie wychodzą; zlecenia widać w panelu",
+    "API_TOKEN": "panel dostaje 503 na danych (/health i /zdrowie działają)",
+    "APIFY_API_TOKEN1": "fetcher nie pobierze nic nowego; zebrane zostaje",
+}
+
+# JEDYNY brak, po którym nie ma sensu ruszać. Reszta systemu opiera się o bazę:
+# fetcher zapisuje, panel czyta, powiadomienia biorą stamtąd treść.
+BLOKUJACE_START: tuple[str, ...] = ("DATABASE_URL",)
+
+# Degradujące, których lista nie zależy od konfiguracji. Zmienne aktywnego
+# providera dochodzą do nich osobno (`braki_degradujace`), bo które to są,
+# wiadomo dopiero po przeczytaniu LLM_PROVIDER.
+DEGRADUJACE_STALE: tuple[str, ...] = (
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "API_TOKEN", "APIFY_API_TOKEN1",
+)
+
+
+def _wartosc(nazwa: str) -> str:
+    """Wartość SKUTECZNA zmiennej — ta, którą realnie posłuży się system.
+
+    Najpierw stała tego modułu, bo ona niesie wartość domyślną z kodu: puste
+    `CLASSIFIER_MODEL` w .env NIE jest brakiem, skoro model i tak ma nazwę.
+    Pytanie brzmi „czy system ma czym działać", a nie „czy ktoś wpisał linijkę".
+
+    Dopiero potem samo środowisko — dla zmiennych, które nie mają tu stałej
+    (klucze Apify przychodzą ze wspólnego .env sales-core-engine).
+    """
+    wartosc = globals().get(nazwa)
+    if isinstance(wartosc, str):
+        return wartosc.strip()
+    return _txt(nazwa)
+
 
 def brakujace(*nazwy: str) -> list[str]:
     """Które z podanych zmiennych są puste. Pusta lista = komplet.
 
     Zwraca LISTĘ, nie bool — worker ma wypisać wszystkie braki naraz.
     """
-    return [n for n in nazwy if not _txt(n)]
+    return [n for n in nazwy if not _wartosc(n)]
+
+
+# ---------------------------------------------------------------------------
+# PROVIDER MODELU — który klucz jest w tym przebiegu wymagany
+# ---------------------------------------------------------------------------
+def provider_llm(surowy: str | None = None) -> str:
+    """Nazwa providera -> jedna z PROVIDERY. Nieznana degraduje do domyślnego.
+
+    Degradacja, a nie wyjątek: literówka w .env nie może zatrzymać crona, a
+    `PROVIDER_DOMYSLNY` jest jedynym providerem, którego zależność siedzi
+    w requirements.txt. `services/llm.normalizuj_provider` woła to samo.
+    """
+    s = (LLM_PROVIDER if surowy is None else surowy).strip().lower()
+    return s if s in ZMIENNE_PROVIDERA else PROVIDER_DOMYSLNY
+
+
+def klucz_providera(provider: str | None = None) -> str:
+    """Klucz API tego providera. Pusty = nieustawiony."""
+    return _wartosc(ZMIENNE_PROVIDERA[provider_llm(provider)][0])
+
+
+def model_providera(provider: str | None = None) -> str:
+    """Nazwa modelu tego providera — po domyślnych z kodu. Pusta = nie podano."""
+    return _wartosc(ZMIENNE_PROVIDERA[provider_llm(provider)][1])
+
+
+def braki_providera(provider: str | None = None) -> list[str]:
+    """Czego brakuje, żeby TEN provider ruszył. Pusta lista = komplet.
+
+    Bez argumentu pyta o providera z .env — czyli o jedyny, który w tym
+    przebiegu cokolwiek zrobi. Klucze pozostałych są opcjonalne i ich brak nie
+    ma prawa się tu pojawić.
+
+    NIE sprawdza pakietu SDK ani tego, czy klucz jest DOBRY — pierwsze umie
+    `services/llm.problemy()` (to ono zna nazwy paczek), drugiego nie da się
+    sprawdzić bez sieci (`scripts/test_llm.py`).
+    """
+    zmienna_klucza, zmienna_modelu = ZMIENNE_PROVIDERA[provider_llm(provider)]
+    return brakujace(zmienna_klucza, zmienna_modelu)
+
+
+def providery_z_kompletem() -> list[str]:
+    """Providery, dla których klucz i nazwa modelu są ustawione.
+
+    Do informacji, NIGDY do zatrzymania czegokolwiek: mówi tylko, jak szerokie
+    będzie `scripts/porownaj_modele.py`.
+    """
+    return [p for p in PROVIDERY if not braki_providera(p)]
+
+
+def opis_porownania() -> str:
+    """Jedno zdanie o zasięgu porównania modeli — informacja, nie ostrzeżenie.
+
+    MÓWI WPROST, CO POLICZYŁ. Ten moduł widzi .env i nic więcej, więc liczy
+    klucze i nazwy modeli — nie pakiety SDK, o które pyta `llm.gotowe_providery()`.
+    Bez tego dopisku obie liczby stoją w jednym raporcie i różnią się bez
+    wyjaśnienia, a z takiej sprzeczności operator wyciąga jeden wniosek:
+    że narzędziu nie można wierzyć.
+    """
+    return (f"porównanie modeli obejmie {len(providery_z_kompletem())} "
+            f"z {len(PROVIDERY)} providerów (klucz i model w .env)")
+
+
+# ---------------------------------------------------------------------------
+# DWIE KLASY BRAKÓW — patrz nota nad OPIS_ZMIENNYCH
+# ---------------------------------------------------------------------------
+def braki_blokujace_start() -> list[str]:
+    """Bez tego nie ma sensu ruszać. Pusta lista w 99% instalacji."""
+    return brakujace(*BLOKUJACE_START)
+
+
+def braki_degradujace() -> list[str]:
+    """Braki, które wyłączają podsystem — i NIGDY nie są powodem zatrzymania.
+
+    Klucz modelu wchodzi tu z aktywnego providera, nie z listy wszystkich:
+    przy LLM_PROVIDER=openai pusty ANTHROPIC_API_KEY nie jest brakiem, tylko
+    niewykorzystaną linijką w .env.
+    """
+    return brakujace(*ZMIENNE_PROVIDERA[provider_llm()], *DEGRADUJACE_STALE)
+
+
+def stan_konfiguracji() -> dict:
+    """Komplet odpowiedzi o konfiguracji: status, obie klasy braków, skutki.
+
+    Jedno źródło dla `/health`, `/zdrowie` i linii startowej — żeby te trzy
+    miejsca nie mogły powiedzieć o tej samej maszynie trzech różnych rzeczy.
+
+    `niepelna_konfiguracja` przy samych brakach degradujących jest stanem
+    POPRAWNYM, a nie awarią: system chodzi, tylko węziej.
+    """
+    blokujace = braki_blokujace_start()
+    degradujace = braki_degradujace()
+    return {
+        "status": "ok" if not (blokujace or degradujace) else "niepelna_konfiguracja",
+        "blokujace_start": blokujace,
+        "degradujace": degradujace,
+        # Nazwa zmiennej mówi, CZEGO nie ma; to zdanie mówi, co przez to nie
+        # działa. Dopiero drugie pozwala zdecydować, czy naprawiać teraz.
+        "skutki": {n: SKUTEK_BRAKU.get(n, "patrz .env.example")
+                   for n in (*blokujace, *degradujace)},
+        "porownanie_modeli": opis_porownania(),
+    }
 
 
 def wyjscie_bez_konfiguracji(kto: str, braki: list[str], strumien=None) -> int:
@@ -350,8 +555,16 @@ def wyjscie_bez_konfiguracji(kto: str, braki: list[str], strumien=None) -> int:
     włączono. Gdyby brak tokenu dawał kod 1, skrzynka operatora zapełniłaby się
     mailami od crona co 5 minut i realna awaria utonęłaby w szumie.
 
+    WOŁAJ TO TYLKO NA BRAKACH, KTÓRE ODBIERAJĄ TEMU PROCESOWI CAŁĄ PRACĘ. Bot
+    Telegrama bez tokenu nie ma czego robić i kończy słusznie; API bez klucza
+    modelu traci JEDEN podsystem z kilku i kończyć się nie ma prawa. Zakończenie
+    procesu, który miał jeszcze co robić, jest pod PM2 pętlą restartów ze statusem
+    `errored`, a pod cronem mailem co pięć minut — objawem wyglądającym na awarię
+    kodu tam, gdzie brakuje linijki w .env. Brak degradujący idzie do logu i do
+    `/health`, nie do `sys.exit`.
+
     Użycie w workerze:
-        braki = settings.brakujace("DATABASE_URL", "ANTHROPIC_API_KEY")
+        braki = settings.braki_blokujace_start()
         if braki:
             return settings.wyjscie_bez_konfiguracji("classifier", braki)
     """
@@ -372,34 +585,67 @@ def opis_srodowiska() -> str:
     """
     stan = {
         "db": bool(DATABASE_URL),
-        "anthropic": bool(ANTHROPIC_API_KEY),
-        "openai": bool(OPENAI_API_KEY),
+        # Klucz TEGO providera, nie zawsze Anthropic. Wcześniej stało tu
+        # `anthropic=BRAK` obok działającego OpenAI — linia startowa krzyczała
+        # o kluczu, którego ten przebieg nie tknie.
+        "klucz_modelu": bool(klucz_providera()),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "baza_geo": bool(BAZA_LAT or BAZA_LON),
         "api_token": bool(API_TOKEN),
     }
-    # Model TEGO providera, nie zawsze Anthropic — inaczej linia startowa przy
-    # LLM_PROVIDER=openai pokazywałaby model, który w tym przebiegu nie ruszy.
-    model_llm = {"openai": OPENAI_MODEL, "gemini": GEMINI_MODEL}.get(
-        LLM_PROVIDER.strip().lower(), CLASSIFIER_MODEL) or "(brak)"
+    # Model TEGO providera — z tego samego powodu co klucz wyżej.
+    provider = provider_llm()
+    model_llm = model_providera(provider) or "(brak)"
     return "[settings] " + ", ".join(
         f"{k}={'tak' if v else 'BRAK'}" for k, v in stan.items()
     ) + (f", cisza_nocna={CISZA_NOCNA_OD}-{CISZA_NOCNA_DO}"
          f", min_pewnosc={MIN_PEWNOSC}, limit_powiadomien={MAX_POWIADOMIEN_H}/h"
          f", max_dystans={MAX_DYSTANS_KM} km, max_wiek_posta={MAX_WIEK_POSTA_H} h"
          f", gate={GATE_TRYB}(prog {GATE_PROG})"
-         f", llm={LLM_PROVIDER}/{model_llm}"
-         + (f"(json={OPENAI_JSON_MODE})" if LLM_PROVIDER.strip().lower() == "openai" else "")
+         f", llm={provider}/{model_llm}"
+         + (f"(json={OPENAI_JSON_MODE})" if provider == "openai" else "")
+         # Literówka w LLM_PROVIDER degraduje po cichu do domyślnego — ma być
+         # WIDOCZNA, bo inaczej operator czyta linię startową i widzi providera,
+         # o którego nie prosił, bez śladu skąd się wziął.
+         + (f"(LLM_PROVIDER={LLM_PROVIDER!r} nieznany)"
+            if LLM_PROVIDER.strip().lower() != provider else "")
+         + f", {opis_porownania()}"
          + f", budzet={POSTY_NA_DOBE} postow/dobe"
          f", sciezka_actora={SCIEZKA_ACTORA or 'z pomiaru'}"
          f", wspolny_apify={WSPOLNE_APIFY_ILE} zmiennych z {WSPOLNE_APIFY_SKAD}")
+
+
+def raport_konfiguracji(strumien=None) -> int:
+    """Braki OBIEMA klasami osobno, dla `check_setup.sh` i CLI tego modułu.
+
+    Zawsze kod 0. Niepełna konfiguracja nie jest awarią diagnostyki — narzędzie
+    od odpowiadania „czego brakuje" nie ma prawa samo wyglądać na zepsute.
+    """
+    out = strumien or sys.stdout
+    stan = stan_konfiguracji()
+    print(f"[settings] {stan['porownanie_modeli']} "
+          f"({', '.join(providery_z_kompletem()) or 'brak — klasyfikator nie ruszy'})",
+          file=out)
+
+    if stan["blokujace_start"]:
+        print("[settings] BLOKUJE START — bez tego nie ma sensu ruszać:", file=out)
+        for n in stan["blokujace_start"]:
+            print(f"[settings]   {n} — {OPIS_ZMIENNYCH.get(n, 'patrz .env.example')}", file=out)
+    if stan["degradujace"]:
+        # „Wstanie" mówi się tu wprost, bo pytanie brzmi zwykle „czy mogę
+        # deployować" — a odpowiedź brzmi tak, tylko węziej.
+        print("[settings] DEGRADUJE — system wstanie, te podsystemy nie:", file=out)
+        for n in stan["degradujace"]:
+            print(f"[settings]   {n} — {stan['skutki'][n]}", file=out)
+    if stan["status"] == "ok":
+        print("[settings] Komplet zmiennych ustawiony.", file=out)
+    else:
+        print(f"[settings] Uzupełnij {BASE_DIR / '.env'} (wzór: .env.example).", file=out)
+    return 0
 
 
 # Podgląd konfiguracji bez odpalania czegokolwiek:
 #   python -m laweta_radar.config.settings
 if __name__ == "__main__":
     print(opis_srodowiska())
-    braki = brakujace(*OPIS_ZMIENNYCH)
-    if braki:
-        raise SystemExit(wyjscie_bez_konfiguracji("settings", braki, sys.stdout))
-    print("[settings] Komplet zmiennych ustawiony.")
+    raise SystemExit(raport_konfiguracji(sys.stdout))

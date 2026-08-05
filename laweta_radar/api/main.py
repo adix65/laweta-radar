@@ -21,6 +21,9 @@ przez które wyciekają tokeny, bo wygląda niewinnie.
 """
 from __future__ import annotations
 
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,9 +31,26 @@ from laweta_radar.api.routers import push, statystyki, zdrowie, zlecenia
 from laweta_radar.config import groups, settings
 from laweta_radar.services import geo, llm
 
+
+@asynccontextmanager
+async def _cykl_zycia(_app: FastAPI):
+    """Wypisz linię startową i oddaj sterowanie. Nic tu nie może rzucić.
+
+    `lifespan`, a nie `@app.on_event("startup")` — tamto jest w tej wersji
+    FastAPI przestarzałe i dokłada ostrzeżenie dokładnie w miejscu, które ma być
+    czytelne: w pierwszych linijkach `pm2 logs`.
+
+    Stoi tu, bo `FastAPI(...)` niżej bierze je argumentem; sama treść linii
+    startowej siedzi w `_linia_startowa` razem z resztą pomocniczych.
+    """
+    _linia_startowa()
+    yield
+
+
 app = FastAPI(
     title="Laweta Radar",
     description="Monitoring grup FB pod kątem zleceń dla lawety.",
+    lifespan=_cykl_zycia,
 )
 
 # CORS wyłącznie dla adresu panelu z `.env`. Świadomie BEZ `allow_origins=["*"]`:
@@ -51,6 +71,33 @@ app.include_router(zlecenia.router)
 app.include_router(statystyki.router)
 app.include_router(zdrowie.router)
 app.include_router(push.router)
+
+
+def _linia_startowa() -> None:
+    """Co jest ustawione, a co nie — JEDNA linia w `pm2 logs` przy każdym starcie.
+
+    API WSTAJE ZAWSZE, także z niepełną konfiguracją, i to jest jedyne poprawne
+    zachowanie: brak klucza modelu wyłącza klasyfikator, ale fetcher dalej zbiera
+    posty do bazy, bramka dalej punktuje, panel dalej pokazuje zebrane, a Telegram
+    dalej dowozi. Zakończenie procesu odebrałoby operatorowi cztery działające
+    podsystemy z powodu jednego niedziałającego — a pod PM2 zrobiłoby z tego pętlę
+    restartów ze statusem `errored`, czyli objaw wyglądający na awarię kodu.
+
+    Dlatego brak trafia do logu i do `/health`, a nie do `sys.exit`. Ta linia jest
+    tam, gdzie operator i tak zagląda po `pm2 status`.
+    """
+    print(settings.opis_srodowiska(), file=sys.stderr)
+    print(llm.opis(), file=sys.stderr)
+    stan = settings.stan_konfiguracji()
+    if stan["blokujace_start"]:
+        # API stoi dalej — `/health` jest potrzebne DOKŁADNIE teraz — ale bez
+        # bazy nie odda żadnych danych i endpointy z danymi zwrócą 503.
+        print(f"[api] BRAK {', '.join(stan['blokujace_start'])} — wstaję, ale "
+              f"endpointy z danymi oddadzą 503. Diagnostyka: /health i /zdrowie.",
+              file=sys.stderr)
+    for nazwa in stan["degradujace"]:
+        print(f"[api] niepelna_konfiguracja: {nazwa} — {stan['skutki'][nazwa]}",
+              file=sys.stderr)
 
 
 def _stan_bazy() -> dict:
@@ -99,24 +146,34 @@ def health() -> dict:
     i monitoringowi traktować "niewłączony system" jak awarię.
     """
     baza = _stan_bazy()
-    braki = settings.brakujace(*settings.OPIS_ZMIENNYCH)
+    konfiguracja = settings.stan_konfiguracji()
+    stan_config = konfiguracja.pop("status")
+    problemy_llm = llm.problemy()
     return {
-        "status": "ok" if (baza["ok"] and not braki) else "niepelna_konfiguracja",
+        "status": "ok" if (baza["ok"] and stan_config == "ok") else "niepelna_konfiguracja",
         "baza": baza,
-        "brakujace_zmienne": braki,
+        # DWIE KLASY, NIE JEDNA LISTA — patrz `settings.stan_konfiguracji`.
+        # Płaska lista stawiała brak DATABASE_URL obok nieużywanego klucza
+        # nieaktywnego providera, więc nie dało się z niej odczytać jedynej
+        # rzeczy, po którą się tu przychodzi: czy system w ogóle działa.
+        "braki": konfiguracja,
         "grupy": {
             "do_pobrania": len(groups.grupy_do_pobrania()),
             "wszystkich": len(groups.FB_GRUPY),
         },
         # Klasyfikator i geo mają własne warunki startu, których nie widać
-        # w `brakujace_zmienne`: brakującą paczkę providera i brakujący plik
-        # z kodami pocztowymi. Obie awarie są CICHE — system wstaje, nie woła
-        # modelu albo nie pokazuje tras, i nic o tym nie mówi.
+        # w `braki`: brakującą paczkę providera i brakujący plik z kodami
+        # pocztowymi. Obie awarie są CICHE — system wstaje, nie woła modelu albo
+        # nie pokazuje tras, i nic o tym nie mówi.
         "klasyfikator": {
             "provider": llm.normalizuj_provider(settings.LLM_PROVIDER),
             "model": llm.model_domyslny(),
-            "gotowy": not llm.problemy(),
-            "problemy": llm.problemy(),
+            "gotowy": not problemy_llm,
+            "problemy": problemy_llm,
+            # Klucze POZOSTAŁYCH providerów są opcjonalne — ich brak zawęża
+            # `scripts/porownaj_modele.py` i nic poza tym. Stoi tu jako
+            # informacja, nigdy jako powód alarmu.
+            "porownanie_modeli": konfiguracja["porownanie_modeli"],
         },
         "geo": {
             "baza_ustawiona": bool(settings.BAZA_LAT or settings.BAZA_LON),

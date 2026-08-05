@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
@@ -88,6 +89,159 @@ def test_wyjscie_bez_konfiguracji_mowi_CO_ustawic():
     assert "DATABASE_URL" in out and "TELEGRAM_CHAT_ID" in out
     assert settings.OPIS_ZMIENNYCH["DATABASE_URL"] in out
     assert ".env" in out
+
+
+# ---------------------------------------------------------------------------
+# Klucz modelu — krytyczny jest WYŁĄCZNIE klucz aktywnego providera
+#
+# Regresja z realnej wpadki: warunek sprawdzał ANTHROPIC_API_KEY bezwarunkowo,
+# więc instalacja postawiona na OpenAI — z działającym kluczem i potwierdzonym
+# wywołaniem modelu — dostawała „brak krytyczny" za pustą linijkę w .env,
+# której nigdy nie miała użyć.
+# ---------------------------------------------------------------------------
+@contextmanager
+def ustaw(**zmienne):
+    """Podmień wartości w `settings` na czas testu i przywróć oryginały.
+
+    Podmieniamy STAŁE MODUŁU, nie środowisko: to one niosą wartości domyślne
+    z kodu i to z nich korzysta reszta repo (patrz `settings._wartosc`).
+    """
+    stare = {k: getattr(settings, k) for k in zmienne}
+    for k, v in zmienne.items():
+        setattr(settings, k, v)
+    try:
+        yield
+    finally:
+        for k, v in stare.items():
+            setattr(settings, k, v)
+
+
+def test_openai_nie_zglasza_braku_klucza_anthropic():
+    """KRYTERIUM ODBIORU z zadania: pusty ANTHROPIC_API_KEY przy openai = brak braku."""
+    with ustaw(LLM_PROVIDER="openai", ANTHROPIC_API_KEY="",
+               OPENAI_API_KEY="sk-dziala", OPENAI_MODEL="gpt-5-mini",
+               DATABASE_URL="postgresql://x@localhost/laweta"):
+        assert settings.braki_providera() == []
+        assert "ANTHROPIC_API_KEY" not in settings.braki_degradujace()
+        # I nic z tego nie ma prawa zatrzymać startu.
+        assert settings.braki_blokujace_start() == []
+
+
+def test_openai_wymaga_TAKZE_niepustej_nazwy_modelu():
+    """Sam klucz nie wystarcza: OPENAI_MODEL nie ma wartości domyślnej."""
+    with ustaw(LLM_PROVIDER="openai", OPENAI_API_KEY="sk-dziala", OPENAI_MODEL=""):
+        assert settings.braki_providera() == ["OPENAI_MODEL"]
+
+
+def test_kazdy_provider_pyta_o_SWOJ_klucz():
+    for provider, klucz in (("anthropic", "ANTHROPIC_API_KEY"),
+                            ("openai", "OPENAI_API_KEY"),
+                            ("gemini", "GEMINI_API_KEY")):
+        with ustaw(LLM_PROVIDER=provider, ANTHROPIC_API_KEY="", OPENAI_API_KEY="",
+                   GEMINI_API_KEY="", OPENAI_MODEL="gpt-5-mini"):
+            assert settings.braki_providera() == [klucz]
+
+
+def test_nazwa_modelu_z_domyslna_w_kodzie_nie_jest_brakiem():
+    """CLASSIFIER_MODEL i GEMINI_MODEL mają domyślne — pusty .env to nie brak.
+
+    Liczy się wartość SKUTECZNA, a nie to, czy ktoś wpisał linijkę: system ma
+    czym wołać, więc nie ma o czym meldować.
+    """
+    for provider, klucz in (("anthropic", "ANTHROPIC_API_KEY"),
+                            ("gemini", "GEMINI_API_KEY")):
+        with ustaw(LLM_PROVIDER=provider, **{klucz: "sk-x"}):
+            assert settings.braki_providera() == []
+            assert settings.model_providera()
+
+
+def test_literowka_w_providerze_pyta_o_klucz_domyslnego():
+    """Nieznana wartość degraduje do anthropic — więc i wymagany klucz jest jego."""
+    with ustaw(LLM_PROVIDER="opneai", ANTHROPIC_API_KEY="", OPENAI_API_KEY="sk-x"):
+        assert settings.provider_llm() == "anthropic"
+        assert settings.braki_providera() == ["ANTHROPIC_API_KEY"]
+
+
+def test_klucze_pozostalych_providerow_sa_OPCJONALNE():
+    """Ich brak zawęża porównanie modeli i nic poza tym — nigdy nie zatrzymuje."""
+    with ustaw(LLM_PROVIDER="openai", ANTHROPIC_API_KEY="", GEMINI_API_KEY="",
+               OPENAI_API_KEY="sk-dziala", OPENAI_MODEL="gpt-5-mini"):
+        assert settings.providery_z_kompletem() == ["openai"]
+        assert "1 z 3 providerów" in settings.opis_porownania()
+        # Informacja — a nie powód, dla którego cokolwiek się nie odpali.
+        assert settings.braki_degradujace() == [] or "ANTHROPIC_API_KEY" not in \
+            settings.braki_degradujace()
+
+
+# ---------------------------------------------------------------------------
+# Dwie klasy braków — blokujące start kontra degradujące
+#
+# Sedno: brak klucza modelu NIE MOŻE kłaść API. Klasyfikator jest jednym
+# z kilku podsystemów; bez niego fetcher dalej zbiera, bramka dalej działa,
+# panel dalej pokazuje zebrane, a Telegram dalej dowozi.
+# ---------------------------------------------------------------------------
+def test_tylko_baza_blokuje_start():
+    """Lista blokujących ma JEDNĄ pozycję — dopisanie drugiej to decyzja, nie detal."""
+    assert settings.BLOKUJACE_START == ("DATABASE_URL",)
+
+
+def test_brak_klucza_modelu_jest_degradujacy_a_nie_blokujacy():
+    with ustaw(LLM_PROVIDER="anthropic", ANTHROPIC_API_KEY="",
+               DATABASE_URL="postgresql://x@localhost/laweta"):
+        assert settings.braki_blokujace_start() == []
+        assert "ANTHROPIC_API_KEY" in settings.braki_degradujace()
+        assert settings.stan_konfiguracji()["status"] == "niepelna_konfiguracja"
+
+
+def test_brak_bazy_blokuje():
+    with ustaw(DATABASE_URL=""):
+        assert settings.braki_blokujace_start() == ["DATABASE_URL"]
+
+
+def test_kazdy_brak_niesie_SKUTEK_a_nie_sama_nazwe():
+    """Nazwa mówi, czego nie ma; skutek mówi, co przez to nie działa.
+
+    Bez tego drugiego lista braków wygląda jednakowo groźnie i operator albo
+    naprawia wszystko naraz, albo nie naprawia nic.
+    """
+    with ustaw(LLM_PROVIDER="anthropic", ANTHROPIC_API_KEY="", DATABASE_URL="",
+               TELEGRAM_BOT_TOKEN="", TELEGRAM_CHAT_ID="", API_TOKEN=""):
+        stan = settings.stan_konfiguracji()
+        braki = [*stan["blokujace_start"], *stan["degradujace"]]
+        assert braki, "test bez braków niczego nie sprawdza"
+        for nazwa in braki:
+            assert stan["skutki"][nazwa]
+            assert stan["skutki"][nazwa] != nazwa
+
+
+def test_komplet_konfiguracji_daje_status_ok(monkeypatch):
+    monkeypatch.setenv("APIFY_API_TOKEN1", "apify-x")
+    with ustaw(LLM_PROVIDER="anthropic", ANTHROPIC_API_KEY="sk-ant",
+               DATABASE_URL="postgresql://x@localhost/laweta",
+               TELEGRAM_BOT_TOKEN="1:aa", TELEGRAM_CHAT_ID="-100", API_TOKEN="tok"):
+        stan = settings.stan_konfiguracji()
+        assert stan["status"] == "ok"
+        assert stan["blokujace_start"] == [] and stan["degradujace"] == []
+
+
+def test_raport_konfiguracji_konczy_sie_ZEREM_i_nazywa_obie_klasy():
+    """Narzędzie od odpowiadania „czego brakuje" nie ma prawa wyglądać na zepsute."""
+    buf = io.StringIO()
+    with ustaw(LLM_PROVIDER="anthropic", ANTHROPIC_API_KEY="", DATABASE_URL=""):
+        assert settings.raport_konfiguracji(buf) == 0
+    out = buf.getvalue()
+    assert "BLOKUJE START" in out and "DATABASE_URL" in out
+    assert "DEGRADUJE" in out and "ANTHROPIC_API_KEY" in out
+
+
+def test_linia_startowa_nie_krzyczy_o_kluczu_nieuzywanego_providera():
+    """`anthropic=BRAK` obok działającego OpenAI wysyłało po niepotrzebny klucz."""
+    with ustaw(LLM_PROVIDER="openai", ANTHROPIC_API_KEY="",
+               OPENAI_API_KEY="sk-dziala", OPENAI_MODEL="gpt-5-mini"):
+        opis = settings.opis_srodowiska()
+        assert "klucz_modelu=tak" in opis
+        assert "anthropic=BRAK" not in opis
+        assert "llm=openai/gpt-5-mini" in opis
 
 
 def test_liczby_degraduja_do_domyslnych_zamiast_rzucac(monkeypatch):
