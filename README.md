@@ -112,9 +112,11 @@ python -m laweta_radar.scripts.pomiar_actora --grupa <URL> --grupa <URL2> --grup
 #    -> docs/POMIAR-ACTORA.md
 
 # 2. WYSZUKIWARKA GRUP (raz na start, potem raz w miesiącu)
-python -m laweta_radar.scripts.znajdz_grupy --schema   # jakie pola actor przyjmuje
-python -m laweta_radar.scripts.znajdz_grupy --sucho    # plan i koszt, bez wydawania
-python -m laweta_radar.scripts.znajdz_grupy            # seria (pyta o potwierdzenie)
+#    WYMAGA SESJI FB — FB_COOKIES_PATH w .env (patrz niżej)
+python -m laweta_radar.scripts.znajdz_grupy --schema        # jakie pola actor przyjmuje
+python -m laweta_radar.scripts.znajdz_grupy --sucho         # plan, wejście actora, koszt
+python -m laweta_radar.scripts.znajdz_grupy --fraza "giełda lawet"  # PRÓBA: jedna fraza
+python -m laweta_radar.scripts.znajdz_grupy                 # seria (pyta o potwierdzenie)
 #    -> data/kandydaci_grupy.csv  ->  KROK RĘCZNY  ->  --raport  ->  config/groups.py
 ```
 
@@ -137,9 +139,25 @@ pominąć**: człowiek otwiera każdy URL i wpisuje w kolumnie `publiczna` TAK/N
 Apify czyta wyłącznie grupy publiczne, a z zewnątrz tego nie widać. Powtórne
 uruchomienie **scala** wynik z istniejącym CSV — praca ręczna nie ginie.
 
+**Bez sesji Facebooka ta wyszukiwarka nie znajdzie nic.** Wyszukiwarka grup
+pokazuje niezalogowanemu ścianę logowania, a nie wyniki — actor ma pole `cookies`
+dokładnie po to. Run bez sesji kosztuje tyle samo co udany i zwraca zero grup albo
+śmieci, więc:
+
+- ścieżkę do pliku JSON z ciasteczkami (eksport z rozszerzenia przeglądarki)
+  podajesz w `FB_COOKIES_PATH`, a **plik trzymasz poza repo** — to żywa sesja
+  Facebooka. W logu widać wyłącznie liczbę wczytanych ciasteczek, nigdy treść;
+- brak pliku **nie jest błędem**: skrypt ostrzega przed serią i pyta
+  o potwierdzenie, bo decyzja „i tak sprawdzę" należy do człowieka;
+- zanim pójdzie komplet 28 fraz za ~2,5 USD, sprawdź jedną:
+  `--fraza "giełda lawet"` odpala **jedno** wywołanie i wypisuje surowy wynik.
+  To jedyny sposób odróżnić martwą sesję od zmienionych nazw pól — zła nazwa
+  pola nie zwraca błędu, tylko pusty run za pełną cenę.
+
 Oba narzędzia liczą i pokazują przewidywany koszt **przed** serią i czekają na
 potwierdzenie; oba mają twardy sufit i odstęp między wywołaniami, bez
-zrównoleglania.
+zrównoleglania. `--sucho` wypisuje **gotowe wejście actora** (z zamaskowanymi
+ciasteczkami), żeby dało się je porównać ze schematem z `--schema` gołym okiem.
 
 ## Budżet liczy się w POSTACH, nie w runach
 
@@ -740,7 +758,9 @@ padają zgłoszenia, czy same reklamy lawet (szczegóły w komentarzu nad `FB_GR
    wyszukiwarki dowiódł, że da się je pobrać, nie że warto. Kolejnych kandydatów
    nie wpisuj z pamięci — zbuduj listę wyszukiwarką:
    `python -m laweta_radar.scripts.znajdz_grupy` (patrz sekcja
-   „Zanim powstanie fetcher").
+   „Zanim powstanie fetcher"). Wymaga sesji FB w `FB_COOKIES_PATH` — bez niej
+   wyszukiwarka odda actorowi ścianę logowania, a run zostanie policzony
+   normalnie.
 
 3. zmierz actora, zanim zbudujesz wokół niego fetcher:
    `python laweta_radar/scripts/pomiar_actora.py --sucho` (plan i koszt, bez sieci),
@@ -1216,6 +1236,8 @@ pm2 restart laweta-api laweta-bot
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | ile kredytu zostało na koncie #N | `python -m laweta_radar.workers.apify_credits --klucz N` |
 | jakie pola przyjmuje actor wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --schema` |
+| co dokładnie poleci do actora wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --sucho` (wejście, ciasteczka zamaskowane) |
+| czy sesja FB działa, zanim zapłacę za komplet | `python -m laweta_radar.scripts.znajdz_grupy --fraza "giełda lawet"` |
 | ile kosztowałby pomiar / seria wyszukiwania | dowolny z dwóch skryptów z `--sucho` |
 | co i za ile pobierze najbliższy przebieg | `python -m laweta_radar.workers.fb_fetcher --sucho` |
 | na której ścieżce (A/B) stoi fetcher | pierwsza linia wyjścia `--sucho` |

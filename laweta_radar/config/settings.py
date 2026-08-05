@@ -257,6 +257,30 @@ POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
 SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 
 # ---------------------------------------------------------------------------
+# WYSZUKIWARKA GRUP (scripts/znajdz_grupy.py) — narzędzie ręczne, nie pipeline.
+#
+# CIASTECZKA. Wyszukiwarka grup FB dla NIEZALOGOWANEGO oddaje ścianę logowania,
+# a nie wyniki — actor ma pole `cookies` właśnie dlatego. Run bez sesji kosztuje
+# tyle samo co udany i zwraca zero grup albo śmieci, więc brak tej ścieżki jest
+# OSTRZEŻENIEM przed serią, nie awarią po niej.
+#
+# Plik trzymaj POZA repo (np. ~/.secrets/fb_cookies.json, chmod 600). To jest
+# żywa sesja Facebooka: kto ma plik, ten jest zalogowany jako operator — i idzie
+# on w całości do cudzego actora, więc trzymaj tam WYŁĄCZNIE ciasteczka FB.
+# Wartości nie trafiają do żadnego logu; skrypt wypisuje tylko ich liczbę.
+FB_COOKIES_PATH = _txt("FB_COOKIES_PATH")
+
+# Odstęp actora między przewinięciami wyszukiwarki, w SEKUNDACH (pola `minDelay`
+# i `maxDelay`). To nie jest pokrętło wydajności: zbyt agresywne przewijanie
+# wygląda po stronie FB jak bot i psuje SESJĘ z pliku wyżej — czyli koszt pomyłki
+# płaci się nie tym runem, tylko wszystkimi następnymi.
+#
+# Para odwrócona (min > max) NIE zatrzymuje przebiegu — sufit dociąga się do
+# dolnej granicy, a realnie użyte wartości widać w planie przed serią.
+FB_SEARCH_MIN_DELAY_S = max(0, _int("FB_SEARCH_MIN_DELAY_S", 1))
+FB_SEARCH_MAX_DELAY_S = max(FB_SEARCH_MIN_DELAY_S, _int("FB_SEARCH_MAX_DELAY_S", 3))
+
+# ---------------------------------------------------------------------------
 # BRAMKA (workers/gate.py) — darmowy prefiltr słownikowy przed modelem.
 #
 # GATE_PROG: suma wag, od której post idzie do AI. Piątka jest CELOWO niska.
