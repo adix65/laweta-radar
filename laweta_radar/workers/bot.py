@@ -185,7 +185,7 @@ def _dzis(conn) -> str:
         cur.execute(
             """
             SELECT status, odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto,
-                   cena_koncowa
+                   cena_koncowa, tresc
               FROM posty
              WHERE czy_zlecenie
                AND pobrany_at > date_trunc('day', NOW())
@@ -194,9 +194,11 @@ def _dzis(conn) -> str:
 
     wziete = [w for w in wiersze if w[0] in ("dzwonie", "wygrane")]
     km = 0.0
-    for _status, o_kod, o_miasto, d_kod, d_miasto, _cena in wziete:
-        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                geo.geokoduj(d_kod, d_miasto))
+    for _status, o_kod, o_miasto, d_kod, d_miasto, _cena, tresc_posta in wziete:
+        # Treść posta rozstrzyga kraj przy nazwie z wielu krajów — te same
+        # kilometry co w alercie, więc i ta sama ścieżka geokodowania.
+        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto, tresc=tresc_posta),
+                                geo.geokoduj(d_kod, d_miasto, tresc=tresc_posta))
         # Dojazd PLUS trasa: operator pyta „ile dziś przejechałem", a nie
         # „jak długie były kursy". Pusty przebieg z bazy też zużywa paliwo.
         km += (pods["km_od_bazy"] or 0) + (pods["km_trasy"] or 0)
@@ -244,8 +246,9 @@ def _ostatnie(conn, ile: int) -> str:
     linie = [f"*🕘 Ostatnie {len(wiersze)} zleceń*", ""]
     for (fb_id, grupa, opublikowany, status, o_kod, o_miasto, d_kod, d_miasto,
          tresc_posta) in wiersze:
-        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                geo.geokoduj(d_kod, d_miasto), tresc_posta)
+        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto, tresc=tresc_posta),
+                                geo.geokoduj(d_kod, d_miasto, tresc=tresc_posta),
+                                tresc_posta)
         trasa = str(o_miasto or o_kod or "?")
         if d_miasto or d_kod:
             trasa += f" → {d_miasto or d_kod}"
