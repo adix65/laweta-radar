@@ -224,7 +224,8 @@ def _build_actor_input(group_url: str, limit: int, okno_min: int, sciezka: str) 
 
 
 def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
-                     token: str, *, proxy: str | None = None) -> list[dict]:
+                     token: str, *, proxy: str | None = None,
+                     cfg: apify_proxy.ProxyConfig | None = None) -> list[dict]:
     """Synchroniczne wywołanie actora dla jednej grupy -> lista surowych itemów.
 
     `run-sync-get-dataset-items` oddaje od razu zawartość datasetu, bez
@@ -239,6 +240,12 @@ def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
     awarii transportu — bez tego druga próba tym samym kluczem zawsze wracałaby
     na to samo, padnięte wyjście.
 
+    `cfg` — konfiguracja proxy z `run()`, policzona RAZ dla wszystkich żywych
+    kluczy tego przebiegu (`apify_proxy.load_proxy_config(tokens=tokeny_zywe)`),
+    czyli z WYRÓWNANIEM po hashu (`cfg.balanced` — sekcja 4 zadania „większa pula
+    proxy"). `None` (domyślnie) = `client_for_token` sam dociągnie świeżą
+    konfigurację BEZ wyrównania — zgodność wstecz dla wołających spoza `run()`.
+
     Błędy HTTP lecą wyżej NIETKNIĘTE — po nich `apify_keys` poznaje wyczerpany
     klucz i odróżnia go od chwilowej awarii proxy. Opakowanie ich we własny
     wyjątek zamieniłoby rotację kluczy w zgadywankę.
@@ -246,7 +253,7 @@ def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
     url = f"{API}/acts/{cfg_groups.APIFY_ACTOR}/run-sync-get-dataset-items"
     klient_cm = (apify_proxy.client_for_proxy(proxy, timeout=cfg_groups.APIFY_TIMEOUT)
                 if proxy is not None else
-                apify_proxy.client_for_token(token, timeout=cfg_groups.APIFY_TIMEOUT))
+                apify_proxy.client_for_token(token, timeout=cfg_groups.APIFY_TIMEOUT, cfg=cfg))
     with klient_cm as klient:
         odp = klient.post(
             url,
@@ -288,7 +295,8 @@ def _polacz_best_effort():
 
 
 def _apify_run_group_samoleczaca(group_url: str, limit: int, okno_min: int, sciezka: str,
-                                 token: str, log=print) -> list[dict]:
+                                 token: str, cfg: apify_proxy.ProxyConfig | None = None,
+                                 log=print) -> list[dict]:
     """Jak `_apify_run_group`, ale przy błędzie SIECI/PROXY próbuje TEGO SAMEGO
     klucza z KOLEJNYM proxy (max `_PROXY_PROBY_SAMOLECZENIA`), a padnięty adres
     ląduje w kwarantannie na 30 min (`apify_proxy.oznacz_kwarantanna`).
@@ -298,13 +306,18 @@ def _apify_run_group_samoleczaca(group_url: str, limit: int, okno_min: int, scie
     nie płacił za nic. Bez proxy w ogóle (`proxy_for_token` zwraca None) nie ma
     czym „przepiąć" — błąd jest wtedy realną awarią sieci, nie proxy, i leci
     wyżej bez prób dodatkowych.
+
+    `cfg` (patrz `_apify_run_group`) idzie też do `proxy_for_token` PONIŻEJ —
+    inaczej „padnięty adres" liczony tutaj (świeżym, NIEwyrównanym rendezvous
+    hashingiem) mógłby różnić się od adresu, którym REALNIE poszła pierwsza
+    próba (przez `cfg` z wyrównaniem) — i do kwarantanny trafiłby zły adres.
     """
     try:
-        return _apify_run_group(group_url, limit, okno_min, sciezka, token)
+        return _apify_run_group(group_url, limit, okno_min, sciezka, token, cfg=cfg)
     except Exception as e:  # noqa: BLE001 — klasyfikujemy poniżej
         if apify_keys.classify_apify_error(e) != apify_keys.STATUS_BLAD_SIECI:
             raise
-        proxy_padniety = apify_proxy.proxy_for_token(token)
+        proxy_padniety = apify_proxy.proxy_for_token(token, cfg)
         if proxy_padniety is None:
             raise
         ostatni_blad = e
@@ -327,7 +340,7 @@ def _apify_run_group_samoleczaca(group_url: str, limit: int, okno_min: int, scie
             raise ostatni_blad     # cała ranga proxy tego klucza w kwarantannie
         try:
             return _apify_run_group(group_url, limit, okno_min, sciezka, token,
-                                    proxy=nastepny_proxy)
+                                    proxy=nastepny_proxy, cfg=cfg)
         except Exception as e2:  # noqa: BLE001
             if apify_keys.classify_apify_error(e2) != apify_keys.STATUS_BLAD_SIECI:
                 raise
@@ -380,6 +393,30 @@ def _alert_pula_wyczerpana(tokeny: list[str], log=print) -> None:
         telegram_notify.wyslij(tekst)
     except Exception as e:  # noqa: BLE001 — alert nie może dorzucić drugiego błędu
         log(f"[{KTO}] nie udało się wysłać alertu o wyczerpanej puli: {_jedna_linia(e)}")
+
+
+def _alert_pula_proxy_wyczerpana(cfg: apify_proxy.ProxyConfig, log=print) -> None:
+    """Telegram + log KRYTYCZNY, gdy WSZYSTKIE proxy z puli są NARAZ w
+    kwarantannie (sekcja 3 zadania „większa pula proxy") — inaczej niż pojedynczy
+    padnięty adres (ten obsługuje samoleczenie w `_apify_run_group_samoleczaca`),
+    to jest stan, w którym ŻADEN klucz nie ma czym pojechać bez wyjścia z gołego
+    IP VPS-a. `run()` woła to WYŁĄCZNIE, gdy `APIFY_PROXY_REQUIRED=1` — bez tej
+    flagi brak żywych proxy jest dozwolonym (choć gorszym) stanem.
+    """
+    log(f"[{KTO}] KRYTYCZNE: WSZYSTKIE proxy z puli ({len(cfg.pool)}) są w "
+        f"kwarantannie naraz — przerywam przebieg, żeby nie wyjść z gołego IP VPS-a.")
+    tekst = (f"🆘 *PULA PROXY WYCZERPANA*\n\n"
+            f"Wszystkie {len(cfg.pool)} adresów proxy są teraz w kwarantannie — "
+            f"pobieranie się NIE ROZPOCZĘŁO (APIFY_PROXY_REQUIRED=1 blokuje wyjście "
+            f"z IP VPS-a).\n\n"
+            f"Sprawdź /limity na Telegramie albo:\n"
+            f"`python -m laweta_radar.workers.apify_proxy --check`")
+    try:
+        from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom
+
+        telegram_notify.wyslij(tekst)
+    except Exception as e:  # noqa: BLE001 — alert nie może dorzucić drugiego błędu
+        log(f"[{KTO}] nie udało się wysłać alertu o wyczerpanej puli proxy: {_jedna_linia(e)}")
 
 
 # Próg żywych kluczy, poniżej którego pula jest o JEDNĄ awarię od zera.
@@ -1482,6 +1519,39 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
             _conn_stan.close()
     _alert_jesli_zdegradowana(tokeny_zywe, tokeny, log=log)
 
+    # Konfiguracja proxy z WYRÓWNANIEM po hashu (sekcja 4 zadania „większa pula
+    # proxy") — liczona RAZ dla wszystkich żywych kluczy tego przebiegu, a nie
+    # per wywołanie `_apify_run_group`, żeby przypisanie było stabilne w całym
+    # runie. `None` przy błędzie konfiguracji: workery i tak dociągną świeżą
+    # konfigurację same (patrz `client_for_token`), tylko bez wyrównania —
+    # diagnostyka nie ma prawa zablokować pobierania.
+    cfg_proxy = None
+    try:
+        cfg_proxy = apify_proxy.load_proxy_config(tokens=tokeny_zywe)
+    except apify_proxy.ApifyProxyError as e:
+        log(f"[{KTO}] nie policzyłem wyrównanej konfiguracji proxy ({_jedna_linia(e)}) "
+            f"— jadę bez wyrównania.")
+
+    # BEZPIECZNIK — wyczerpanie ŻYWYCH proxy (sekcja 3 zadania „większa pula
+    # proxy"). Padnięty klucz dostaje kolejne proxy z rankingu (samoleczenie
+    # niżej), ale gdy WSZYSTKIE adresy puli są NARAZ w kwarantannie, nie ma czym
+    # pojechać dalej bez wyjścia z gołego IP VPS-a — lepiej pominąć CAŁY
+    # przebieg niż to. Dotyczy WYŁĄCZNIE APIFY_PROXY_REQUIRED=1: bez tej flagi
+    # brak proxy i tak jest dozwolonym stanem (zgodność wstecz).
+    if cfg_proxy is not None and cfg_proxy.required and cfg_proxy.pool:
+        _conn_px = _polacz_best_effort()
+        if _conn_px is not None:
+            zywe_proxy = None
+            try:
+                zywe_proxy = apify_proxy.zywe_proxy_w_puli(_conn_px, cfg_proxy)
+            except Exception as e:  # noqa: BLE001 — bezpiecznik nie może wywalić się na diagnostyce
+                log(f"[{KTO}] nie sprawdziłem stanu puli proxy ({_jedna_linia(e)}) — jadę dalej.")
+            finally:
+                _conn_px.close()
+            if zywe_proxy == 0:
+                _alert_pula_proxy_wyczerpana(cfg_proxy, log=log)
+                return 1
+
     def _zapisz_stan_klucza(token: str, stan: str, powod: str) -> None:
         # Sukces NIE wymaga zapisu: klucz bez wpisu w `zasoby_apify` jest już
         # czytany jako 'aktywny' (patrz apify_keys.wczytaj_stany), więc pisanie
@@ -1536,7 +1606,8 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         try:
             itemy = rotator.call(
                 lambda tok, u=g.url, lim=g.limit, okno=g.okno_min:
-                    _apify_run_group_samoleczaca(u, lim, okno, sciezka, tok, log=log))
+                    _apify_run_group_samoleczaca(u, lim, okno, sciezka, tok,
+                                                 cfg=cfg_proxy, log=log))
         except AllKeysExhausted:
             # AWARIA CAŁEGO ŹRÓDŁA DANYCH, nie zwykłe ostrzeżenie — patrz
             # docstring `_alert_pula_wyczerpana`. Kolejne grupy nie mają szans,

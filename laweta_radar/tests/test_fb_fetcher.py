@@ -702,7 +702,7 @@ def test_samoleczenie_bez_proxy_nie_probuje_ponownie(monkeypatch):
 
     wolania_bazy = []
     monkeypatch.setattr(f, "_apify_run_group", _run)
-    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: None)
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token, cfg=None: None)
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: wolania_bazy.append(1) or None)
     with pytest.raises(_SiecBlad):
         f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
@@ -712,7 +712,7 @@ def test_samoleczenie_bez_proxy_nie_probuje_ponownie(monkeypatch):
 def test_samoleczenie_probuje_kolejnego_proxy_po_awarii_sieci(monkeypatch):
     proby = []
 
-    def _run(url, limit, okno, sciezka, token, proxy=None):
+    def _run(url, limit, okno, sciezka, token, proxy=None, cfg=None):
         proby.append(proxy)
         if proxy is None:
             raise _SiecBlad("connection reset")
@@ -720,7 +720,7 @@ def test_samoleczenie_probuje_kolejnego_proxy_po_awarii_sieci(monkeypatch):
 
     kwarantanna = []
     monkeypatch.setattr(f, "_apify_run_group", _run)
-    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token, cfg=None: "proxy1")
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
     monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna",
                         lambda conn, url, powod, klucz_hash=None: kwarantanna.append(url))
@@ -733,8 +733,42 @@ def test_samoleczenie_probuje_kolejnego_proxy_po_awarii_sieci(monkeypatch):
     assert kwarantanna == ["proxy1"]         # PADNIĘTY adres oznaczony, nie proxy2
 
 
+def test_samoleczenie_przekazuje_ten_sam_cfg_do_klienta_i_do_padnietego(monkeypatch):
+    """`cfg` z run() (wyrównanie po hashu) ma dojść ZARÓWNO do klienta
+    (`_apify_run_group`), jak i do liczenia „padniętego" adresu
+    (`proxy_for_token`) — inaczej mogłyby wskazać RÓŻNE proxy dla tego samego
+    tokenu (surowy rendezvous hashing bez cfg vs wyrównane przypisanie z cfg),
+    a wtedy do kwarantanny trafiłby adres, który wcale nie padł."""
+    znacznik_cfg = object()
+    cfgi_run_group: list = []
+
+    def _run(url, limit, okno, sciezka, token, proxy=None, cfg=None):
+        cfgi_run_group.append(cfg)
+        if proxy is None:
+            raise _SiecBlad("timeout")
+        return [{"ok": True}]
+
+    cfgi_proxy_for_token: list = []
+
+    def _proxy_for_token(token, cfg=None):
+        cfgi_proxy_for_token.append(cfg)
+        return "proxy1"
+
+    monkeypatch.setattr(f, "_apify_run_group", _run)
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", _proxy_for_token)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna", lambda *a, **k: None)
+    monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu", lambda token, conn: "proxy2")
+
+    f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", cfg=znacznik_cfg,
+                                   log=lambda *a: None)
+
+    assert cfgi_run_group[0] is znacznik_cfg
+    assert cfgi_proxy_for_token[0] is znacznik_cfg
+
+
 def test_samoleczenie_wyczerpuje_pule_proxy_i_oddaje_ostatni_blad(monkeypatch):
-    def _run(url, limit, okno, sciezka, token, proxy=None):
+    def _run(url, limit, okno, sciezka, token, proxy=None, cfg=None):
         raise _SiecBlad(f"padło {proxy}")
 
     licznik = {"n": 1}
@@ -744,7 +778,7 @@ def test_samoleczenie_wyczerpuje_pule_proxy_i_oddaje_ostatni_blad(monkeypatch):
         return f"proxy{licznik['n']}"        # zawsze INNY adres — bez tego pętla kończy się wcześniej
 
     monkeypatch.setattr(f, "_apify_run_group", _run)
-    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token, cfg=None: "proxy1")
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
     monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna", lambda *a, **k: None)
     monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu", _kolejny)
@@ -759,7 +793,7 @@ def test_samoleczenie_cala_ranga_w_kwarantannie_konczy_od_razu(monkeypatch):
     nie ma sensu kręcić się dalej."""
     monkeypatch.setattr(f, "_apify_run_group",
                         lambda *a, **k: (_ for _ in ()).throw(_SiecBlad("timeout")))
-    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token, cfg=None: "proxy1")
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
     monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna", lambda *a, **k: None)
     monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu", lambda token, conn: None)
@@ -771,7 +805,7 @@ def test_samoleczenie_cala_ranga_w_kwarantannie_konczy_od_razu(monkeypatch):
 def test_samoleczenie_baza_pada_w_trakcie_ponowien_oddaje_oryginalny_blad(monkeypatch):
     monkeypatch.setattr(f, "_apify_run_group",
                         lambda *a, **k: (_ for _ in ()).throw(_SiecBlad("timeout")))
-    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token, cfg=None: "proxy1")
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)   # baza akurat padła
     with pytest.raises(_SiecBlad):
         f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
@@ -820,6 +854,35 @@ def test_alert_pula_wyczerpana_nie_wywala_gdy_telegram_pada(monkeypatch):
     monkeypatch.setattr(telegram_notify, "wyslij", _wybuchnij)
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
     f._alert_pula_wyczerpana(["t1"], log=lambda *a: None)   # nie ma rzucić — test przechodzi
+
+
+# ---------------------------------------------------------------------------
+# 10b. Alert przy wyczerpaniu ŻYWYCH proxy (sekcja 3 zadania „większa pula proxy")
+# ---------------------------------------------------------------------------
+def test_alert_pula_proxy_wyczerpana_wysyla_telegram(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    cfg = f.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://u:p@a.example:8000,http://u:p@b.example:8000",
+         "APIFY_PROXY_REQUIRED": "1"})
+
+    logi = []
+    f._alert_pula_proxy_wyczerpana(cfg, log=logi.append)
+
+    assert len(wyslane) == 1
+    assert "2" in wyslane[0]                      # liczba adresów w puli
+    assert any("KRYTYCZNE" in linia for linia in logi)
+
+
+def test_alert_pula_proxy_wyczerpana_nie_wywala_gdy_telegram_pada(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    monkeypatch.setattr(telegram_notify, "wyslij",
+                        lambda tekst: (_ for _ in ()).throw(RuntimeError("sieć padła")))
+    cfg = f.apify_proxy.load_proxy_config({"APIFY_PROXY_URLS": "http://u:p@a.example:8000"})
+    f._alert_pula_proxy_wyczerpana(cfg, log=lambda *a: None)   # nie ma rzucić
 
 
 # ---------------------------------------------------------------------------
