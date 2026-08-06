@@ -120,7 +120,7 @@ from pathlib import Path
 from laweta_radar.config import groups as cfg_groups
 from laweta_radar.config import settings
 from laweta_radar.services import bandit
-from laweta_radar.workers import apify_proxy, gate
+from laweta_radar.workers import apify_keys, apify_proxy, gate
 from laweta_radar.workers.apify_keys import AllKeysExhausted, KeyRotator, load_apify_tokens
 
 KTO = "fb-fetcher"
@@ -224,7 +224,7 @@ def _build_actor_input(group_url: str, limit: int, okno_min: int, sciezka: str) 
 
 
 def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
-                     token: str) -> list[dict]:
+                     token: str, *, proxy: str | None = None) -> list[dict]:
     """Synchroniczne wywołanie actora dla jednej grupy -> lista surowych itemów.
 
     `run-sync-get-dataset-items` oddaje od razu zawartość datasetu, bez
@@ -233,12 +233,21 @@ def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
     z jednego adresu VPS-a, co dla Apify wygląda jak multi-accounting i kończy się
     utratą całej puli naraz, nie jednego konta.
 
+    `proxy` — gdy podane, WYMUSZA konkretny adres (`apify_proxy.client_for_proxy`)
+    zamiast domyślnego, lepkiego wyboru dla tokenu. Używa tego WYŁĄCZNIE pętla
+    samoleczenia (`_apify_run_group_samoleczaca`) do próby KOLEJNEGO proxy po
+    awarii transportu — bez tego druga próba tym samym kluczem zawsze wracałaby
+    na to samo, padnięte wyjście.
+
     Błędy HTTP lecą wyżej NIETKNIĘTE — po nich `apify_keys` poznaje wyczerpany
     klucz i odróżnia go od chwilowej awarii proxy. Opakowanie ich we własny
     wyjątek zamieniłoby rotację kluczy w zgadywankę.
     """
     url = f"{API}/acts/{cfg_groups.APIFY_ACTOR}/run-sync-get-dataset-items"
-    with apify_proxy.client_for_token(token, timeout=cfg_groups.APIFY_TIMEOUT) as klient:
+    klient_cm = (apify_proxy.client_for_proxy(proxy, timeout=cfg_groups.APIFY_TIMEOUT)
+                if proxy is not None else
+                apify_proxy.client_for_token(token, timeout=cfg_groups.APIFY_TIMEOUT))
+    with klient_cm as klient:
         odp = klient.post(
             url,
             headers={"Authorization": f"Bearer {token}"},
@@ -252,6 +261,180 @@ def _apify_run_group(group_url: str, limit: int, okno_min: int, sciezka: str,
     if isinstance(dane, dict) and isinstance(dane.get("items"), list):
         return [it for it in dane["items"] if isinstance(it, dict)]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Samoleczenie — próba KOLEJNEGO proxy tego samego klucza po awarii transportu
+# (sekcja 4 zadania „samolecząca się pula"). Klucz martwy / bez kredytu / rate
+# limit NIE mają tu czego robić — to decyzje na poziomie KLUCZA, rozstrzyga je
+# `KeyRotator`/`classify_apify_error` wyżej w stosie; ta funkcja łapie
+# WYŁĄCZNIE błąd transportu (`apify_keys.STATUS_BLAD_SIECI`).
+# ---------------------------------------------------------------------------
+_PROXY_PROBY_SAMOLECZENIA = 3
+
+
+def _polacz_best_effort():
+    """Krótkie połączenie tylko do odczytu/zapisu stanu klucza/proxy — degraduje
+    do None zamiast rzucać. Samoleczenie ma być USPRAWNIENIEM, nie warunkiem
+    runu: brak bazy nie może zablokować pobierania postów."""
+    if not settings.DATABASE_URL:
+        return None
+    try:
+        import psycopg2  # noqa: PLC0415 — leniwie, jak wszędzie w tym repo
+
+        return psycopg2.connect(settings.DATABASE_URL, connect_timeout=5)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _apify_run_group_samoleczaca(group_url: str, limit: int, okno_min: int, sciezka: str,
+                                 token: str, log=print) -> list[dict]:
+    """Jak `_apify_run_group`, ale przy błędzie SIECI/PROXY próbuje TEGO SAMEGO
+    klucza z KOLEJNYM proxy (max `_PROXY_PROBY_SAMOLECZENIA`), a padnięty adres
+    ląduje w kwarantannie na 30 min (`apify_proxy.oznacz_kwarantanna`).
+
+    PIERWSZA próba idzie zwykłą, lepką ścieżką BEZ dotykania bazy — baza wchodzi
+    do gry dopiero PO pierwszej awarii transportu, żeby happy path (99% wywołań)
+    nie płacił za nic. Bez proxy w ogóle (`proxy_for_token` zwraca None) nie ma
+    czym „przepiąć" — błąd jest wtedy realną awarią sieci, nie proxy, i leci
+    wyżej bez prób dodatkowych.
+    """
+    try:
+        return _apify_run_group(group_url, limit, okno_min, sciezka, token)
+    except Exception as e:  # noqa: BLE001 — klasyfikujemy poniżej
+        if apify_keys.classify_apify_error(e) != apify_keys.STATUS_BLAD_SIECI:
+            raise
+        proxy_padniety = apify_proxy.proxy_for_token(token)
+        if proxy_padniety is None:
+            raise
+        ostatni_blad = e
+
+    for proba in range(2, _PROXY_PROBY_SAMOLECZENIA + 1):
+        conn = _polacz_best_effort()
+        if conn is None:
+            raise ostatni_blad     # bez bazy nie wiadomo, co jest wolne — oddaj oryginalny błąd
+        try:
+            apify_proxy.oznacz_kwarantanna(
+                conn, proxy_padniety, _jedna_linia(ostatni_blad),
+                klucz_hash=apify_keys._hash_klucza(token))
+            log(f"[{KTO}] proxy {apify_proxy.proxy_label(proxy_padniety)} padło "
+                f"({_jedna_linia(ostatni_blad)}) — kwarantanna 30 min, próbuję "
+                f"kolejnego (próba {proba}/{_PROXY_PROBY_SAMOLECZENIA})")
+            nastepny_proxy = apify_proxy.proxy_zywy_dla_tokenu(token, conn)
+        finally:
+            conn.close()
+        if nastepny_proxy is None or nastepny_proxy == proxy_padniety:
+            raise ostatni_blad     # cała ranga proxy tego klucza w kwarantannie
+        try:
+            return _apify_run_group(group_url, limit, okno_min, sciezka, token,
+                                    proxy=nastepny_proxy)
+        except Exception as e2:  # noqa: BLE001
+            if apify_keys.classify_apify_error(e2) != apify_keys.STATUS_BLAD_SIECI:
+                raise
+            ostatni_blad = e2
+            proxy_padniety = nastepny_proxy
+    raise ostatni_blad
+
+
+def _alert_pula_wyczerpana(tokeny: list[str], log=print) -> None:
+    """Telegram + log KRYTYCZNY, gdy `AllKeysExhausted` — to jest AWARIA CAŁEGO
+    ŹRÓDŁA DANYCH (żaden klucz nie odpowie teraz), nie zwykłe ostrzeżenie w logu
+    crona, które nikt nie czyta, dopóki nie zapyta ktoś inny „czemu cisza".
+
+    Liczby (żywych kluczy, stanu proxy) są best-effort z bazy — brak bazy albo
+    błąd diagnostyki NIE mają prawa zablokować samego alertu: operator ma
+    dostać wiadomość, nawet niepełną, zamiast żadnej.
+    """
+    total = len(tokeny)
+    zywe_ile = total
+    proxy_opis = "proxy: stan nieznany (brak bazy)"
+    conn = _polacz_best_effort()
+    if conn is not None:
+        try:
+            zywe_ile = len(apify_keys.klucze_zywe(conn, tokeny))
+            cfg = apify_proxy.load_proxy_config()
+            if cfg.pool:
+                stan_proxy = apify_proxy.wczytaj_stan_proxy(conn, cfg.pool)
+                w_kwarantannie = sum(1 for s in stan_proxy.values()
+                                     if s["status"] == "kwarantanna")
+                proxy_opis = (f"proxy: {len(cfg.pool) - w_kwarantannie} aktywnych "
+                             f"z {len(cfg.pool)} (w kwarantannie: {w_kwarantannie})")
+            else:
+                proxy_opis = "proxy: bez puli (APIFY_PROXY_URLS) — patrz /limity"
+        except Exception:  # noqa: BLE001 — alert ma pójść nawet, gdy diagnostyka padnie
+            pass
+        finally:
+            conn.close()
+
+    log(f"[{KTO}] KRYTYCZNE: PULA APIFY WYCZERPANA — {zywe_ile}/{total} żywych "
+        f"kluczy. {proxy_opis}. Kolejne grupy w tym przebiegu NIE ZOSTANĄ pobrane.")
+    tekst = (f"🆘 *PULA APIFY WYCZERPANA*\n\n"
+            f"Żaden z {total} kluczy nie odpowiada teraz — pobieranie w tym "
+            f"przebiegu się zatrzymało.\n\n"
+            f"Żywych kluczy: {zywe_ile}/{total}\n{proxy_opis}\n\n"
+            f"Sprawdź /limity na Telegramie albo:\n"
+            f"`python -m laweta_radar.workers.apify_keys`")
+    try:
+        from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom
+
+        telegram_notify.wyslij(tekst)
+    except Exception as e:  # noqa: BLE001 — alert nie może dorzucić drugiego błędu
+        log(f"[{KTO}] nie udało się wysłać alertu o wyczerpanej puli: {_jedna_linia(e)}")
+
+
+# Próg żywych kluczy, poniżej którego pula jest o JEDNĄ awarię od zera.
+PROG_MIN_ZYWYCH_KLUCZY = 2
+
+
+def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=print) -> None:
+    """WCZESNE ostrzeżenie (run jedzie dalej — część kluczy jeszcze działa),
+    nie awaria: operator ma się dowiedzieć, ZANIM pula spadnie do zera i
+    zadziała `_alert_pula_wyczerpana`. Sekcja 5 zadania „samolecząca się pula":
+
+        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY
+        żywych proxy < liczba kluczy (mniej wyjść niż kont — korelacja rośnie)
+        którykolwiek klucz oznaczony jako martwy (zwykle ban — wymaga człowieka)
+
+    Best-effort: bez bazy funkcja nic nie robi (nie ma czego sprawdzić) —
+    diagnostyka nie może zablokować runu, tak samo jak w `_alert_pula_wyczerpana`.
+    """
+    conn = _polacz_best_effort()
+    if conn is None:
+        return
+    try:
+        stany = apify_keys.wczytaj_stany(conn, tokeny)
+        martwe = [t for t, s in stany.items() if s["status"] == apify_keys.STATUS_KLUCZ_MARTWY]
+        cfg = apify_proxy.load_proxy_config()
+        zywe_proxy = None
+        if cfg.pool:
+            stan_proxy = apify_proxy.wczytaj_stan_proxy(conn, cfg.pool)
+            w_kwarantannie = sum(1 for s in stan_proxy.values() if s["status"] == "kwarantanna")
+            zywe_proxy = len(cfg.pool) - w_kwarantannie
+    except Exception as e:  # noqa: BLE001 — diagnostyka nie może zablokować runu
+        log(f"[{KTO}] nie udało się sprawdzić kondycji puli: {_jedna_linia(e)}")
+        return
+    finally:
+        conn.close()
+
+    powody = []
+    if len(tokeny_zywe) < PROG_MIN_ZYWYCH_KLUCZY:
+        powody.append(f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})")
+    if zywe_proxy is not None and zywe_proxy < len(tokeny):
+        powody.append(f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy")
+    if martwe:
+        powody.append(f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify")
+    if not powody:
+        return
+
+    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(powody)}.")
+    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in powody)
+            + "\n\nSprawdź /limity na Telegramie.")
+    try:
+        from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom
+
+        telegram_notify.wyslij(tekst)
+    except Exception as e:  # noqa: BLE001 — alert nie może dorzucić drugiego błędu
+        log(f"[{KTO}] nie udało się wysłać alertu o degradacji puli: {_jedna_linia(e)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1277,8 +1460,48 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         log(f"[{KTO}] Baza niegotowa — nie ruszam pobierania (byłby to czysty koszt).")
         return 0
 
+    # Filtr martwych/tegomiesięcznie-wyczerpanych kluczy — z BAZY, nie z pliku
+    # (patrz apify_keys.klucze_zywe): plik stanu nie przeżywa równoległych
+    # przebiegów, a martwy klucz oznaczony w JEDNYM przebiegu ma zostać martwy
+    # we WSZYSTKICH następnych, nie tylko w tym procesie. Best-effort: bez bazy
+    # (albo przy jej chwilowej awarii) rotujemy po WSZYSTKICH kluczach — filtr
+    # jest usprawnieniem, nie warunkiem runu.
+    tokeny_zywe = tokeny
+    _conn_stan = _polacz_best_effort()
+    if _conn_stan is not None:
+        try:
+            tokeny_zywe = apify_keys.klucze_zywe(_conn_stan, tokeny)
+            if len(tokeny_zywe) < len(tokeny):
+                log(f"[{KTO}] {len(tokeny) - len(tokeny_zywe)} kluczy pominiętych "
+                    f"(martwe albo wyczerpane w tym miesiącu wg zasoby_apify) — "
+                    f"{len(tokeny_zywe)} z {len(tokeny)} idzie do rotacji.")
+        except Exception as e:  # noqa: BLE001 — filtr to usprawnienie, nie warunek runu
+            log(f"[{KTO}] nie udało się odczytać stanu kluczy z bazy "
+                f"({_jedna_linia(e)}) — rotuję po WSZYSTKICH kluczach.")
+        finally:
+            _conn_stan.close()
+    _alert_jesli_zdegradowana(tokeny_zywe, tokeny, log=log)
+
+    def _zapisz_stan_klucza(token: str, stan: str, powod: str) -> None:
+        # Sukces NIE wymaga zapisu: klucz bez wpisu w `zasoby_apify` jest już
+        # czytany jako 'aktywny' (patrz apify_keys.wczytaj_stany), więc pisanie
+        # na KAŻDYM udanym wywołaniu byłoby zapytaniem do bazy bez żadnej
+        # nowej informacji — tylko koszt na hot path.
+        if stan == apify_keys.STATUS_AKTYWNY:
+            return
+        conn = _polacz_best_effort()
+        if conn is None:
+            return
+        try:
+            apify_keys.zapisz_stan(conn, token, stan, powod)
+        except Exception:  # noqa: BLE001 — perzystencja stanu to usprawnienie, nie warunek runu
+            pass
+        finally:
+            conn.close()
+
     rotator = KeyRotator.for_tokens(
-        tokeny, transient_key_switches=2 if apify_proxy.is_enabled() else 0)
+        tokeny_zywe, transient_key_switches=2 if apify_proxy.is_enabled() else 0,
+        on_wynik=_zapisz_stan_klucza)
     prog_swiezosci = teraz - timedelta(hours=settings.MAX_WIEK_POSTA_H)
     nowe = zlecenia = duplikaty = odsiane = stare = bez_linku = 0
     # Ile postów bramka ODRZUCIŁABY, gdyby była aktywna. W trybie cienia to
@@ -1313,9 +1536,13 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         try:
             itemy = rotator.call(
                 lambda tok, u=g.url, lim=g.limit, okno=g.okno_min:
-                    _apify_run_group(u, lim, okno, sciezka, tok))
+                    _apify_run_group_samoleczaca(u, lim, okno, sciezka, tok, log=log))
         except AllKeysExhausted:
-            raise   # wszystkie klucze puste — kolejne grupy nie mają szans
+            # AWARIA CAŁEGO ŹRÓDŁA DANYCH, nie zwykłe ostrzeżenie — patrz
+            # docstring `_alert_pula_wyczerpana`. Kolejne grupy nie mają szans,
+            # więc alert i re-raise, zanim cokolwiek inne spróbuje jechać dalej.
+            _alert_pula_wyczerpana(tokeny, log=log)
+            raise
         except Exception as e:  # noqa: BLE001 — zła grupa nie wywala reszty
             blad = _jedna_linia(e)
             log(f"[{KTO}] {g.nazwa}: błąd pobierania {blad}")
