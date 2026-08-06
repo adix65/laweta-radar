@@ -512,6 +512,75 @@ def test_nierozpoznany_drugi_punkt_zeruje_km_i_szacunek(tmp_path):
 
 
 # ===========================================================================
+# KIERUNEK GEOGRAFICZNY — kraj obu końców trasy względem Polski
+#
+# TESTY Z ZADANIA: "z Warszawy do Berlina" -> wyjazd; "z 64354 Reinheim do
+# Belchatowa" -> przywoz; "Legnica -> Bogumin" -> wyjazd (PL->CZ); "Kolonia ->
+# Amsterdam" -> tranzyt; punkt nierozpoznany -> "nieznany", zlecenie nadal
+# widoczne (kierunek nigdy nie wycina — to sprawdzają testy API/panelu/bota,
+# nie ten moduł: `geo.py` tylko liczy wartość, nie decyduje o widoczności).
+# ===========================================================================
+def test_punkt_niesie_kraj_z_dopasowania_kodem(tmp_path):
+    _z_fixture(tmp_path)
+    p = geo.geokoduj("38-400", None)          # Krosno, PL
+    assert p.kraj == "PL"
+
+
+def test_punkt_niesie_kraj_z_dopasowania_nazwa(tmp_path):
+    _z_fixture(tmp_path)
+    p = geo.geokoduj(None, "Koln")            # DE, z FIXTURE
+    assert p.kraj == "DE"
+
+
+def test_baza_jest_w_polsce():
+    assert geo.baza().kraj == geo.KRAJ_BAZY == "PL"
+
+
+@pytest.mark.parametrize("odbior_kraj,dostawa_kraj,oczekiwany", [
+    ("PL", "DE", geo.KIERUNEK_WYJAZD),      # z Warszawy do Berlina
+    ("DE", "PL", geo.KIERUNEK_PRZYWOZ),     # z Reinheim do Bełchatowa
+    ("PL", "CZ", geo.KIERUNEK_WYJAZD),      # Legnica -> Bogumin
+    ("PL", "PL", geo.KIERUNEK_KRAJOWY),
+    ("DE", "NL", geo.KIERUNEK_TRANZYT),     # Kolonia -> Amsterdam
+    ("DE", "DE", geo.KIERUNEK_TRANZYT),     # oba poza PL, nawet ten sam kraj
+    (None, "PL", geo.KIERUNEK_NIEZNANY),
+    ("PL", None, geo.KIERUNEK_NIEZNANY),
+    (None, None, geo.KIERUNEK_NIEZNANY),
+])
+def test_kierunek_geo(odbior_kraj, dostawa_kraj, oczekiwany):
+    assert geo.kierunek_geo(odbior_kraj, dostawa_kraj) == oczekiwany
+
+
+def test_podsumowanie_niesie_kierunek_geo_wyjazd(tmp_path):
+    _z_fixture(tmp_path)
+    odbior = geo.geokoduj("38-400", None)     # Krosno, PL
+    dostawa = geo.geokoduj("50667", None)     # Koln, DE
+    p = geo.podsumowanie(odbior, dostawa)
+    assert p["odbior_kraj"] == "PL"
+    assert p["dostawa_kraj"] == "DE"
+    assert p["kierunek_geo"] == geo.KIERUNEK_WYJAZD
+
+
+def test_podsumowanie_niesie_kierunek_geo_krajowy(tmp_path):
+    _z_fixture(tmp_path)
+    odbior = geo.geokoduj("38-500", None)     # Sanok, PL
+    dostawa = geo.geokoduj("35-001", None)    # Rzeszów, PL
+    p = geo.podsumowanie(odbior, dostawa)
+    assert p["kierunek_geo"] == geo.KIERUNEK_KRAJOWY
+
+
+def test_podsumowanie_nierozpoznany_punkt_daje_kierunek_nieznany(tmp_path):
+    """Punkt nierozpoznany -> "nieznany", ale `podsumowanie` samo w sobie
+    niczego nie ukrywa — to warstwa wyżej (API/bot/panel) decyduje, co zrobić
+    z tą wartością. Tu sprawdzamy tylko, że liczy się poprawnie."""
+    _z_fixture(tmp_path)
+    odbior = geo.geokoduj("38-400", None)     # Krosno, PL
+    p = geo.podsumowanie(odbior, None)        # dostawa nierozpoznana
+    assert p["dostawa_kraj"] is None
+    assert p["kierunek_geo"] == geo.KIERUNEK_NIEZNANY
+
+
+# ===========================================================================
 # ODLEGŁOŚĆ PODANA PRZEZ AUTORA POSTA
 #
 # Autor zna trasę lepiej niż nasz geokoder — ale w tych grupach KAŻDY post ma

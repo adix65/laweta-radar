@@ -109,7 +109,7 @@ class _FalszywePolaczenie:
 
 KOMPLET_KOLUMN = {"odbior_miasto", "pojazd_opis", "pewnosc",
                   "notatka", "cena_koncowa", "status_at",
-                  "kategoria_ladunku", "kierunek"}
+                  "kategoria_ladunku", "kierunek", "kierunek_geo"}
 
 
 @pytest.fixture(autouse=True)
@@ -443,6 +443,45 @@ def test_kierunek_nie_jest_filtrem_listy(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Kierunek geograficzny
+# ---------------------------------------------------------------------------
+def test_kierunek_geo_dojezdza_do_panelu(monkeypatch):
+    """Liczony na żywo tym samym kodem co kolumna w bazie (`geo.podsumowanie`)
+    — Krosno -> Rzeszów są oba PL, więc kierunek krajowy."""
+    _podepnij_baze(monkeypatch, [_wiersz("blisko", odbior_miasto="Krosno",
+                                         odbior_kod="38-400",
+                                         dostawa_miasto="Rzeszow")])
+    z = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()["zlecenia"][0]
+    assert z["kierunek_geo"] == "krajowy"
+
+
+def test_domyslnie_wszystkie_kierunki_geo(monkeypatch):
+    """ZASADA NACZELNA REPO, ta sama co przy `max_km`: bez parametru wracają
+    zlecenia WSZYSTKICH kierunków — filtr nie staje się progiem domyślnym."""
+    polaczenie = _podepnij_baze(monkeypatch, WIERSZE)
+    klient.get("/zlecenia", headers={"X-Token": TOKEN})
+    sql, _ = polaczenie.kursor.zapytania[0]
+    assert "kierunek_geo" not in sql
+
+
+def test_kierunek_geo_filtruje_w_sql(monkeypatch):
+    """W odróżnieniu od `max_km`, kierunek nie zależy od `BAZA_LAT`/`BAZA_LON`
+    operatora — filtruje się WPROST w zapytaniu, nie po stronie Pythona."""
+    polaczenie = _podepnij_baze(monkeypatch, WIERSZE)
+    klient.get("/zlecenia?kierunek_geo=wyjazd", headers={"X-Token": TOKEN})
+    sql, parametry = polaczenie.kursor.zapytania[0]
+    assert "COALESCE(kierunek_geo, %s) = %s" in sql
+    assert "wyjazd" in parametry
+    assert geo.KIERUNEK_NIEZNANY in parametry   # NULL sprzed backfillu = nieznany
+
+
+def test_kierunek_geo_nieznana_wartosc_daje_400(monkeypatch):
+    _podepnij_baze(monkeypatch, WIERSZE)
+    odp = klient.get("/zlecenia?kierunek_geo=poludnie", headers={"X-Token": TOKEN})
+    assert odp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # PATCH
 # ---------------------------------------------------------------------------
 def test_patch_zmienia_status(monkeypatch):
@@ -517,3 +556,12 @@ def test_brak_samego_panelu_wskazuje_wlasciwa_migracje(monkeypatch):
     odp = klient.get("/zlecenia", headers={"X-Token": TOKEN})
     assert odp.status_code == 503
     assert "0005_panel.sql" in odp.json()["detail"]
+
+
+def test_brak_kierunek_geo_wskazuje_migracje_0013(monkeypatch):
+    _podepnij_baze(monkeypatch, WIERSZE)
+    monkeypatch.setattr(router_zlecen.db, "kolumny",
+                        lambda conn, tabela: KOMPLET_KOLUMN - {"kierunek_geo"})
+    odp = klient.get("/zlecenia", headers={"X-Token": TOKEN})
+    assert odp.status_code == 503
+    assert "0013_kierunek_geo.sql" in odp.json()["detail"]

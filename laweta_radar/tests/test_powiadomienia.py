@@ -205,6 +205,46 @@ def test_dystans_to_dlugosc_kursu_a_dojazd_obok():
     assert "km od bazy" in linie[2]
 
 
+# ---------------------------------------------------------------------------
+# Kierunek geograficzny
+# ---------------------------------------------------------------------------
+def test_kierunek_wyjazd_ma_znacznik_i_podpowiedz_o_ladunku_powrotnym():
+    """PL -> DE: to jest wyjazd, a pusty powrót zjada marżę — operator ma to
+    zobaczyć w TEJ SAMEJ wiadomości, nie musi się tego domyślać z miast."""
+    wyjazd = dict(ZLECENIE, dostawa_miasto="Koln")
+    tresc = pw.zbuduj_tresc(wyjazd, teraz=TERAZ)
+    pierwsza = tresc.splitlines()[0]
+    assert "WYJAZD" in pierwsza
+    assert "ładunku powrotnego" in tresc
+
+
+def test_kierunek_przywoz_ma_znacznik_bez_podpowiedzi_powrotnej():
+    """DE -> PL: przywóz zwykle JEST już główną nogą kursu — podpowiedź
+    o ładunku powrotnym dotyczy innego problemu i nie ma tu czego robić."""
+    przywoz = dict(ZLECENIE, odbior_miasto="Koln", odbior_kod=None)
+    tresc = pw.zbuduj_tresc(przywoz, teraz=TERAZ)
+    pierwsza = tresc.splitlines()[0]
+    assert "PRZYWÓZ" in pierwsza
+    assert "ładunku powrotnego" not in tresc
+
+
+def test_kierunek_krajowy_ma_znacznik():
+    """ZLECENIE to Krosno -> Rzeszów, oba PL."""
+    pierwsza = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).splitlines()[0]
+    assert "KRAJOWY" in pierwsza
+    assert "ładunku powrotnego" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+
+
+def test_kierunek_nieznany_bez_znacznika():
+    """Punkt nierozpoznany -> brak jakiegokolwiek znacznika kierunku w pierwszej
+    linii — o samym braku mówi już `_linia_brakow`, druga etykieta o tym samym
+    byłaby powtórką."""
+    nieznany = dict(ZLECENIE, dostawa_miasto="Turek", dostawa_kod=None)  # spoza FIXTURE_GEO
+    pierwsza = pw.zbuduj_tresc(nieznany, teraz=TERAZ).splitlines()[0]
+    for znacznik in pw.ZNACZNIKI_KIERUNKU.values():
+        assert znacznik not in pierwsza
+
+
 def test_toczenie_jest_trojstanowe():
     """True/False/None znaczą co innego dla sprzętu, który trzeba zabrać."""
     assert "toczy się" in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)

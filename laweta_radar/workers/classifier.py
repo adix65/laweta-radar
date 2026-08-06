@@ -806,6 +806,9 @@ def warto_budzic(wynik: dict) -> bool:
 # CZEGO TU NIE MA: `czy_zlecenie`, `zrodlo_decyzji`, `ai_model`, `ai_at`. To są
 # metadane decyzji, nie wynik ekstrakcji — i to po tej liście poznajemy zapis,
 # w którym model odpowiedział, a mimo to nie wpadło z niego NIC (`ekstrakcja_pusta`).
+#
+# CZEGO TEŻ TU NIE MA, z tego samego powodu co `kierunek` (transakcyjny):
+# `odbior_kraj`, `dostawa_kraj`, `kierunek_geo` — patrz `KOLUMNY_GEO` niżej.
 KOLUMNY_EKSTRAKCJI = (
     "typ",
     "odbior_raw", "odbior_kod", "odbior_miasto",
@@ -816,6 +819,16 @@ KOLUMNY_EKSTRAKCJI = (
     "cena_sugerowana", "pewnosc", "powod",
 )
 
+# Kraj obu końców trasy i kierunek względem Polski — POCHODNE ekstrakcji
+# (liczone z odbior_kod/odbior_miasto/dostawa_kod/dostawa_miasto przez
+# `geo.geokoduj` + `geo.kierunek_geo`), ale CELOWO POZA `KOLUMNY_EKSTRAKCJI`:
+# `geo.kierunek_geo()` nigdy nie oddaje None — brak obu krajów jest stringiem
+# "nieznany", nie NULL-em. Gdyby ta trójka wpadła do listy, którą czyta
+# `ekstrakcja_pusta` (i `scripts/uzupelnij_klasyfikacje.py`, który jej używa
+# do wyszukania wierszy do naprawy), żaden wiersz z werdyktem modelu nie
+# wyglądałby już na pusty — nawet ten, w którym NAPRAWDĘ zgubiło się wszystko.
+KOLUMNY_GEO = ("odbior_kraj", "dostawa_kraj", "kierunek_geo")
+
 SQL_ZAPIS = """
 UPDATE posty SET
     czy_zlecenie     = %(czy_zlecenie)s,
@@ -824,9 +837,12 @@ UPDATE posty SET
     odbior_raw       = %(odbior_raw)s,
     odbior_kod       = %(odbior_kod)s,
     odbior_miasto    = %(odbior_miasto)s,
+    odbior_kraj      = %(odbior_kraj)s,
     dostawa_raw      = %(dostawa_raw)s,
     dostawa_kod      = %(dostawa_kod)s,
     dostawa_miasto   = %(dostawa_miasto)s,
+    dostawa_kraj     = %(dostawa_kraj)s,
+    kierunek_geo     = %(kierunek_geo)s,
     pojazd_opis      = %(pojazd_opis)s,
     pojazd_kategoria = %(pojazd_kategoria)s,
     stan_toczy_sie   = %(stan_toczy_sie)s,
@@ -846,7 +862,8 @@ WHERE fb_id = %(fb_id)s
 """
 
 
-def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[str, object]:
+def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None,
+                     tresc: str | None = None) -> dict[str, object]:
     """Wynik klasyfikacji -> parametry do SQL_ZAPIS ORAZ do INSERT-a fetchera.
 
     Klucze są NAZWAMI KOLUMN. To jedyne miejsce, w którym zagnieżdżony JSON
@@ -858,7 +875,17 @@ def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[
     `zwaliduj`, więc brak klucza znaczy, że ktoś podał tu coś innego niż wynik
     klasyfikatora. Wtedy `KeyError` jest właściwą odpowiedzią — None wpisany
     po cichu do bazy to ta sama utrata, tylko odkryta miesiąc później.
+
+    `tresc` jest OPCJONALNA i służy WYŁĄCZNIE geokodowaniu (`odbior_kraj`,
+    `dostawa_kraj`) — dokładnie tak samo, jak przy każdym innym wywołaniu
+    `geo.geokoduj` w tym repo: przy nazwie miejscowości występującej w kilku
+    krajach to ONA rozstrzyga, o który kraj chodzi. Bez niej geokoder i tak
+    odpowie (kod pocztowy wystarcza w większości przypadków), tylko rzadziej.
     """
+    odbior_pkt = geo.geokoduj(wynik["odbior"]["kod"], wynik["odbior"]["miasto"], tresc=tresc)
+    dostawa_pkt = geo.geokoduj(wynik["dostawa"]["kod"], wynik["dostawa"]["miasto"], tresc=tresc)
+    odbior_kraj = odbior_pkt.kraj if odbior_pkt else None
+    dostawa_kraj = dostawa_pkt.kraj if dostawa_pkt else None
     return {
         "fb_id": fb_id,
         "czy_zlecenie": wynik["czy_zlecenie"],
@@ -872,9 +899,16 @@ def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[
         "odbior_raw": wynik["odbior"]["raw"],
         "odbior_kod": wynik["odbior"]["kod"],
         "odbior_miasto": wynik["odbior"]["miasto"],
+        "odbior_kraj": odbior_kraj,
         "dostawa_raw": wynik["dostawa"]["raw"],
         "dostawa_kod": wynik["dostawa"]["kod"],
         "dostawa_miasto": wynik["dostawa"]["miasto"],
+        "dostawa_kraj": dostawa_kraj,
+        # KIERUNEK GEOGRAFICZNY, nie transakcyjny — patrz komentarz przy
+        # `KOLUMNY_GEO`. Liczony WYŁĄCZNIE z krajów obu końców, więc "nieznany"
+        # (nie NULL) jest tu wynikiem tak samo poprawnym jak "wyjazd" — brak
+        # rozpoznanego punktu nie jest awarią zapisu.
+        "kierunek_geo": geo.kierunek_geo(odbior_kraj, dostawa_kraj),
         "pojazd_opis": wynik["pojazd"]["opis"],
         "pojazd_kategoria": wynik["pojazd"]["kategoria"],
         "stan_toczy_sie": wynik["stan"]["toczy_sie"],

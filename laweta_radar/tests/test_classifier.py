@@ -858,3 +858,59 @@ def test_martwa_kolumna_ai_zlecenie_nie_wraca_do_zapisu():
     wiersz = c.wiersz_do_zapisu(c.zwaliduj({"czy_zlecenie": True}), "fb1")
     assert "ai_zlecenie" not in wiersz
     assert "ai_zlecenie" not in c.SQL_ZAPIS
+
+
+# ---------------------------------------------------------------------------
+# KIERUNEK GEOGRAFICZNY — odbior_kraj / dostawa_kraj / kierunek_geo
+# ---------------------------------------------------------------------------
+def test_kolumny_geo_sa_rozlaczne_z_kolumnami_ekstrakcji():
+    """`ekstrakcja_pusta` (i `scripts/uzupelnij_klasyfikacje.py`, który jej
+    używa) musi zostać ślepy na te trzy kolumny — `geo.kierunek_geo()` nigdy
+    nie oddaje None, więc gdyby wpadły do `KOLUMNY_EKSTRAKCJI`, żaden wiersz
+    z werdyktem modelu nie wyglądałby już na pusty."""
+    assert set(c.KOLUMNY_GEO).isdisjoint(c.KOLUMNY_EKSTRAKCJI)
+
+
+def test_ekstrakcja_pusta_niewzruszona_kierunkiem_geo():
+    """DOKŁADNIE ta awaria, przed którą chroni rozłączność wyżej: wiersz
+    z kompletem NULL-i w ekstrakcji, ale z policzonym (nie-NULL) kierunkiem
+    geo, MA WYGLĄDAĆ na pusty — bo ekstrakcja naprawdę jest pusta."""
+    wiersz = {k: None for k in c.KOLUMNY_EKSTRAKCJI}
+    wiersz.update({"odbior_kraj": None, "dostawa_kraj": None,
+                   "kierunek_geo": "nieznany"})
+    assert c.ekstrakcja_pusta(wiersz) is True
+
+
+def test_wiersz_do_zapisu_liczy_kierunek_geo_krajowy():
+    """Krosno i Rzeszów są oba w `data/kody_eu.csv` jako PL — realna baza
+    repo, nie fixture testowa, tak jak `test_polski_kod_bez_myslnika_...`."""
+    wynik = c.zwaliduj({
+        "czy_zlecenie": True,
+        "odbior": {"kod": "38-400", "miasto": "Krosno"},
+        "dostawa": {"kod": "35-001", "miasto": "Rzeszow"},
+    })
+    wiersz = c.wiersz_do_zapisu(wynik, "fb1")
+    assert wiersz["odbior_kraj"] == "PL"
+    assert wiersz["dostawa_kraj"] == "PL"
+    assert wiersz["kierunek_geo"] == "krajowy"
+
+
+def test_wiersz_do_zapisu_bez_lokalizacji_daje_kierunek_nieznany():
+    wynik = c.zwaliduj({"czy_zlecenie": True})
+    wiersz = c.wiersz_do_zapisu(wynik, "fb1")
+    assert wiersz["odbior_kraj"] is None
+    assert wiersz["dostawa_kraj"] is None
+    assert wiersz["kierunek_geo"] == "nieznany"
+
+
+def test_wiersz_do_zapisu_przyjmuje_tresc_do_rozstrzygania_kraju():
+    """`tresc` jest opcjonalna i idzie dalej do `geo.geokoduj` — bez niej
+    funkcja nadal działa (kod pocztowy sam w sobie wystarcza tutaj), więc test
+    pilnuje tylko, że argument nie wywala wywołania."""
+    wynik = c.zwaliduj({
+        "czy_zlecenie": True,
+        "odbior": {"kod": "38-400", "miasto": "Krosno"},
+        "dostawa": {"kod": "35-001", "miasto": "Rzeszow"},
+    })
+    wiersz = c.wiersz_do_zapisu(wynik, "fb1", tresc="Krosno -> Rzeszow, pilne")
+    assert wiersz["kierunek_geo"] == "krajowy"

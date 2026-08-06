@@ -60,6 +60,9 @@ export interface FiltryListy {
   status?: string;
   max_km?: number;
   od?: string;
+  /** przywoz|wyjazd|krajowy|tranzyt|nieznany — patrz `typy.KierunekGeo`.
+   *  Bez tego pola API zwraca zlecenia WSZYSTKICH kierunków, tak jak dziś. */
+  kierunek_geo?: string;
   limit?: number;
 }
 
@@ -68,6 +71,7 @@ export function listaZlecen(filtry: FiltryListy = {}): Promise<OdpowiedzListy> {
   if (filtry.status) p.set("status", filtry.status);
   if (filtry.max_km != null) p.set("max_km", String(filtry.max_km));
   if (filtry.od) p.set("od", filtry.od);
+  if (filtry.kierunek_geo) p.set("kierunek_geo", filtry.kierunek_geo);
   p.set("limit", String(filtry.limit ?? 50));
   return pobierz<OdpowiedzListy>(`/zlecenia?${p}`);
 }

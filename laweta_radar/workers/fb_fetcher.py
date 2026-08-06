@@ -585,6 +585,7 @@ KOLUMNY_SWIADKOWIE = (
     ("pewnosc", "0004_klasyfikacja.sql"),
     ("kategoria_ladunku", "0010_kategoria_ladunku.sql"),
     ("kierunek", "0011_kierunek.sql"),
+    ("kierunek_geo", "0013_kierunek_geo.sql"),
 )
 
 
@@ -739,13 +740,36 @@ def _kolumny_ekstrakcji() -> tuple[str, ...]:
     return tuple(classifier.KOLUMNY_EKSTRAKCJI)
 
 
-def _wiersz_ekstrakcji(decyzja: "Decyzja", identyfikator: str) -> dict[str, object]:
-    """Wynik z `Decyzja` -> płaskie kolumny. Pusty słownik = nie ma czego zapisać."""
+def _kolumny_geo() -> tuple[str, ...]:
+    """Kraj obu końców trasy i kierunek geograficzny — osobno od `_kolumny_ekstrakcji`.
+
+    CELOWO OSOBNA FUNKCJA, nie dopisanie do `_kolumny_ekstrakcji`: tamta lista
+    zasila też `_pusto` (detektor „model odpowiedział, a nic nie wpadło do
+    bazy"), a `kierunek_geo` NIGDY nie jest NULL-em, gdy klasyfikator w ogóle
+    zadziałał (brak obu krajów to string "nieznany"). Wrzucenie go do tamtej
+    listy oślepiłoby ten detektor na dokładnie tę awarię, po którą powstał.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    if importlib.util.find_spec("laweta_radar.workers.classifier") is None:
+        return ()
+    from laweta_radar.workers import classifier  # noqa: PLC0415
+
+    return tuple(classifier.KOLUMNY_GEO)
+
+
+def _wiersz_ekstrakcji(decyzja: "Decyzja", identyfikator: str, tresc: str) -> dict[str, object]:
+    """Wynik z `Decyzja` -> płaskie kolumny. Pusty słownik = nie ma czego zapisać.
+
+    `tresc` idzie dalej do `geo.geokoduj` (przez `wiersz_do_zapisu`) wyłącznie
+    do rozstrzygania kraju przy nazwie miejscowości występującej w kilku
+    krajach — ta sama treść, którą Apify oddał dla TEGO posta.
+    """
     if decyzja.wynik_ai is None:
         return {}
     from laweta_radar.workers import classifier  # noqa: PLC0415 — wynik jest, więc moduł też
 
-    return classifier.wiersz_do_zapisu(decyzja.wynik_ai, identyfikator)
+    return classifier.wiersz_do_zapisu(decyzja.wynik_ai, identyfikator, tresc=tresc)
 
 
 def _pusto(wiersz: dict[str, object], kolumny: tuple[str, ...]) -> bool:
@@ -823,8 +847,9 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     zapisy z długimi wywołaniami sieciowymi, więc jedna wielka transakcja
     znaczyłaby, że błąd na ostatniej grupie kasuje pracę wszystkich wcześniejszych.
     """
-    ekstrakcja = _wiersz_ekstrakcji(decyzja, identyfikator)
+    ekstrakcja = _wiersz_ekstrakcji(decyzja, identyfikator, post["tresc"])
     kolumny_ai = _kolumny_ekstrakcji()
+    kolumny_geo = _kolumny_geo()
 
     stale_kolumny = ("fb_id", "tresc", "post_url", "grupa_url", "grupa_nazwa",
                      "autor", "opublikowany_at",
@@ -854,9 +879,15 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     # NULL-e, czyli dokładnie to, co i tak byłoby w wierszu. Jedna ścieżka SQL
     # zamiast dwóch znaczy, że nie da się poprawić jednej i zapomnieć o drugiej.
     wartosci += [ekstrakcja.get(k) for k in kolumny_ai]
+    # Kraj i kierunek geograficzny tym samym trybem co ekstrakcja (NULL-e, gdy
+    # modelu nie pytano) — ale osobną listą (`kolumny_geo`), bo `pusta_w_bazie`
+    # niżej pyta wyłącznie o `kolumny_ai` i musi zostać na nią ślepa, patrz
+    # `_kolumny_geo`.
+    wartosci += [ekstrakcja.get(k) for k in kolumny_geo]
     wartosci += [ekstrakcja.get("ai_model")]
 
-    kolumny = ", ".join((*stale_kolumny, *kolumny_ai, "ai_model", "gate_at", "ai_at"))
+    kolumny = ", ".join((*stale_kolumny, *kolumny_ai, *kolumny_geo,
+                         "ai_model", "gate_at", "ai_at"))
     znaki = ", ".join(["%s"] * len(wartosci))
     # `gate_at` i `ai_at` z zegara BAZY, jak dotąd. `ai_at` tylko dla wiersza
     # z werdyktem modelu: pusty znacznik czasu jest tu informacją („nie pytano"),
@@ -865,9 +896,11 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     # z kolumn bramki bywa NADPISYWANY przez model. Post zapisany w przebiegu,
     # w którym API padło, ma kierunek z samego wzorca; gdy model odpowie przy
     # kolejnym podejściu, jego odczyt ma dojechać do wiersza, a nie odbić się
-    # od ON CONFLICT.
-    aktualizowane = (*kolumny_ai, "ai_model", "zrodlo_decyzji", "czy_zlecenie",
-                     "kierunek")
+    # od ON CONFLICT. `kolumny_geo` z tego samego powodu co `kolumny_ai`: drugie
+    # podejście z gotowym wynikiem modelu ma nadpisać kraj i kierunek geo tak
+    # samo, jak nadpisuje miasta, z których je policzono.
+    aktualizowane = (*kolumny_ai, *kolumny_geo, "ai_model", "zrodlo_decyzji",
+                     "czy_zlecenie", "kierunek")
     # Ten sam warunek co `_pusto`, tylko po stronie bazy. Jedno źródło nazw
     # (`kolumny_ai`), dwa renderowania — inaczej SQL i Python zaczęłyby się
     # różnić w tym, co uznają za „pusty wynik", a to jest dokładnie ta klasa
