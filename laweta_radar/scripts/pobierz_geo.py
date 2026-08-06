@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Pobierz bazę kodów pocztowych z GeoNames i scal do jednego data/kody_eu.csv.
+"""Pobierz bazę kodów i miejscowości z GeoNames i scal do jednego data/kody_eu.csv.
 
 PO CO TO ISTNIEJE: services/geo.py nie używa żadnego płatnego geokodera. 90%
 przypadków to kod pocztowy albo nazwa miasta, a to załatwia lokalna baza — za
 darmo, offline, w mikrosekundy, bez limitu zapytań i bez klucza, który może
 wygasnąć w środku nocy. Ten skrypt tę bazę buduje.
+
+DWA ŹRÓDŁA NA KRAJ, bo jedno nie wystarcza:
+
+  • eksport KODÓW (export/zip/{KRAJ}.zip) — obsługuje wyszukiwanie PO KODZIE.
+    Do wyszukiwania po nazwie bywa bezużyteczny: niemiecki plik zawiera masę
+    kodów instytucji (Grosskunden-PLZ) z nazwami w rodzaju „Agentur fuer
+    Arbeit Dortmund" zamiast miejscowości — „Frankfurt" nie występował w bazie
+    ANI RAZU, a „Dortmund" znajdował się przypadkiem, przez nazwę urzędu;
+  • dump MIEJSCOWOŚCI (export/dump/{KRAJ}.zip) — wpisy feature_class='P',
+    z populacją. Obsługuje wyszukiwanie PO NAZWIE, a populacja rozstrzyga
+    wybór między miastami o tej samej nazwie (Frankfurt am Main kontra
+    Frankfurt nad Odrą). W pliku wynikowym te wiersze mają pusty `kod`
+    i wypełnioną kolumnę `populacja`.
 
 WYNIK COMMITUJEMY DO REPO. Razem to kilkanaście MB i tak, to widać w `git
 clone`. Alternatywą jest zależność od zewnętrznego hosta przy KAŻDYM deployu:
@@ -50,17 +63,34 @@ KTO = "pobierz-geo"
 # Czechy i Słowację, giełdy we Francji i Włoszech.
 KRAJE_DOMYSLNE = ("PL", "DE", "CZ", "SK", "NL", "BE", "AT", "FR", "IT")
 
-URL = "https://download.geonames.org/export/zip/{kraj}.zip"
+URL_KODY = "https://download.geonames.org/export/zip/{kraj}.zip"
+URL_MIEJSCOWOSCI = "https://download.geonames.org/export/dump/{kraj}.zip"
 TIMEOUT_S = 60
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 WYJSCIE_DOMYSLNE = _ROOT / "data" / "kody_eu.csv"
 
-# Układ pliku GeoNames (TSV, bez nagłówka):
-#   0 kraj, 1 kod, 2 miejscowość, 3 admin1(województwo), ..., 9 lat, 10 lng
-KOL_KRAJ, KOL_KOD, KOL_MIEJSCOWOSC, KOL_ADMIN1, KOL_LAT, KOL_LNG = 0, 1, 2, 3, 9, 10
+# Układ pliku KODÓW GeoNames (TSV, bez nagłówka):
+#   0 kraj, 1 kod, 2 miejscowość, 3 admin1 (nazwa), 4 admin1 (kod),
+#   ..., 9 lat, 10 lng
+KOL_KRAJ, KOL_KOD, KOL_MIEJSCOWOSC, KOL_ADMIN1, KOL_ADMIN1_KOD, KOL_LAT, KOL_LNG = \
+    0, 1, 2, 3, 4, 9, 10
 
-NAGLOWEK = ("kraj", "kod", "miejscowosc", "wojewodztwo", "lat", "lng")
+# Układ DUMPU MIEJSCOWOŚCI GeoNames (TSV, bez nagłówka):
+#   0 geonameid, 1 name, 2 asciiname, 3 alternatenames, 4 lat, 5 lng,
+#   6 feature_class, 7 feature_code, 8 country, 9 cc2, 10 admin1,
+#   11-13 admin2-4, 14 population, ...
+# Dump podaje admin1 jako KOD ("82", "NW"), nie nazwę — nazwy bierzemy z mapy
+# zbudowanej na pliku kodów tego samego kraju (tam stoją obie formy obok
+# siebie), żeby „wojewodztwo" znaczyło w obu rodzajach wierszy to samo.
+(KOL_M_NAZWA, KOL_M_LAT, KOL_M_LNG, KOL_M_KLASA, KOL_M_KRAJ, KOL_M_ADMIN1,
+ KOL_M_POPULACJA) = 1, 4, 5, 6, 8, 10, 14
+
+# Klasa obiektów „miejscowość" (city, village...). Reszta dumpu to góry, rzeki,
+# urzędy i hotele — w bazie geokodera tylko udawałyby trafienia.
+KLASA_MIEJSCOWOSCI = "P"
+
+NAGLOWEK = ("kraj", "kod", "miejscowosc", "wojewodztwo", "lat", "lng", "populacja")
 
 
 def _wyjscie(komunikat: str) -> int:
@@ -69,8 +99,8 @@ def _wyjscie(komunikat: str) -> int:
     return 0
 
 
-def pobierz(kraj: str) -> bytes:
-    adres = URL.format(kraj=kraj)
+def pobierz(kraj: str, url: str) -> bytes:
+    adres = url.format(kraj=kraj)
     print(f"[{KTO}] pobieram {adres}")
     with urllib.request.urlopen(adres, timeout=TIMEOUT_S) as r:  # noqa: S310
         return r.read()
@@ -86,8 +116,12 @@ def rozpakuj(dane: bytes, kraj: str) -> list[list[str]]:
     return [w.split("\t") for w in tekst.splitlines() if w.strip()]
 
 
-def przetworz(wiersze: list[list[str]]) -> tuple[list[tuple], int]:
-    """Surowe wiersze -> krotki w naszym formacie. Zwraca (wiersze, pominięte).
+def przetworz_kody(wiersze: list[list[str]]) -> tuple[list[tuple], int, dict]:
+    """Surowe wiersze kodów -> krotki w naszym formacie.
+
+    Zwraca (wiersze, pominięte, nazwy_admin1). Trzeci element to mapa
+    {(kraj, kod_admin1): nazwa_admin1} — dump miejscowości zna region tylko
+    z kodu, a wyświetlamy nazwę.
 
     Pomijamy wpisy bez współrzędnych. GeoNames ma ich trochę (kody skrytek
     pocztowych, kody wojskowe) i są bezużyteczne: kod bez lat/lng nie da się
@@ -95,6 +129,7 @@ def przetworz(wiersze: list[list[str]]) -> tuple[list[tuple], int]:
     """
     wynik: list[tuple] = []
     pominiete = 0
+    nazwy_admin1: dict[tuple[str, str], str] = {}
     for w in wiersze:
         if len(w) <= KOL_LNG:
             pominiete += 1
@@ -108,13 +143,62 @@ def przetworz(wiersze: list[list[str]]) -> tuple[list[tuple], int]:
         except ValueError:
             pominiete += 1
             continue
+        kraj = w[KOL_KRAJ].strip().upper()
+        admin1, admin1_kod = w[KOL_ADMIN1].strip(), w[KOL_ADMIN1_KOD].strip()
+        if admin1 and admin1_kod:
+            nazwy_admin1.setdefault((kraj, admin1_kod), admin1)
         wynik.append((
-            w[KOL_KRAJ].strip().upper(),
+            kraj,
             w[KOL_KOD].strip(),
             w[KOL_MIEJSCOWOSC].strip(),
-            w[KOL_ADMIN1].strip(),
+            admin1,
             lat,
             lng,
+            "",     # populacja — niesie ją wiersz miejscowości, nie kodu
+        ))
+    return wynik, pominiete, nazwy_admin1
+
+
+def przetworz_miejscowosci(wiersze: list[list[str]],
+                           nazwy_admin1: dict) -> tuple[list[tuple], int]:
+    """Surowe wiersze dumpu -> krotki miejscowości (pusty kod, z populacją).
+
+    Bierzemy WYŁĄCZNIE feature_class='P' — reszta dumpu (góry, rzeki, urzędy,
+    hotele) w bazie geokodera tylko udawałaby trafienia; jej odrzucenie nie
+    jest „pominięciem", więc nie wchodzi do licznika. Populacja zostaje także
+    jako 0 (GeoNames nie zna jej dla wielu wsi): wpis bez populacji nadal
+    geokoduje, tylko nie wygrywa remisów.
+    """
+    wynik: list[tuple] = []
+    pominiete = 0
+    for w in wiersze:
+        if len(w) <= KOL_M_POPULACJA:
+            pominiete += 1
+            continue
+        if w[KOL_M_KLASA].strip() != KLASA_MIEJSCOWOSCI:
+            continue
+        nazwa = w[KOL_M_NAZWA].strip()
+        lat, lng = w[KOL_M_LAT].strip(), w[KOL_M_LNG].strip()
+        if not nazwa or not lat or not lng:
+            pominiete += 1
+            continue
+        try:
+            float(lat), float(lng)
+        except ValueError:
+            pominiete += 1
+            continue
+        populacja = w[KOL_M_POPULACJA].strip()
+        if not populacja.isdigit():
+            populacja = "0"
+        kraj = w[KOL_M_KRAJ].strip().upper()
+        wynik.append((
+            kraj,
+            "",     # pusty kod — wiersz obsługuje wyszukiwanie po nazwie
+            nazwa,
+            nazwy_admin1.get((kraj, w[KOL_M_ADMIN1].strip()), ""),
+            lat,
+            lng,
+            populacja,
         ))
     return wynik, pominiete
 
@@ -148,17 +232,23 @@ def main(argv: list[str]) -> int:
 
     kraje = [k.strip().upper() for k in args.kraje if k.strip()]
     print(f"[{KTO}] Kraje: {', '.join(kraje)}")
-    print(f"[{KTO}] Źródło: {URL.format(kraj='{KRAJ}')} (GeoNames, CC BY 4.0)")
+    print(f"[{KTO}] Źródła: {URL_KODY.format(kraj='{KRAJ}')} (kody pocztowe)")
+    print(f"[{KTO}]         {URL_MIEJSCOWOSCI.format(kraj='{KRAJ}')} "
+          f"(miejscowości z populacją)   — oba GeoNames, CC BY 4.0")
     print(f"[{KTO}] Wynik:  {args.wyjscie}")
-    print(f"[{KTO}] Rząd wielkości: ~1 MB dla PL, kilkanaście MB dla kompletu.")
+    print(f"[{KTO}] Rząd wielkości: kilka MB dla PL, kilkadziesiąt MB dla "
+          f"kompletu (dump DE jest największy).")
     if args.sucho:
         print(f"[{KTO}] --sucho: kończę bez pobierania.")
         return 0
 
     wszystkie: list[tuple] = []
     for kraj in kraje:
+        # Najpierw kody: budują mapę nazw regionów, z której korzysta
+        # przetwarzanie miejscowości tego samego kraju.
         try:
-            surowe = rozpakuj(pobierz(kraj), kraj)
+            surowe_kody = rozpakuj(pobierz(kraj, URL_KODY), kraj)
+            surowe_miejsca = rozpakuj(pobierz(kraj, URL_MIEJSCOWOSCI), kraj)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             # Brak sieci to nie awaria tego repo — to warunek zewnętrzny.
             # Kończymy CZYSTO, mówiąc co się stało i co dalej.
@@ -168,9 +258,13 @@ def main(argv: list[str]) -> int:
         except (zipfile.BadZipFile, ValueError, UnicodeDecodeError) as e:
             return _wyjscie(f"archiwum {kraj}.zip jest nieczytelne: {e}")
 
-        wiersze, pominiete = przetworz(surowe)
-        wszystkie.extend(wiersze)
-        print(f"[{KTO}]   {kraj}: {len(wiersze)} kodów"
+        kody, pominiete_kody, nazwy_admin1 = przetworz_kody(surowe_kody)
+        miejsca, pominiete_miejsc = przetworz_miejscowosci(surowe_miejsca,
+                                                          nazwy_admin1)
+        pominiete = pominiete_kody + pominiete_miejsc
+        wszystkie.extend(kody)
+        wszystkie.extend(miejsca)
+        print(f"[{KTO}]   {kraj}: {len(kody)} kodów, {len(miejsca)} miejscowości"
               + (f" ({pominiete} pominiętych bez współrzędnych)" if pominiete else ""))
 
     if not wszystkie:

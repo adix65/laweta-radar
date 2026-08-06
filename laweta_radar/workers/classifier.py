@@ -207,7 +207,10 @@ ZASADY EKSTRAKCJI:
   również nieodmieniona, napisana z małej litery albo bez ogonków. To, że nazwa
   brzmi obco i nic ci nie mówi, NIE jest powodem do zostawienia nulla: skoro stoi
   w treści, jest daną. Nazwę zapisz w MIANOWNIKU ("z Dębicy" -> "Dębica", "pod
-  Krosnem" -> "Krosno"), ale NIE TŁUMACZ jej na inny język. Kierunek czytasz
+  Krosnem" -> "Krosno"), ale NIE TŁUMACZ jej na inny język. Uwaga na dopełniacz,
+  który OBCINA końcówkę: "do Kielc" -> "Kielce", "z Katowic" -> "Katowice",
+  "do Suwałk" -> "Suwałki" — zapisz pełną nazwę w mianowniku, a nie obciętą
+  formę z treści. Kierunek czytasz
   z przyimków — "z", "ze", "spod", "od", "aus", "from" to ODBIÓR, "do", "na",
   "nach", "to" to DOSTAWA. Gdy obok miejscowości stoi region albo kraj
   ("z Holandii Venlo", "do Małopolskie Gorlice"), do `miasto` idzie SAMA
