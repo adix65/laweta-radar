@@ -259,9 +259,16 @@ def pewnosc_liczbowo(zlecenie: dict) -> int | None:
 def punkty(zlecenie: dict) -> tuple:
     """Odbiór i dostawa jako `geo.Punkt` (albo None). Jedno miejsce, w którym
     ten moduł tłumaczy pola klasyfikatora na geografię — reszta pliku dostaje
-    już gotowe punkty."""
-    odbior = geo.geokoduj(zlecenie.get("odbior_kod"), zlecenie.get("odbior_miasto"))
-    dostawa = geo.geokoduj(zlecenie.get("dostawa_kod"), zlecenie.get("dostawa_miasto"))
+    już gotowe punkty.
+
+    Treść posta idzie do geokodera razem z polami: przy nazwie miejscowości
+    występującej w kilku krajach to kod pocztowy albo nazwa kraju Z TREŚCI
+    rozstrzyga, o który kraj chodzi (patrz `geo.geokoduj`)."""
+    tresc = zlecenie.get("tresc")
+    odbior = geo.geokoduj(zlecenie.get("odbior_kod"), zlecenie.get("odbior_miasto"),
+                          tresc=tresc)
+    dostawa = geo.geokoduj(zlecenie.get("dostawa_kod"), zlecenie.get("dostawa_miasto"),
+                           tresc=tresc)
     return odbior, dostawa
 
 
@@ -1206,8 +1213,9 @@ def podsumowanie_nocne(teraz: datetime | None = None) -> bool:
         linie = [f"🌅 *W nocy przyszło {len(wiersze)} zleceń*", ""]
         for (fb_id, grupa, opublikowany, o_kod, o_miasto, d_kod, d_miasto,
              tresc_posta) in wiersze:
-            pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto),
-                                    geo.geokoduj(d_kod, d_miasto), tresc_posta)
+            pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto, tresc=tresc_posta),
+                                    geo.geokoduj(d_kod, d_miasto, tresc=tresc_posta),
+                                    tresc_posta)
             trasa = str(o_miasto or o_kod or "?")
             if d_miasto or d_kod:
                 trasa += f" → {d_miasto or d_kod}"

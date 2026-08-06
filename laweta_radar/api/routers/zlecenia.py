@@ -83,8 +83,8 @@ def _rekord(wiersz: dict, *, zwroc_tresc: bool = True) -> dict:
     tresc = dane.get("tresc")
     if not zwroc_tresc:
         dane.pop("tresc", None)
-    odbior = geo.geokoduj(dane.get("odbior_kod"), dane.get("odbior_miasto"))
-    dostawa = geo.geokoduj(dane.get("dostawa_kod"), dane.get("dostawa_miasto"))
+    odbior = geo.geokoduj(dane.get("odbior_kod"), dane.get("odbior_miasto"), tresc=tresc)
+    dostawa = geo.geokoduj(dane.get("dostawa_kod"), dane.get("dostawa_miasto"), tresc=tresc)
     pods = geo.podsumowanie(odbior, dostawa, tresc)
 
     dane.setdefault("jezyk", dane.get("gate_jezyk"))

@@ -70,11 +70,15 @@ class Punkt:
     """Miejsce na mapie wraz z informacją, SKĄD je znamy.
 
     `zrodlo`:
-      "kod"             — dokładne dopasowanie kodu pocztowego, najpewniejsze;
-      "miasto"          — nazwa miasta jednoznaczna w bazie;
-      "miasto_niepewne" — nazwa niejednoznaczna, wzięliśmy największą
-                          miejscowość o tej nazwie. POKAŻ TO OPERATOROWI;
-      "baza"            — punkt operatora z .env.
+      "kod"               — dokładne dopasowanie kodu pocztowego, najpewniejsze;
+      "miasto"            — nazwa miasta jednoznaczna w bazie (także wtedy, gdy
+                            jednoznaczność dał kraj wyczytany z treści posta);
+      "miasto_niepewne"   — nazwa niejednoznaczna, wzięliśmy największą
+                            miejscowość o tej nazwie. POKAŻ TO OPERATOROWI;
+      "miasto_odmienione" — nazwa z posta była formą odmienioną („Kielc",
+                            „Katowic") i dopasowała się dopiero prefiksem.
+                            Traktowana jak "miasto_niepewne";
+      "baza"              — punkt operatora z .env.
     """
 
     lat: float
@@ -85,7 +89,7 @@ class Punkt:
     @property
     def niepewny(self) -> bool:
         """Skrót dla warstwy wyżej: czy przy tym punkcie postawić ostrzeżenie."""
-        return self.zrodlo.endswith("_niepewne")
+        return self.zrodlo.endswith("_niepewne") or self.zrodlo == "miasto_odmienione"
 
     def wspolrzedne(self) -> str:
         """Format `lat,lng` do URL-a Map. Sześć miejsc = ok. 10 cm, aż nadto."""
@@ -114,7 +118,8 @@ def normalizuj_nazwe(nazwa: str) -> str:
     s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
     # Myślnik i kropka jako spacja: "Bielsko-Biala" i "Bielsko Biala" to jedno
     # miasto, a "sw. Anny" i "swietej Anny" pisze się w postach obu sposobami.
-    s = re.sub(r"[-–—./]", " ", s)
+    # Nawiasy tak samo: GeoNames pisze "Frankfurt (Oder)", post — "Frankfurt Oder".
+    s = re.sub(r"[-–—./()]", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -163,12 +168,24 @@ EGZONIMY: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# BAZA KODÓW
+# BAZA KODÓW I MIEJSCOWOŚCI
 #
-# Plik CSV: kraj,kod,miejscowosc,wojewodztwo,lat,lng — jeden format dla
-# wszystkich krajów. Wczytywany LENIWIE, przy pierwszym pytaniu: import modułu
-# ma być darmowy, żeby dało się go zaimportować w teście, który geokodowania
-# w ogóle nie dotyka.
+# Plik CSV: kraj,kod,miejscowosc,wojewodztwo,lat,lng[,populacja] — jeden format
+# dla wszystkich krajów, ale DWA rodzaje wierszy:
+#
+#   • wiersz Z KODEM — z eksportu kodów pocztowych GeoNames. Obsługuje
+#     wyszukiwanie PO KODZIE. W niektórych krajach (DE) pole `miejscowosc`
+#     bywa nazwą instytucji („Agentur fuer Arbeit Dortmund" — Grosskunden-PLZ),
+#     dlatego wyszukiwaniu po nazwie ten wiersz służy tylko AWARYJNIE;
+#   • wiersz BEZ KODU, z populacją — z dumpu miejscowości GeoNames
+#     (feature_class='P'). Obsługuje wyszukiwanie PO NAZWIE; populacja
+#     rozstrzyga wybór między miastami o tej samej nazwie.
+#
+# Starsze bazy (zalążek w repo, fixtury testów) nie mają kolumny `populacja`
+# ani wierszy miejscowości — wtedy po nazwie szukamy jak dawniej, po wierszach
+# kodowych. Wczytywany LENIWIE, przy pierwszym pytaniu: import modułu ma być
+# darmowy, żeby dało się go zaimportować w teście, który geokodowania w ogóle
+# nie dotyka.
 # ---------------------------------------------------------------------------
 _KATALOG_REPO = Path(__file__).resolve().parent.parent.parent
 SCIEZKI_BAZY = (
@@ -249,6 +266,13 @@ def _wczytaj(sciezka: Path | None = None) -> tuple[dict, dict]:
                 lng = float(wiersz["lng"])
             except (TypeError, ValueError, KeyError):
                 continue  # wiersz bez współrzędnych jest bezużyteczny
+            # Populacja jest opcjonalna (starsze bazy jej nie mają), a śmieć
+            # w kolumnie znaczy „nie wiemy", nie „zero mieszkańców".
+            populacja_surowa = (wiersz.get("populacja") or "").strip()
+            try:
+                populacja = int(populacja_surowa) if populacja_surowa else None
+            except ValueError:
+                populacja = None
             rekord = {
                 "kraj": (wiersz.get("kraj") or "PL").strip().upper(),
                 "kod": (wiersz.get("kod") or "").strip(),
@@ -256,6 +280,7 @@ def _wczytaj(sciezka: Path | None = None) -> tuple[dict, dict]:
                 "wojewodztwo": (wiersz.get("wojewodztwo") or "").strip(),
                 "lat": lat,
                 "lng": lng,
+                "populacja": populacja,
             }
             if rekord["kod"]:
                 po_kodzie.setdefault(normalizuj_kod(rekord["kod"]), []).append(rekord)
@@ -301,14 +326,181 @@ def _srodek(rekordy: list[dict]) -> tuple[float, float]:
             sum(r["lng"] for r in rekordy) / len(rekordy))
 
 
-def geokoduj(kod: str | None, miasto: str | None) -> Punkt | None:
+# Dopasowanie prefiksowe form odmienionych: nazwa z posta jest POCZĄTKIEM nazwy
+# z bazy („Kielc" -> „Kielce"). Minimum 5 znaków, żeby „Nowa" nie łapało
+# „Nowaczyzny"; najwyżej 3 znaki różnicy, bo dopełniacz obcina końcówkę,
+# a nie pół słowa.
+PREFIKS_MIN_ZNAKOW = 5
+PREFIKS_MAX_OBCIECIE = 3
+
+# Przewaga populacji, od której „największe miasto o tej nazwie" przestaje być
+# zgadywaniem: zwycięzca musi być co najmniej TYLE razy większy od drugiego.
+# Frankfurt am Main vs Frankfurt (Oder) to 13x — przechodzi. Dwie porównywalne
+# wsie -> None, bo wybór między nimi byłby rzutem monetą z współrzędnymi.
+PRZEWAGA_POPULACJI = 3.0
+
+# Nazwy KRAJÓW w treści posta — rdzenie, dopasowywane od początku słowa, jak
+# w `_SYGNALY_KRAJU` (odmienia się końcówka: „Niemcy", „w Niemczech",
+# „z Niemiec"). CELOWO OSOBNA TABELA, nie `_SYGNALY_KRAJU`: tamta zawiera też
+# nazwy MIAST („koln", „berlin"), które działają w wąskim oknie wokół kodu,
+# ale na całej treści robiłyby szkody — „z Berlina do Nowej Wsi" wskazywałoby
+# Niemcy przy rozstrzyganiu polskiej wsi, bo miasto z JEDNEGO końca trasy
+# mówiłoby o kraju DRUGIEGO.
+_NAZWY_KRAJOW: dict[str, tuple[str, ...]] = {
+    "DE": ("niemc", "niemiec", "deutschland", "germany"),
+    "CZ": ("czech", "czesk", "tschechien"),
+    "SK": ("slowac", "slovensk", "slowakei"),
+    "NL": ("holand", "holender", "niderland", "nederland"),
+    "AT": ("austri", "osterreich"),
+    "BE": ("belgi", "belgien"),
+    "FR": ("francj", "francus", "france", "frankreich"),
+    "IT": ("wloch", "wlosz", "italia", "italien"),
+    "PL": ("polsk", "polsc", "polen"),
+}
+
+
+def _dopasuj_prefiksem(nazwa: str, po_nazwie: dict) -> str | None:
+    """Nazwa z bazy, której `nazwa` jest początkiem. Wieloznaczność -> None.
+
+    „Wieloznaczność" znaczy: prefiks pasuje do WIELU RÓŻNYCH nazw z bazy
+    („kozie" -> „Kozienice" i „Koziegłowy"). Wtedy None, jak przy każdym innym
+    zgadywaniu. To, że JEDNA dopasowana nazwa oznacza kilka miejscowości,
+    rozstrzyga się dalej, tą samą drogą co przy dopasowaniu dosłownym.
+    """
+    if len(nazwa) < PREFIKS_MIN_ZNAKOW:
+        return None
+    trafienia = [n for n in po_nazwie
+                 if n.startswith(nazwa)
+                 and 0 < len(n) - len(nazwa) <= PREFIKS_MAX_OBCIECIE]
+    return trafienia[0] if len(trafienia) == 1 else None
+
+
+def _warianty(rekordy: list[dict]) -> list[dict]:
+    """Wiersze o jednej nazwie -> lista kandydatów „ta nazwa, różne miejsca".
+
+    Gdy nazwa ma wiersze z dumpu miejscowości (bez kodu, z populacją), to ONE
+    są kandydatami — wiersz kodowy bywa nazwą instytucji, nie miasta (patrz
+    komentarz przy `SCIEZKI_BAZY`). Wiersze kodowe dokładają wtedy tylko
+    liczbę kodów regionu, jako zapasowe proxy wielkości. Bez wierszy
+    miejscowości (zalążek, stare bazy) kandydatów budujemy jak dawniej:
+    grupując wiersze kodowe po regionie, ze środkiem grupy jako współrzędną.
+    """
+    liczba_kodow: dict[tuple[str, str], int] = {}
+    for r in rekordy:
+        if r["kod"]:
+            klucz = (r["kraj"], r["wojewodztwo"])
+            liczba_kodow[klucz] = liczba_kodow.get(klucz, 0) + 1
+
+    miejsca = [r for r in rekordy if not r["kod"]]
+    if miejsca:
+        return [{
+            "kraj": r["kraj"],
+            "wojewodztwo": r["wojewodztwo"],
+            "miejscowosc": r["miejscowosc"],
+            "lat": r["lat"],
+            "lng": r["lng"],
+            "populacja": r["populacja"] or 0,
+            "liczba_kodow": liczba_kodow.get((r["kraj"], r["wojewodztwo"]), 0),
+        } for r in miejsca]
+
+    grupy: dict[tuple[str, str], list[dict]] = {}
+    for r in rekordy:
+        grupy.setdefault((r["kraj"], r["wojewodztwo"]), []).append(r)
+    wynik = []
+    for (kraj, wojewodztwo), grupa in grupy.items():
+        lat, lng = _srodek(grupa)
+        wynik.append({
+            "kraj": kraj,
+            "wojewodztwo": wojewodztwo,
+            "miejscowosc": grupa[0]["miejscowosc"],
+            "lat": lat,
+            "lng": lng,
+            "populacja": 0,
+            "liczba_kodow": len(grupa),
+        })
+    return wynik
+
+
+def _kraje_z_kodow(tresc: str | None, po_kodzie: dict) -> set[str]:
+    """Kraje wskazane przez kody pocztowe stojące w treści posta.
+
+    Kod znany bazie mówi o kraju WIĘCEJ niż jego kształt — „39400" wygląda
+    na niemiecki, a jest też polskim 39-400 zapisanym bez myślnika. Dlatego
+    dla kodu obecnego w bazie bierzemy wszystkie kraje jego wystąpień,
+    a kształtem posiłkujemy się tylko przy kodzie, którego baza nie zna.
+    """
+    kraje: set[str] = set()
+    for kod, kraj in znajdz_kody(tresc or ""):
+        w_bazie = {r["kraj"] for r in po_kodzie.get(normalizuj_kod(kod), ())}
+        if w_bazie:
+            kraje.update(w_bazie)
+        elif kraj != "?":
+            kraje.add(kraj)
+    return kraje
+
+
+def _kraje_z_nazw(tresc: str | None) -> set[str]:
+    """Kraje wymienione w treści posta z nazwy („Niemcy", „Deutschland")."""
+    okno = normalizuj_nazwe(tresc or "")
+    if not okno:
+        return set()
+    return {kraj for kraj, rdzenie in _NAZWY_KRAJOW.items()
+            if any(_sygnal_w_oknie(rdzen, okno) for rdzen in rdzenie)}
+
+
+def _przefiltruj_krajami(warianty: list[dict], kraje: set[str]) -> list[dict]:
+    """Zostaw warianty ze wskazanych krajów. Filtr kasujący wszystko — ignoruj:
+    kod czy kraj z treści może dotyczyć DRUGIEGO końca trasy i wtedy o tym
+    mieście nie mówi nic, a nie „nie istnieje"."""
+    if not kraje:
+        return warianty
+    pasujace = [w for w in warianty if w["kraj"] in kraje]
+    return pasujace or warianty
+
+
+def _wybierz_wariant(warianty: list[dict]) -> dict | None:
+    """Który z wariantów o tej samej nazwie bierzemy. None = nie rozstrzygamy.
+
+    Populacja rozstrzyga tylko przy WYRAŹNEJ przewadze (`PRZEWAGA_POPULACJI`):
+    Frankfurt am Main wygrywa z Frankfurtem nad Odrą, ale dwie porównywalne
+    miejscowości to None — zła współrzędna wysyła człowieka setki kilometrów
+    w złą stronę i wygląda przy tym dokładnie tak samo jak trafiona.
+
+    Bez danych o populacji (zalążek bazy, stare fixtury) zostaje dawne proxy:
+    liczba kodów pocztowych regionu. Ono nie zgłasza remisów — wybiera zawsze,
+    a niepewność niesie `zrodlo="miasto_niepewne"` ustawiane wyżej. Zmiana
+    tego na None wyłączałaby geokodowanie wsi do czasu odświeżenia bazy.
+    """
+    if len(warianty) == 1:
+        return warianty[0]
+    po_populacji = sorted(warianty, key=lambda w: w["populacja"], reverse=True)
+    najlepszy, drugi = po_populacji[0], po_populacji[1]
+    if najlepszy["populacja"] > 0:
+        if najlepszy["populacja"] >= PRZEWAGA_POPULACJI * max(drugi["populacja"], 1):
+            return najlepszy
+        return None
+    return max(warianty, key=lambda w: w["liczba_kodow"])
+
+
+def geokoduj(kod: str | None, miasto: str | None,
+             tresc: str | None = None) -> Punkt | None:
     """Kod pocztowy i/lub nazwa miasta -> Punkt. Brak dopasowania -> None.
+
+    `tresc` to PEŁNA treść posta — opcjonalna, ale bez niej nie da się
+    rozstrzygnąć, o który kraj chodzi przy nazwie występującej w kilku krajach.
+    Produkcyjny przypadek: „Miejscowosc Lahnstein 56112 Niemcy do 39-400
+    Tarnobrzeg" dostawał Lahnstein w Austrii, 782 km od właściwego — kod 56112
+    STAŁ w treści i wskazywał Niemcy jednoznacznie, tylko nikt go nie zapytał.
 
     Kolejność prób jest kolejnością PEWNOŚCI:
       1. kod pocztowy — dokładne dopasowanie, `zrodlo="kod"`;
-      2. nazwa miasta — po normalizacji; gdy nazwa jest niejednoznaczna
-         (kilkanaście „Nowych Wsi" w Polsce), bierzemy największą miejscowość
-         o tej nazwie i ustawiamy `zrodlo="miasto_niepewne"`;
+      2. nazwa miasta — po normalizacji; forma odmieniona („Kielc", „Katowic")
+         łapie się prefiksem i wychodzi jako `zrodlo="miasto_odmienione"`.
+         Przy nazwie z wielu krajów kolejność rozstrzygania:
+           a) kraj z kodu pocztowego stojącego w treści posta,
+           b) kraj z nazwy kraju w treści („Niemcy", „Deutschland", „Czechy"),
+           c) największa populacja — wynik oznaczony `zrodlo="miasto_niepewne"`,
+           d) populacje porównywalne -> None;
       3. brak -> None. BEZ ZGADYWANIA: null jest lepszy niż zła współrzędna,
          bo zła współrzędna wyśle człowieka 80 km w złą stronę.
     """
@@ -345,33 +537,46 @@ def geokoduj(kod: str | None, miasto: str | None) -> Punkt | None:
     # --- 2. nazwa miasta ---
     nazwa = normalizuj_nazwe(miasto or "")
     nazwa = EGZONIMY.get(nazwa, nazwa)
-    if not nazwa or nazwa not in po_nazwie:
+    if not nazwa:
         return None
+    odmienione = False
+    if nazwa not in po_nazwie:
+        # Polski dopełniacz OBCINA końcówkę („do Kielc", „z Katowic"), a model
+        # przepisuje to, co stoi w tekście — więc nazwa z posta bywa POCZĄTKIEM
+        # nazwy z bazy. Prompt każe pisać w mianowniku, ale instrukcja nie jest
+        # kontrolą: to dopasowanie działa także wtedy, gdy model jej nie posłucha.
+        nazwa = _dopasuj_prefiksem(nazwa, po_nazwie)
+        if nazwa is None:
+            return None
+        odmienione = True
 
-    rekordy = po_nazwie[nazwa]
-    # Grupujemy po regionie: „Nowa Wieś" w podkarpackim i w mazowieckim to dwie
-    # różne miejscowości, ale trzydzieści kodów Warszawy to jedno miasto.
-    grupy: dict[tuple[str, str], list[dict]] = {}
-    for r in rekordy:
-        grupy.setdefault((r["kraj"], r["wojewodztwo"]), []).append(r)
+    warianty = _warianty(po_nazwie[nazwa])
+    if len(warianty) > 1:
+        # Treść posta zawęża warianty krajem — najpierw kodem pocztowym (a),
+        # bo to najtwardszy sygnał, potem nazwą kraju (b). Filtr, który
+        # skasowałby WSZYSTKIE warianty, jest ignorowany: kod z drugiego końca
+        # trasy nie unieważnia miasta, tylko o nim nic nie mówi.
+        for kraje in (_kraje_z_kodow(tresc, po_kodzie), _kraje_z_nazw(tresc)):
+            if len(warianty) == 1:
+                break
+            warianty = _przefiltruj_krajami(warianty, kraje)
 
-    # „Największa" mierzona LICZBĄ KODÓW POCZTOWYCH. To proxy, nie ludność:
-    # plik GeoNames z kodami nie niesie populacji, a dociąganie drugiego
-    # zbioru tylko po to byłoby droższe niż zysk. Proxy jest dobre tam, gdzie
-    # ma znaczenie (Warszawa ma ich setki, wieś jeden) i słabe tam, gdzie i tak
-    # zgadujemy — dlatego przy niejednoznaczności zawsze wychodzi
-    # `miasto_niepewne`, niezależnie od tego, jak pewnie wygląda zwycięzca.
-    najwieksza = max(grupy.values(), key=len)
-    lat, lng = _srodek(najwieksza)
-    wzor = najwieksza[0]
-    jednoznaczne = len(grupy) == 1
-    opis_regionu = f", {wzor['wojewodztwo']}" if wzor["wojewodztwo"] else ""
+    wybrany = _wybierz_wariant(warianty)
+    if wybrany is None:
+        return None
+    jednoznaczne = len(warianty) == 1
+    if odmienione:
+        zrodlo = "miasto_odmienione"
+    else:
+        zrodlo = "miasto" if jednoznaczne else "miasto_niepewne"
+    opis_regionu = f", {wybrany['wojewodztwo']}" if wybrany["wojewodztwo"] else ""
     return Punkt(
-        lat=lat,
-        lng=lng,
-        zrodlo="miasto" if jednoznaczne else "miasto_niepewne",
-        nazwa=(f"{wzor['miejscowosc']}{opis_regionu} ({wzor['kraj']})"
-               + ("" if jednoznaczne else f" — {len(grupy)} miejscowości o tej nazwie")),
+        lat=wybrany["lat"],
+        lng=wybrany["lng"],
+        zrodlo=zrodlo,
+        nazwa=(f"{wybrany['miejscowosc']}{opis_regionu} ({wybrany['kraj']})"
+               + ("" if jednoznaczne
+                  else f" — {len(warianty)} miejscowości o tej nazwie")),
     )
 
 
@@ -509,7 +714,7 @@ _WZORCE = [
 # fragment siedzi w „Skodzie", a "cz" w „częściach" — czyli w dwóch
 # najczęstszych słowach w tych grupach.
 _SYGNALY_KRAJU: dict[str, tuple[str, ...]] = {
-    "DE": ("niemiec", "niemczech", "niemieck", "deutschland", "aus ", " de ", "germany",
+    "DE": ("niemc", "niemiec", "niemczech", "niemieck", "deutschland", "aus ", " de ", "germany",
            "koln", "kolon", "hamburg", "berlin", "monachium", "munchen", "drezn", "dresden"),
     "CZ": ("czech", "czesk", "praha", "prag", "brno", "brnie", "ostrav", " cz "),
     "SK": ("slowac", "slovensk", "bratislav", "koszyc", "kosice", "zilin", " sk "),
@@ -878,8 +1083,10 @@ def _main(argv: list[str]) -> int:
         return 0
 
     def jako_punkt(s: str) -> Punkt | None:
-        # Wygląda jak kod? Spróbuj kodem, inaczej nazwą.
-        return geokoduj(s, None) if re.search(r"[0-9]", s) else geokoduj(None, s)
+        # Wygląda jak kod? Spróbuj kodem, inaczej nazwą. Treść posta (o ile
+        # podana) idzie do rozstrzygania kraju — jak w produkcyjnych wywołaniach.
+        return (geokoduj(s, None, tresc=args.tresc) if re.search(r"[0-9]", s)
+                else geokoduj(None, s, tresc=args.tresc))
 
     odbior = jako_punkt(args.miejsca[0])
     dostawa = jako_punkt(args.miejsca[1]) if len(args.miejsca) > 1 else None

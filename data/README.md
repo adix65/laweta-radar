@@ -46,15 +46,24 @@ z grup oznaczonych TAK.
 ## `kody_eu.csv`
 
 Baza dla `services/geo.py`: zamienia kod pocztowy albo nazwę miasta na
-współrzędne. Format jest jeden dla wszystkich krajów:
+współrzędne. Format jest jeden dla wszystkich krajów, ale wiersze są dwojakie:
 
 ```
-kraj,kod,miejscowosc,wojewodztwo,lat,lng
-PL,38-400,Krosno,podkarpackie,49.6886,21.7706
+kraj,kod,miejscowosc,wojewodztwo,lat,lng,populacja
+PL,38-400,Krosno,podkarpackie,49.6886,21.7706,
+PL,,Krosno,podkarpackie,49.6886,21.7706,46000
 ```
 
-Pusty `kod` jest dozwolony — taki wiersz obsługuje wyszukiwanie po nazwie,
-a nie po kodzie.
+Wiersz **z kodem** obsługuje wyszukiwanie **po kodzie**. Wiersz **bez kodu,
+z populacją** (z dumpu miejscowości GeoNames, `feature_class='P'`) obsługuje
+wyszukiwanie **po nazwie** — bo w pliku kodów nazwa bywa nazwą instytucji,
+nie miejscowości (niemieckie Grosskunden-PLZ w rodzaju „Agentur fuer Arbeit
+Dortmund"; „Frankfurt" nie występował w bazie ani razu). Populacja rozstrzyga
+wybór między miastami o tej samej nazwie (Frankfurt am Main kontra Frankfurt
+nad Odrą) — szczegóły w `services/geo.py`.
+
+Kolumna `populacja` jest opcjonalna: starsze bazy bez niej działają, tylko po
+nazwie szukają wtedy po wierszach kodowych, jak dawniej.
 
 ### Plik w repo jest ZALĄŻKIEM, nie pełną bazą
 
@@ -79,8 +88,8 @@ python laweta_radar/scripts/pobierz_geo.py           # PL DE CZ SK NL BE AT FR I
 python -m laweta_radar.services.geo Krosno Rzeszow   # sprawdzenie
 ```
 
-Skrypt **nadpisuje** ten plik kompletem z GeoNames (kilkanaście MB, kilkaset
-tysięcy wierszy). Wynik **commitujemy** — z tego samego powodu, dla którego
+Skrypt **nadpisuje** ten plik kompletem z GeoNames — kodami pocztowymi
+i miejscowościami z populacją (kilkadziesiąt MB, kilkaset tysięcy wierszy). Wynik **commitujemy** — z tego samego powodu, dla którego
 wersjonujemy `kandydaci_grupy.csv`, tylko że tu kosztem nie są godziny
 człowieka, lecz dostępność cudzego hosta: niedostępne `download.geonames.org`
 w momencie deployu oznacza świeży deploy bez geokodera, który po cichu
@@ -89,8 +98,10 @@ host — powtarzalny.
 
 ### Źródło i licencja
 
-Docelowa baza pochodzi z [GeoNames](https://download.geonames.org/export/zip/),
-na licencji [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
+Docelowa baza pochodzi z [GeoNames](https://download.geonames.org/) — z dwóch
+eksportów: [kodów pocztowych](https://download.geonames.org/export/zip/)
+i [dumpu miejscowości](https://download.geonames.org/export/dump/) — na
+licencji [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
 wymagane jest podanie autorstwa i ta wzmianka je realizuje. Zalążek w repo
 został złożony ręcznie i nie pochodzi z GeoNames.
 

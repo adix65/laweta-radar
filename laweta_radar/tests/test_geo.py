@@ -166,6 +166,165 @@ def test_kolizja_kodow_miedzy_krajami_rozstrzyga_miasto(tmp_path):
     assert "Debica" in bez_kontekstu.nazwa and "(PL)" in bez_kontekstu.nazwa
 
 
+# ===========================================================================
+# NAZWY Z WIELU KRAJÓW, FORMY ODMIENIONE I POPULACJA
+#
+# Fixture w nowym formacie: wiersze KODOWE (jak dotąd) plus wiersze
+# MIEJSCOWOŚCI — bez kodu, z populacją, prosto z dumpu GeoNames. To na nich
+# opiera się wyszukiwanie po nazwie; wiersz kodowy z nazwą urzędu zamiast
+# miasta („Agentur fuer Arbeit Dortmund") jest tu CELOWO, bo dokładnie takim
+# wpisem niemiecki eksport kodów zatruwał wyszukiwanie po nazwie.
+# ===========================================================================
+FIXTURE_Z_MIEJSCOWOSCIAMI = """kraj,kod,miejscowosc,wojewodztwo,lat,lng,populacja
+PL,25-001,Kielce,swietokrzyskie,50.8661,20.6286,
+PL,,Kielce,swietokrzyskie,50.8661,20.6286,194852
+PL,,Katowice,slaskie,50.2649,19.0238,294510
+PL,39-400,Tarnobrzeg,podkarpackie,50.5730,21.6790,
+PL,,Tarnobrzeg,podkarpackie,50.5730,21.6790,47816
+DE,60311,Frankfurt am Main,Hessen,50.1106,8.6820,
+DE,,Frankfurt am Main,Hessen,50.1106,8.6820,764104
+DE,,Frankfurt (Oder),Brandenburg,52.3471,14.5506,57015
+DE,56112,Lahnstein,Rheinland-Pfalz,50.3049,7.6060,
+DE,,Lahnstein,Rheinland-Pfalz,50.3049,7.6060,18067
+AT,,Lahnstein,Oberoesterreich,47.5833,13.5333,0
+DE,44135,Agentur fuer Arbeit Dortmund,Nordrhein-Westfalen,51.5142,7.4700,
+DE,,Dortmund,Nordrhein-Westfalen,51.5142,7.4652,588462
+DE,,Neustadt,Hessen,50.8500,9.1167,20000
+AT,,Neustadt,Tirol,47.2000,11.4000,15000
+PL,,Strzelce,lubuskie,52.8770,15.5310,9700
+PL,,Strzelin,dolnoslaskie,50.7833,17.0650,12500
+"""
+
+
+def _z_miejscowosciami(tmp_path):
+    plik = tmp_path / "kody_miejscowosci_test.csv"
+    plik.write_text(FIXTURE_Z_MIEJSCOWOSCIAMI, encoding="utf-8")
+    geo.zaladuj(plik)
+    return plik
+
+
+def test_frankfurt_z_kodem_to_frankfurt_am_main(tmp_path):
+    """Test z diagnozy produkcyjnej: "Frankfurt" + kod 60311 -> Frankfurt am
+    Main (DE). Kod jest pewniejszy niż nazwa i rozstrzyga sam."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj("60311", "Frankfurt")
+    assert p is not None
+    assert p.zrodlo == "kod"
+    assert "Frankfurt am Main" in p.nazwa and "(DE)" in p.nazwa
+
+
+def test_frankfurt_bez_nawiasow_geonames(tmp_path):
+    """GeoNames pisze "Frankfurt (Oder)", post — "Frankfurt Oder"."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Frankfurt Oder")
+    assert p is not None
+    assert round(p.lat, 4) == 52.3471
+
+
+def test_lahnstein_kod_w_tresci_wybiera_niemcy(tmp_path):
+    """PRODUKCYJNY BŁĄD, dla którego powstała ta zmiana: "Miejscowosc
+    Lahnstein 56112 Niemcy do 39-400 Tarnobrzeg" dostawał Lahnstein
+    w Austrii, 782 km od właściwego. Kod 56112 STAŁ w treści i wskazywał
+    Niemcy jednoznacznie — teraz jest pytany."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Lahnstein",
+                     tresc="Miejscowosc Lahnstein 56112 Niemcy do 39-400 Tarnobrzeg")
+    assert p is not None
+    assert "(DE)" in p.nazwa
+    assert round(p.lat, 4) == 50.3049
+    # Kraj z kodu rozstrzygnął jednoznacznie — to nie jest zgadywanie.
+    assert p.zrodlo == "miasto"
+
+
+def test_lahnstein_slowo_niemcy_wybiera_niemcy(tmp_path):
+    """Bez kodu w treści rozstrzyga nazwa kraju."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Lahnstein", tresc="Lahnstein, Niemcy, auto na kolach")
+    assert p is not None and "(DE)" in p.nazwa
+
+
+def test_lahnstein_bez_kontekstu_wybiera_populacje(tmp_path):
+    """Bez kodu i bez nazwy kraju zostaje populacja: 18 tys. kontra wioska.
+    Wybór jest oznaczony jako niepewny, bo to nadal wybór za autora posta."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Lahnstein")
+    assert p is not None and "(DE)" in p.nazwa
+    assert p.zrodlo == "miasto_niepewne"
+    assert p.niepewny is True
+
+
+def test_kraj_z_drugiego_konca_trasy_nie_kasuje_miasta(tmp_path):
+    """"transport z Czech" mówi o DRUGIM końcu trasy — filtr, który skasowałby
+    wszystkie warianty Lahnstein, ma być zignorowany, nie posłuchany."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Lahnstein", tresc="odbior Lahnstein, transport z Czech")
+    assert p is not None and "(DE)" in p.nazwa
+
+
+def test_populacje_porownywalne_daja_none(tmp_path):
+    """20 tys. kontra 15 tys. to rzut monetą, nie rozstrzygnięcie. None —
+    jak przy każdym innym zgadywaniu."""
+    _z_miejscowosciami(tmp_path)
+    assert geo.geokoduj(None, "Neustadt") is None
+
+
+def test_forma_odmieniona_kielc_to_kielce(tmp_path):
+    """Test z diagnozy: "do Kielc" -> model zapisuje "Kielc" -> baza ma
+    "Kielce". Dopasowanie prefiksem, oznaczone własnym źródłem."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Kielc")
+    assert p is not None
+    assert "Kielce" in p.nazwa
+    assert p.zrodlo == "miasto_odmienione"
+    assert p.niepewny is True     # traktowane jak "miasto_niepewne"
+
+
+def test_forma_odmieniona_katowic_to_katowice(tmp_path):
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Katowic")
+    assert p is not None and "Katowice" in p.nazwa
+    assert p.zrodlo == "miasto_odmienione"
+
+
+def test_prefiks_za_krotki_nie_zgaduje(tmp_path):
+    """Minimum 5 znaków — żeby "Nowa" nie łapało "Nowaczyzny"."""
+    _z_miejscowosciami(tmp_path)
+    assert geo.geokoduj(None, "Kiel") is None
+
+
+def test_prefiks_wieloznaczny_daje_none(tmp_path):
+    """"Strzel" pasuje do Strzelec i Strzelina — dwóch RÓŻNYCH miast. None."""
+    _z_miejscowosciami(tmp_path)
+    assert geo.geokoduj(None, "Strzel") is None
+
+
+def test_prefiks_z_za_duza_roznica_nie_zgaduje(tmp_path):
+    """Najwyżej 3 znaki różnicy: "Frank" nie ma prawa stać się Frankfurtem."""
+    _z_miejscowosciami(tmp_path)
+    assert geo.geokoduj(None, "Frank") is None
+
+
+def test_dortmund_trafia_w_miasto_a_nie_w_urzad(tmp_path):
+    """Test z diagnozy: "Dortmund" działał PRZYPADKIEM, przez nazwę urzędu
+    ("Agentur fuer Arbeit Dortmund") z niemieckiego eksportu kodów. Po nazwie
+    szukamy w miejscowościach — urząd zostaje przy swoim kodzie."""
+    _z_miejscowosciami(tmp_path)
+    p = geo.geokoduj(None, "Dortmund")
+    assert p is not None
+    assert p.zrodlo == "miasto"
+    assert "Agentur" not in p.nazwa
+    # Współrzędne wiersza miejscowości, nie urzędu.
+    assert round(p.lng, 4) == 7.4652
+
+
+def test_stara_baza_bez_populacji_dziala_jak_dotad(tmp_path):
+    """Zalążek bazy i stare fixtury nie mają kolumny `populacja` ani wierszy
+    miejscowości — wyszukiwanie po nazwie ma wtedy działać jak zawsze."""
+    _z_fixture(tmp_path)
+    p = geo.geokoduj(None, "Rzeszów", tresc="laweta z Rzeszowa do Krosna")
+    assert p is not None and p.zrodlo == "miasto"
+
+
 def test_format_kodu_pokrywa_obslugiwane_kraje():
     """Kontrakt z klasyfikatorem: on pyta stąd, czy przyjąć kod od modelu."""
     for dobry in ["38-400", "50667", "110 00", "11000", "1012 AB", "1010"]:
