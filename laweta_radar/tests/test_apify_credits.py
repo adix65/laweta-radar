@@ -130,6 +130,32 @@ def test_stan_konta_nigdy_nie_wycieka_tokenu(monkeypatch):
 # ---------------------------------------------------------------------------
 # pula_stanu — równoległość + cache
 # ---------------------------------------------------------------------------
+def test_pula_stanu_buduje_cfg_z_pelna_lista_tokenow(monkeypatch):
+    """`pula_stanu` ma dociągnąć proxy WYRÓWNANE po hashu (`apify_proxy.
+    _wyrownaj_przypisania`) — bez `tokens=tokens` przy budowie `cfg` /limity
+    sprawdzałoby saldo przez goły rendezvous hashing, czyli czasem innym adresem
+    niż ten, którym REALNIE wychodzi fetcher (ten liczy cfg tą samą listą kluczy)."""
+    widziane: list = []
+
+    def _spy_load_proxy_config(env=None, tokens=None):
+        widziane.append(tokens)
+        return "CFG_WYROWNANY"
+
+    otrzymane_cfg: list = []
+
+    def _client(token, timeout=None, env=None, cfg=None):
+        otrzymane_cfg.append(cfg)
+        return _FakeClient({"/users/me": _FakeResp(401, {})})
+
+    monkeypatch.setattr(ac, "load_proxy_config", _spy_load_proxy_config)
+    monkeypatch.setattr(ac, "client_for_token", _client)
+
+    ac.pula_stanu(["t1", "t2"], cache_ttl=0)
+
+    assert widziane == [["t1", "t2"]]
+    assert otrzymane_cfg == ["CFG_WYROWNANY", "CFG_WYROWNANY"]
+
+
 def test_pula_stanu_odpytuje_wszystkie_tokeny(monkeypatch):
     mapowanie = {
         "/users/me/limits": _FakeResp(200, {"data": {
