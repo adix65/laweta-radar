@@ -28,8 +28,11 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from laweta_radar.config import groups as cfg_groups
 from laweta_radar.config import settings
 from laweta_radar.services import feedback, geo, powiadomienia, telegram_notify
+from laweta_radar.workers import apify_credits
+from laweta_radar.workers.apify_keys import load_apify_tokens
 
 KTO = "bot"
 
@@ -268,10 +271,152 @@ def _ostatnie(conn, ile: int) -> str:
     return "\n".join(linie)
 
 
+# ---------------------------------------------------------------------------
+# /limity — stan puli kont Apify na żądanie, zamiast logowania na VPS.
+#
+# TRZY ROZŁĄCZNE STANY KONTA (workers/apify_credits.StanKonta) muszą zostać
+# pokazane OSOBNO, nie zlepione w jedno „błąd": konto, które odpowiada na
+# /users/me, ale nie na /users/me/limits (typowe dla darmowych kont), jest
+# SPRAWNE — tylko nie podaje salda. Pokazanie go jako błędu wygląda jak awaria
+# całej puli, choć fetcher tymi samymi kluczami normalnie pobiera posty.
+# Dokładnie to pomylenie wywołało to zadanie.
+#
+# BEZPIECZEŃSTWO: wiadomość idzie na czat, na którym może być więcej niż jedna
+# osoba. Jedyne, co wolno pokazać per konto, to `username` z /users/me (albo
+# numer porządkowy, gdy go nie znamy) — nigdy token ani jego fragment.
+# ---------------------------------------------------------------------------
+PROG_KONTO_OSTRZEZENIE = 90    # % zużycia konta -> ⚠ przy wierszu
+PROG_PULA_OSTRZEZENIE = 80     # % zużycia CAŁEJ puli -> linia ostrzegawcza na końcu
+GODZIN_MIN_NA_PROGNOZE = 12    # mniej historii w oknie 24h -> "za wcześnie"
+
+
+def _pasek(pct: float, szerokosc: int = 10) -> str:
+    """Pasek postępu ▓/░. `pct` spoza 0-100 przycinamy — API bywa niedokładne
+    (zaokrąglenia po stronie Apify potrafią dać 100.4%)."""
+    pct = max(0.0, min(100.0, pct))
+    pelne = round(pct / 100 * szerokosc)
+    return "▓" * pelne + "░" * (szerokosc - pelne)
+
+
+def _etykieta_konta(i: int, stan) -> str:
+    """`username` z Apify, gdy go znamy — inaczej numer porządkowy. NIGDY token."""
+    return stan.nazwa if stan.nazwa and stan.nazwa != "?" else f"konto #{i}"
+
+
+def _wiersz_konta(i: int, stan) -> str:
+    """Jedna linia w /limity — format zależy od stanu, patrz nagłówek sekcji."""
+    etykieta = _etykieta_konta(i, stan)
+    if stan.stan == apify_credits.STAN_MARTWY:
+        return f"#{i} {etykieta} — BŁĄD 401: klucz nie działa"
+    if stan.stan == apify_credits.STAN_BRAK_ODPOWIEDZI:
+        return f"#{i} {etykieta} — brak odpowiedzi (timeout/sieć)"
+    if stan.stan == apify_credits.STAN_OK_NIEZNANE:
+        return f"#{i} {etykieta} — działa, saldo nieznane (darmowy plan?)"
+
+    s = stan.saldo
+    if s is None or s.limit_usd is None:
+        uzyte = s.uzyte_usd if s else 0.0
+        return f"#{i} {etykieta} — użyte ${uzyte:.2f} (limit nieznany)"
+    pct = 0.0 if s.limit_usd <= 0 else (s.uzyte_usd / s.limit_usd) * 100
+    ostrzezenie = "  ⚠ prawie wyczerpane" if pct >= PROG_KONTO_OSTRZEZENIE else ""
+    return (f"#{i} {etykieta}   ${s.uzyte_usd:.2f} / ${s.limit_usd:.2f}   "
+            f"{_pasek(pct)} {round(pct)}%{ostrzezenie}")
+
+
+def _tempo_zuzycia(conn) -> tuple[float | None, int]:
+    """(USD/dobę wg tempa z ostatnich 24h, liczba pobranych w tym oknie).
+
+    None zamiast liczby, gdy w oknie jest MNIEJ NIŻ `GODZIN_MIN_NA_PROGNOZE`
+    historii — inaczej świeżo zebrane trzy godziny danych ekstrapolowałyby się
+    na dobę i dałyby liczbę z sufitu, tylko ładnie sformatowaną.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), min(pobrany_at) FROM posty "
+            " WHERE pobrany_at > NOW() - INTERVAL '24 hours'")
+        ile, najstarszy = cur.fetchone()
+    ile = ile or 0
+    if not ile or najstarszy is None:
+        return None, ile
+    if najstarszy.tzinfo is None:
+        najstarszy = najstarszy.replace(tzinfo=timezone.utc)
+    rozpietosc_h = (datetime.now(timezone.utc) - najstarszy).total_seconds() / 3600
+    if rozpietosc_h < GODZIN_MIN_NA_PROGNOZE:
+        return None, ile
+    return ile * cfg_groups.CENA_USD_ZA_POST, ile
+
+
+def _pobrane_dzisiaj(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM posty WHERE pobrany_at > date_trunc('day', NOW())")
+        (ile,) = cur.fetchone()
+    return ile or 0
+
+
+def _limity(conn) -> str:
+    """Stan puli kont Apify — jedna wiadomość, czytelna na telefonie."""
+    tokeny = load_apify_tokens()
+    if not tokeny:
+        return ("💳 *PULA APIFY*\n\n"
+                "Brak skonfigurowanych kluczy (APIFY\\_API\\_TOKEN\\* — wspólna "
+                "pula z sales\\-core\\-engine).")
+
+    stany = apify_credits.pula_stanu(tokeny)
+    esc = telegram_notify._escape_md
+    kreska = "━" * 20
+
+    linie = [f"💳 *PULA APIFY — {len(stany)} kont*", kreska]
+    for i, s in enumerate(stany, 1):
+        linie.append(esc(_wiersz_konta(i, s)))
+    linie.append(kreska)
+
+    znane = [s.saldo for s in stany
+             if s.stan == apify_credits.STAN_OK_ZNANE and s.saldo is not None
+             and s.saldo.limit_usd is not None]
+    razem_zostalo = None
+    pct_puli = None
+    if znane:
+        razem_uzyte = sum(sd.uzyte_usd for sd in znane)
+        razem_limit = sum(sd.limit_usd for sd in znane)
+        razem_zostalo = razem_limit - razem_uzyte
+        pct_puli = 0.0 if razem_limit <= 0 else (razem_uzyte / razem_limit) * 100
+        linie.append(esc(f"Razem: ${razem_uzyte:.2f} z ${razem_limit:.2f} · "
+                         f"zostało ${razem_zostalo:.2f}"))
+
+    tempo, _ile_24h = _tempo_zuzycia(conn)
+    if tempo is None:
+        linie.append("Tempo zużycia: za wcześnie na prognozę (mniej niż "
+                     f"{GODZIN_MIN_NA_PROGNOZE}h historii)")
+    elif tempo <= 0:
+        linie.append("Tempo zużycia: brak pobrań w ostatnich 24h")
+    elif razem_zostalo is not None:
+        dni = razem_zostalo / tempo
+        linie.append(esc(f"Przy obecnym tempie (~${tempo:.2f}/dobę) starczy na ~{dni:.0f} dni"))
+    else:
+        linie.append(esc(f"Tempo zużycia: ~${tempo:.2f}/dobę (saldo puli nieznane — "
+                         "nie policzę, na ile starczy)"))
+
+    if pct_puli is not None and pct_puli >= PROG_PULA_OSTRZEZENIE:
+        linie.append("⚠ pula na wyczerpaniu, dolóż konta albo zejdź z częstotliwością")
+
+    martwe = sum(1 for s in stany if s.stan == apify_credits.STAN_MARTWY)
+    if martwe:
+        zywe = len(stany) - martwe
+        linie.append(f"🔑 Żywe klucze: {zywe} z {len(stany)} — {martwe} "
+                     "martwych (401), sprawdź konta w Apify")
+
+    dzisiaj = _pobrane_dzisiaj(conn)
+    linie.append(f"Pobrane dziś: {dzisiaj} postów · budżet {settings.POSTY_NA_DOBE}/dobę")
+
+    return "\n".join(linie)
+
+
 POMOC = """*Laweta Radar — bot*
 
 /dzis — ile zleceń, ile wziętych, ile km
 /ostatnie 10 — ostatnie zlecenia
+/limity — stan puli kont Apify (bez logowania na VPS)
 /stop — pauza powiadomień (fetcher zbiera dalej)
 /start — wznowienie powiadomień
 /pomoc — ten tekst
@@ -294,6 +439,8 @@ def obsluz_komende(conn, tekst: str) -> str:
         except ValueError:
             ile = DOMYSLNIE_OSTATNICH
         return _ostatnie(conn, ile)
+    if komenda in ("/limity", "/limityapi"):
+        return _limity(conn)
     if komenda == "/stop":
         if pauza_aktywna(conn):
             return "Powiadomienia są już wyciszone. /start żeby wznowić."
@@ -350,6 +497,41 @@ def _polacz():
     return powiadomienia._polacz()
 
 
+# Komendy podpowiadane w Telegramie (menu przy „/"). Jedna lista, jedno miejsce
+# — POMOC i to menu mają identyczny zestaw z tego samego powodu, dla którego
+# AKCJE jest daną, a nie serią `elif`: dopisanie komendy ma być jedną zmianą,
+# nie dwiema, z których druga zostaje zapomniana. `/limityapi` jest aliasem
+# `/limity` i nie wchodzi do menu — Telegram i tak podpowiada tylko jedną nazwę
+# na akcję, a druga nazwa istnieje wyłącznie dla wygody wpisywania z pamięci.
+KOMENDY_BOTFATHER = [
+    {"command": "dzis", "description": "ile zleceń dzisiaj, ile wziętych, ile km"},
+    {"command": "ostatnie", "description": "ostatnie zlecenia"},
+    {"command": "limity", "description": "stan puli kont Apify"},
+    {"command": "stop", "description": "pauza powiadomień"},
+    {"command": "start", "description": "wznowienie powiadomień"},
+    {"command": "pomoc", "description": "lista komend"},
+]
+
+
+def _zarejestruj_komendy() -> None:
+    """`setMyCommands` przy starcie — podpowiedź komend w Telegramie.
+
+    BEST-EFFORT i NIEBLOKUJĄCE: to jest kosmetyka menu, nie funkcja bota. Bot
+    ma długi polling do obsłużenia niezależnie od tego, czy Telegram akurat
+    przyjął tę jedną konfiguracyjną wiadomość — nieudane wywołanie loguje się
+    i pętla jedzie dalej, tak samo jak przy każdym innym wywołaniu `wywolaj`.
+    """
+    try:
+        wynik = telegram_notify.wywolaj("setMyCommands", {"commands": KOMENDY_BOTFATHER})
+    except Exception as e:  # noqa: BLE001 — kosmetyka menu nie może zablokować startu bota
+        _log(f"setMyCommands: {type(e).__name__}: {str(e)[:200]}")
+        return
+    if wynik is None:
+        _log("setMyCommands: nie udało się zarejestrować komend (patrz log wyżej)")
+    else:
+        _log(f"setMyCommands: zarejestrowano {len(KOMENDY_BOTFATHER)} komend")
+
+
 def przebieg(offset: int | None) -> int | None:
     """Jedno wywołanie getUpdates + obsługa tego, co przyszło. Oddaje nowy offset.
 
@@ -399,6 +581,7 @@ def petla() -> int:
             KTO, settings.brakujace("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
 
     _log(f"start; czat operatora={_czat_operatora()}, long polling {TIMEOUT_POLL_S}s")
+    _zarejestruj_komendy()
     offset: int | None = None
     przerwa = PRZERWA_MIN_S
     while True:
