@@ -290,6 +290,22 @@ GATE_TRYB = _txt("GATE_TRYB", "cien")
 # już są zebrane; twarde odrzucenie kasowałoby je bezpowrotnie i bez śladu.
 ALERT_ZWIERZETA = _int("ALERT_ZWIERZETA", 0)
 
+# OFERTY PRZEWOŹNIKÓW — czy o cudzym wolnym miejscu ma brzęczeć telefon.
+#
+# Na giełdach transportowych obie strony rynku piszą posty o tym samym
+# kształcie: trasa, data, telefon. „Czwartek 06.08 wolna laweta Elbląg-Lublin
+# tel. 501606207" to nie klient, tylko konkurencja z wolnym miejscem — a bez
+# tego rozróżnienia budziła telefon jak każde zlecenie.
+#
+# 0 (domyślnie) = post z `kierunek='oferta'` NIE generuje powiadomienia.
+# 1             = alertuje ze znacznikiem, jak każde inne zlecenie.
+#
+# TO NIE JEST PRZEŁĄCZNIK ZBIERANIA. Oferty lądują w bazie niezależnie od tej
+# wartości, z kompletem pól i kolumną `kierunek` — cudzy kurs na trasie, którą
+# operator i tak jedzie, bywa okazją na doładunek albo na podnajęcie, a tego nie
+# widać w danych, których się nie zapisało. Wyciszamy telefon, nie rejestr.
+ALERT_OFERTY = _int("ALERT_OFERTY", 0)
+
 # ---------------------------------------------------------------------------
 # POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
 # brzęczy telefon. ŻADEN z nich nie usuwa zlecenia z bazy ani z panelu; to jest
@@ -643,6 +659,10 @@ def opis_srodowiska() -> str:
          # koniu" jest pytaniem, na które inaczej nie ma odpowiedzi bez czytania
          # kodu. Zlecenie JEST w panelu niezależnie od tej wartości.
          f", alert_zwierzeta={'tak' if ALERT_ZWIERZETA else 'nie (tylko panel)'}"
+         # Ta sama zasada co wyżej: „czemu nie przyszedł alert o tej lawecie
+         # z Elbląga" ma mieć odpowiedź w linii startowej. Dane o ofertach są
+         # w bazie niezależnie od tej wartości.
+         f", alert_oferty={'tak' if ALERT_OFERTY else 'nie (tylko baza)'}"
          # „Czemu alert przyszedł bez mapy" ma mieć odpowiedź w linii startowej,
          # a nie dopiero w kodzie: albo wyłączone w .env, albo brak `staticmap`
          # (to drugie mówi raz services/mapa.py, przy pierwszym alercie).

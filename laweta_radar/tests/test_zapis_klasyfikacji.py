@@ -59,7 +59,7 @@ TERAZ = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
 
 MIGRACJE = ("0001_posty.sql", "0002_gate.sql", "0003_fetcher.sql",
             "0004_klasyfikacja.sql", "0005_panel.sql", "0009_werdykt_modelu.sql",
-            "0010_kategoria_ladunku.sql")
+            "0010_kategoria_ladunku.sql", "0011_kierunek.sql")
 
 # Odpowiedź modelu z KOMPLETEM pól — świadomie taka, w której żadne pole nie
 # schodzi na wartość domyślną. Post z samymi domyślnymi przeszedłby ten test

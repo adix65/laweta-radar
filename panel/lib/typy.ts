@@ -34,6 +34,18 @@ export type Pilnosc = "teraz" | "dzis" | "jutro" | "elastycznie";
  *  dokładnie jak „pojazd". */
 export type KategoriaLadunku = "pojazd" | "zwierze" | "inne";
 
+/** Po której stronie rynku stoi autor posta — z bramki albo z klasyfikatora
+ *  (kolumna `kierunek`, migracja 0011).
+ *
+ *  „oferta" znaczy, że autor sprzedaje WŁASNY przejazd: podaje trasę i termin,
+ *  którymi i tak jedzie, i zaprasza do kontaktu. To konkurencja, nie klient —
+ *  taki rekord ma `czy_zlecenie=false`, więc na domyślnej liście go NIE MA
+ *  (lista pokazuje zlecenia). Zostaje w bazie, bo cudzy kurs na trasie, którą
+ *  operator i tak jedzie, bywa okazją na doładunek.
+ *  `null` = nikt nie orzekał (rekordy sprzed migracji 0011) i zachowuje się
+ *  dokładnie jak „zlecenie". */
+export type Kierunek = "zlecenie" | "oferta" | "niejasne";
+
 export interface Zlecenie {
   fb_id: string;
   status: Status;
@@ -100,6 +112,9 @@ export interface Zlecenie {
   jezyk?: string | null;
   /** Z bramki. „zwierze" = znacznik na karcie i miejsce niżej na liście. */
   kategoria_ladunku?: KategoriaLadunku | null;
+  /** Z bramki albo z klasyfikatora. „oferta" = post przewoźnika z wolnym
+   *  miejscem, a nie zlecenie — patrz `Kierunek`. */
+  kierunek?: Kierunek | null;
 
   // --- z posta ------------------------------------------------------------
   /** Pełna, oryginalna treść. Jest TYLKO w odpowiedzi szczegółu — lista

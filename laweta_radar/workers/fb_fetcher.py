@@ -364,6 +364,7 @@ KOLUMNY_SWIADKOWIE = (
     ("zrodlo_decyzji", "0003_fetcher.sql"),
     ("pewnosc", "0004_klasyfikacja.sql"),
     ("kategoria_ladunku", "0010_kategoria_ladunku.sql"),
+    ("kierunek", "0011_kierunek.sql"),
 )
 
 
@@ -610,7 +611,7 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
                      "zrodlo_decyzji", "czy_zlecenie", "status", "stale",
                      "gate_werdykt", "gate_punkty", "gate_powod",
                      "gate_trafienia", "gate_tryb", "gate_jezyk",
-                     "kategoria_ladunku")
+                     "kategoria_ladunku", "kierunek")
     wartosci = [
         identyfikator, post["tresc"], post.get("post_url") or None,
         post.get("group_url") or None, post.get("group_name") or None,
@@ -623,6 +624,11 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
         # Dopisywanie jej drugim zapytaniem byłoby drugą okazją do porażki bez
         # żadnego objawu (patrz nota o jednym INSERT-cie wyżej).
         decyzja.kategoria_ladunku or None,
+        # Kierunek stoi tu, a nie wśród kolumn ekstrakcji, bo ma wartość TAKŻE
+        # dla postów, których model nigdy nie zobaczył — a to właśnie one są
+        # ofertami odrzuconymi przez bramkę. W liście ekstrakcji byłby NULL-em
+        # dokładnie tam, gdzie jest najbardziej potrzebny.
+        decyzja.kierunek or None,
     ]
     # Kolumny ekstrakcji lecą ZAWSZE, także gdy modelu nie pytano — wtedy jako
     # NULL-e, czyli dokładnie to, co i tak byłoby w wierszu. Jedna ścieżka SQL
@@ -635,7 +641,13 @@ def _zapisz_post(conn, identyfikator: str, post: dict, decyzja: "Decyzja",
     # `gate_at` i `ai_at` z zegara BAZY, jak dotąd. `ai_at` tylko dla wiersza
     # z werdyktem modelu: pusty znacznik czasu jest tu informacją („nie pytano"),
     # a nie brakiem.
-    aktualizowane = (*kolumny_ai, "ai_model", "zrodlo_decyzji", "czy_zlecenie")
+    # `kierunek` jest tu — w odróżnieniu od `kategoria_ladunku` — bo jako jedyna
+    # z kolumn bramki bywa NADPISYWANY przez model. Post zapisany w przebiegu,
+    # w którym API padło, ma kierunek z samego wzorca; gdy model odpowie przy
+    # kolejnym podejściu, jego odczyt ma dojechać do wiersza, a nie odbić się
+    # od ON CONFLICT.
+    aktualizowane = (*kolumny_ai, "ai_model", "zrodlo_decyzji", "czy_zlecenie",
+                     "kierunek")
     # Ten sam warunek co `_pusto`, tylko po stronie bazy. Jedno źródło nazw
     # (`kolumny_ai`), dwa renderowania — inaczej SQL i Python zaczęłyby się
     # różnić w tym, co uznają za „pusty wynik", a to jest dokładnie ta klasa
@@ -1037,6 +1049,16 @@ class Decyzja:
     # normalnie. Zmienia to, co widać w panelu i czy brzęczy telefon
     # (services/powiadomienia.ocen + ALERT_ZWIERZETA).
     kategoria_ladunku: str = gate.KAT_INNE
+    # 'zlecenie' | 'oferta' | 'niejasne' — PO KTÓREJ STRONIE RYNKU stoi autor.
+    # W odróżnieniu od kategorii ładunku to pole bierze udział w werdykcie:
+    # „oferta" znaczy, że autor sprzedaje własny przejazd, więc `czy_zlecenie`
+    # jest fałszem, a status to `smiec`. Wiersz mimo to powstaje z kompletem
+    # danych — cudzy kurs na naszej trasie bywa okazją na doładunek, a tego nie
+    # widać w danych, których się nie zapisało.
+    #
+    # WARTOŚĆ MOŻE POCHODZIĆ Z DWÓCH ŹRÓDEŁ: z bramki (wzorzec) albo z modelu
+    # (przeczytane zdanie). Rozstrzyga to `decyzja_o_poscie`.
+    kierunek: str = gate.KIERUNEK_NIEJASNY
 
 
 def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
@@ -1070,6 +1092,10 @@ def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
         "gate_trafienia": tuple(b.trafienia),
         "gate_tryb": b.tryb,
         "kategoria_ladunku": b.kategoria_ladunku,
+        # Kierunek z bramki jest wartością WYJŚCIOWĄ — dla postów, których model
+        # nigdy nie zobaczy (odrzucone, stare, przebieg bez klasyfikatora) jest
+        # też ostateczną. Model może go poniżej nadpisać.
+        "kierunek": b.kierunek,
     }
 
     # `przepusc`, nie `werdykt` — to jest DECYZJA OPERACYJNA i uwzględnia tryb
@@ -1093,6 +1119,15 @@ def decyzja_o_poscie(post: dict, prog_swiezosci: datetime, *, grupa: str = "",
                        **wspolne)
 
     czy = bool(wynik.get("czy_zlecenie"))
+    # KIERUNEK: model bije bramkę, ale TYLKO gdy cokolwiek rozstrzygnął. Model
+    # czyta zdanie, bramka dopasowuje wzorzec — przy rozbieżności rację ma model
+    # (ta sama zasada co przy kodach pocztowych w `classifier.uzupelnij_kody`,
+    # tylko w drugą stronę). Ale „niejasne" znaczy „nie umiem powiedzieć",
+    # a wtedy odczyt bramki jest lepszy niż nic: nadpisanie go pustą odpowiedzią
+    # gubiłoby jedyną informację, jaką o tym poście mamy.
+    kierunek_modelu = str(wynik.get("kierunek") or "")
+    if kierunek_modelu in (gate.KIERUNEK_ZLECENIE, gate.KIERUNEK_OFERTA):
+        wspolne["kierunek"] = kierunek_modelu
     return Decyzja(zrodlo="ai", czy_zlecenie=czy,
                    status="nowe" if czy else "smiec", stale=False,
                    powod=str(wynik.get("powod") or ""), pytano_model=True,
@@ -1482,6 +1517,12 @@ def zlecenie_do_alertu(identyfikator: str, post: dict, decyzja: Decyzja,
         # i czy dostanie znacznik w treści. Bez tego pola powiadomienie widziałoby
         # transport konia dokładnie tak samo jak transport golfa.
         "kategoria_ladunku": decyzja.kategoria_ladunku,
+        # Kierunek trafia tu na wypadek ROZBIEŻNOŚCI: bramka rozpoznała ofertę,
+        # a model mimo to orzekł „zlecenie". Wtedy — i tylko wtedy — ta funkcja
+        # w ogóle się wykonuje dla oferty, bo `czy_zlecenie=false` nie dochodzi
+        # do wysyłki. Powiadomienia mają wtedy ostatnie słowo (ALERT_OFERTY),
+        # zamiast budzić operatora cudzą lawetą jadącą własną trasą.
+        "kierunek": decyzja.kierunek,
     }
 
 

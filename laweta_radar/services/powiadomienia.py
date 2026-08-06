@@ -435,6 +435,11 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     # i dla wałacha, a to są dwa zupełnie różne telefony.
     if str(zlecenie.get("kategoria_ladunku") or "") == gate.KAT_ZWIERZE:
         linie.append(esc("🐴 TRANSPORT ZWIERZĄT — poza standardową ofertą"))
+    # ZNACZNIK OFERTY z tego samego powodu: przy ALERT_OFERTY=1 taka wiadomość
+    # dociera, a wygląda dokładnie jak zlecenie — ma trasę, datę i telefon.
+    # Bez tej linii operator dzwoni do konkurencji, żeby zaproponować jej kurs.
+    if str(zlecenie.get("kierunek") or "") == gate.KIERUNEK_OFERTA:
+        linie.append(esc("🔁 OFERTA PRZEWOŹNIKA — cudze wolne miejsce, nie zlecenie"))
     linie.append("")
     trasa = _linia_trasy(zlecenie, odbior, dostawa, pods)
     if trasa:
@@ -618,7 +623,7 @@ class Decyzja:
 
     wysylac: bool
     kod: str      # '' | 'pewnosc' | 'cisza_nocna' | 'duplikat' | 'crosspost'
-                  # | 'limit' | 'pauza' | 'zwierze'
+                  # | 'limit' | 'pauza' | 'zwierze' | 'oferta'
     powod: str
 
 
@@ -668,6 +673,23 @@ def ocen(zlecenie: dict, *, juz_wyslane: bool, crosspost_id: int | None,
         return Decyzja(False, "zwierze",
                        "transport zwierząt — poza ofertą (ALERT_ZWIERZETA=0). "
                        "Zlecenie JEST w panelu, tylko bez brzęczenia")
+
+    # OFERTA PRZEWOŹNIKA — autor sprzedaje własny przejazd, czyli konkurencja
+    # z wolnym miejscem, a nie klient. To OSTATNIA linia obrony, nie pierwsza:
+    # bramka takie posty odrzuca, a klasyfikator wystawia im `czy_zlecenie=false`
+    # i wtedy tu nie docierają w ogóle. Ten warunek pracuje dokładnie w jednym
+    # przypadku — gdy bramka rozpoznała ofertę, a model mimo to orzekł
+    # „zlecenie". Wtedy to tu rozstrzyga się, czy operator zostanie obudzony
+    # cudzą lawetą jadącą trasą, którą i tak jedzie.
+    #
+    # Obok zwierząt i z tego samego powodu: to stała preferencja operatora,
+    # a nie ocena jakości posta. ALERT_OFERTY=1 znosi regułę w całości i bez
+    # żadnej innej zmiany — dane zbierają się niezależnie od tej zmiennej.
+    if (not settings.ALERT_OFERTY
+            and str(zlecenie.get("kierunek") or "") == gate.KIERUNEK_OFERTA):
+        return Decyzja(False, "oferta",
+                       "oferta przewoźnika, nie zlecenie (ALERT_OFERTY=0). "
+                       "Post JEST w bazie z kierunek='oferta', tylko bez brzęczenia")
 
     # PRÓG DZIAŁA TYLKO NA ZNANEJ LICZBIE. Nieznana pewność (NULL w bazie, pusty
     # string, śmieć) NIE jest niską pewnością i nie ma prawa wyciszyć alertu:
@@ -852,11 +874,13 @@ def powiadom_o_zleceniu(zlecenie: dict) -> bool:
         jezyk            'pl'|'de'|'cs'|'sk' z bramki
         kategoria_ladunku 'pojazd'|'zwierze'|'inne' z bramki — 'zwierze' dokłada
                          znacznik do treści i (przy ALERT_ZWIERZETA=0) wycisza alert
+        kierunek         'zlecenie'|'oferta'|'niejasne' — 'oferta' dokłada znacznik
+                         i (przy ALERT_OFERTY=0) wycisza alert
 
     False znaczy „nie wysłano" i NIE jest zaproszeniem do ponowienia. Powodów
-    jest osiem i wszystkie są normalne: duplikat, crosspost, pauza z `/stop`,
-    transport zwierząt, niska pewność, cisza nocna, przekroczony limit, awaria
-    transportu. Każdy stoi w logu z nazwą.
+    jest dziewięć i wszystkie są normalne: duplikat, crosspost, pauza z `/stop`,
+    transport zwierząt, oferta przewoźnika, niska pewność, cisza nocna,
+    przekroczony limit, awaria transportu. Każdy stoi w logu z nazwą.
 
     Przy DWÓCH rozpoznanych punktach trasy alert idzie jako zdjęcie z mapą
     (`_wyslij_alert`). Nie zmienia to ani decyzji o wysyłce, ani przycisków,
@@ -1004,6 +1028,20 @@ def _obsluz_pominiecie(conn, fb_id: str, decyzja: Decyzja,
         # kursów przeszło obok" — a to jest dokładnie ta liczba, od której zależy
         # decyzja o przyczepie do koni albo o podnajmowaniu ich dalej.
         _zapisz(conn, fb_id=fb_id, kanal="pominiete_zwierze",
+                tresc=decyzja.powod, message_id=None)
+        return
+
+    if decyzja.kod == "oferta":
+        # Ta sama konieczność co przy zwierzętach. Do tego miejsca dochodzą
+        # WYŁĄCZNIE oferty, którym model wystawił `czy_zlecenie=true` wbrew
+        # bramce — czyli takie, które podsumowanie ranne widzi jako zlecenie
+        # bez wiersza w `powiadomienia` i przysłałoby o świcie. Bez tego zapisu
+        # ALERT_OFERTY=0 opóźniałby alert zamiast go wyłączać.
+        #
+        # Wiersz odpowiada przy okazji na pytanie „ile cudzych kursów szło
+        # naszą trasą" — czyli na to, ile było okazji na doładunek:
+        #   SELECT count(*) FROM powiadomienia WHERE kanal = 'pominiete_oferta';
+        _zapisz(conn, fb_id=fb_id, kanal="pominiete_oferta",
                 tresc=decyzja.powod, message_id=None)
         return
 

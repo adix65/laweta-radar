@@ -260,6 +260,24 @@ def _raport(wiersze: list[dict], prog: int, ma_werdykt: bool, limit: int) -> int
         print("  tej zmiennej zlecenia są w bazie i w panelu — to jest ta liczba,")
         print("  od której zależy decyzja o przyczepie do koni.")
 
+    # OFERTY PRZEWOŹNIKÓW — jedyne odrzucenie, którego NIE widać w punktacji.
+    # Liczone z TREŚCI (jak zwierzęta wyżej), więc odpowiadają także wiersze
+    # sprzed migracji 0011 i pokazują wynik AKTUALNYCH wzorców.
+    oferty = [w for w in z_bramka
+              if gate_mod.kierunek(w["tresc"]) == gate_mod.KIERUNEK_OFERTA]
+    if oferty:
+        _naglowek("OFERTY PRZEWOŹNIKÓW (konkurencja z wolnym miejscem)")
+        print(f"  postów w oknie:              {len(oferty)} z {len(z_bramka)}")
+        # Te, którym MODEL powiedział „zlecenie" — czyli te, przez które
+        # w produkcji dzwonił telefon. Po włączeniu bramki nie dojdą do modelu
+        # w ogóle, a przy GATE_TRYB=cien dochodzą i to jest ich licznik.
+        mimo_to = sum(1 for w in oferty if w["ai"] is True)
+        print(f"  z tego model uznał za zlecenia: {mimo_to}"
+              "   (tyle alertów o cudzej lawecie)")
+        print("  Oferty ZOSTAJĄ w bazie z kierunek='oferta' — cudzy kurs na trasie,")
+        print("  którą operator i tak jedzie, bywa okazją na doładunek. Alert idzie")
+        print("  tylko przy ALERT_OFERTY=1.")
+
     if not ma_werdykt:
         _naglowek("MACIERZ POMYŁEK — NIEDOSTĘPNA")
         print(f"  Tabela `posty` nie ma kolumn z werdyktem modelu"
