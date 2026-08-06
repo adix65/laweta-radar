@@ -551,6 +551,7 @@ laweta_radar/
     shared_env.py      # dociąga klucze Apify ze WSPÓLNEGO .env sales-core-engine
     groups.py          # lista grup FB — dane, nie kod
     frazy_grup.py      # frazy wyszukiwania grup (PL/DE/CS/SK) — dane, nie kod
+    zrodla_proxy.py    # źródła darmowej puli proxy — dane, nie kod
   api/
     main.py            # FastAPI: montuje routery + /health
     auth.py            # jeden token w nagłówku, zero ról
@@ -581,7 +582,8 @@ laweta_radar/
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
-    odswiez_proxy.py   # publiczna lista proxy z GitHuba -> WERYFIKACJA -> plik puli
+    odswiez_proxy.py   # dziesięć list proxy z GitHuba -> WERYFIKACJA etapowa -> plik puli
+    setup_cron.sh      # instaluje cron puli proxy (pełne co 2h + szybka kontrola 15 min)
   tests/               # testy offline (bez sieci) + integracyjne (z bazą)
     test_zapis_klasyfikacji.py  # sam INSERT do `posty`, na prawdziwym Postgresie
     test_przebieg_do_bazy.py    # CAŁY przebieg: Apify -> model -> baza -> alert
@@ -647,12 +649,17 @@ Apify, nie dane.
 > bandytą (`services/bandit.py`): run wydany na martwą grupę to run **zabrany
 > drugiemu systemowi**, a nie tylko zmarnowany.
 
-**Darmowa pula proxy zostaje wyłączona.** `APIFY_PROXY_POOL=1` nie jest tu
-wspierane i nie ma wpisu odświeżania w cronie — odświeżanie zwracało zero żywych
-adresów z 411 kandydatów, a jedyny stary wpis przejmował przez rendezvous hashing
-komplet kont i zamieniał runy w timeouty. Zmienna jest też wykluczona
-z dziedziczenia, więc włączenie puli w tamtym repo nie włączy jej tutaj.
-Szczegóły: `docs/APIFY-PROXY.md`.
+**Darmowa pula proxy jest domyślnie wyłączona**, ale — inaczej niż wcześniej —
+JEST wspierana: `scripts/odswiez_proxy.py` pobiera z dziesięciu źródeł naraz
+(`config/zrodla_proxy.py`), weryfikuje etapowo i zapisuje tylko adresy, które
+realnie dochodzą do Apify. Pierwszy pomiar w tym repo (jedno źródło) wyszedł
+źle — zero żywych adresów z 411 kandydatów, a jedyny stary wpis przejmował
+przez rendezvous hashing komplet kont i zamieniał runy w timeouty — stąd
+domyślne wyłączenie i wymóg świadomego włączenia PO zobaczeniu liczby. Cron
+(pełne odświeżenie co 2h + szybka kontrola co 15 min) instaluje się sam, gdy
+`APIFY_PROXY_POOL=1` (`scripts/setup_cron.sh`). Zmienna jest wykluczona
+z dziedziczenia ze wspólnego `.env`, więc włączenie puli w tamtym repo nie
+włączy jej tutaj po cichu. Szczegóły: `docs/APIFY-PROXY.md`.
 
 ## Zasady obowiązujące w całym repo
 

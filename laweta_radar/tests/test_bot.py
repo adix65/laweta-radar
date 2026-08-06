@@ -496,7 +496,7 @@ def test_limity_sekcja_proxy_niekonfigurowane(monkeypatch):
     monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["t1"])
     monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
     pusta_cfg = bot.apify_proxy.load_proxy_config({})
-    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: pusta_cfg)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: pusta_cfg)
     conn = _Polaczenie([(0, None), (0,)])
     tekst = bot._limity(conn)
     assert "nieskonfigurowane" in tekst
@@ -509,7 +509,7 @@ def test_limity_sekcja_proxy_pokazuje_pule_i_przypisanie_bez_hasla(monkeypatch):
     cfg = bot.apify_proxy.load_proxy_config(
         {"APIFY_PROXY_URLS": "http://user:tajnehaslo@a.example:8000,"
                              "http://user:tajnehaslo@b.example:8000"})
-    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
     monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
     conn = _Polaczenie([(0, None), (0,)])
     tekst = bot._limity(conn)
@@ -526,7 +526,7 @@ def test_limity_sekcja_proxy_oznacza_kwarantanne(monkeypatch):
     monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
     cfg = bot.apify_proxy.load_proxy_config({"APIFY_PROXY_URLS": "http://u:p@a.example:8000"})
     przypisany = bot.apify_proxy.proxy_for_token("tok_a", cfg)
-    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
     monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy",
                         lambda conn, urls: {przypisany: {"status": "kwarantanna"}})
     conn = _Polaczenie([(0, None), (0,)])
@@ -541,7 +541,7 @@ def test_limity_sekcja_proxy_bez_przypisania_pokazuje_ip_vpsa(monkeypatch):
                         lambda tokens, **k: [_konto_ok(), _konto_ok(nazwa="k2")])
     cfg = bot.apify_proxy.load_proxy_config(
         {"APIFY_API_TOKEN1": "tok_a", "APIFY_PROXY1": "http://u:p@dedicated.example:8000"})
-    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
     conn = _Polaczenie([(0, None), (0,)])
     tekst = bot._limity(conn)
     assert "dedicated.example:8000" in tekst
