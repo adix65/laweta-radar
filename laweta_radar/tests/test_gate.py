@@ -1151,6 +1151,65 @@ def test_cs_sk_kontrola_oferty_nadal_odpadaja():
     assert not przepuszcza("Volne miesto na odtahovke Praha - Wien")
 
 
+# ===========================================================================
+# REGRESJA — „vyťazovák", potoczna słowacka nazwa lawety z wciągarką
+#
+# Realny post z grupy „Vyťazováky CZ/SK - odťah a preprava vozidel":
+# „Hladam vytazovak Polsko Slovensko" dostawał ZERO punktów i wylatywał, bo
+# słownik nie znał słowa podstawowego dla całej grupy. Przypadki przy JAWNYM
+# prog=5 z tego samego powodu co wyżej: zlecenie z czasownikiem szukania ma
+# być twardym przepuszczeniem, nie przypadkiem na granicy punktacji.
+# ===========================================================================
+def test_cs_sk_vytazovak_z_czasownikiem_szukania_to_twarde_przepuszczenie():
+    for tresc in (
+        # Post z zadania, bez diakrytyków — tak wygląda w grupie.
+        "Hladam vytazovak Polsko Slovensko",
+        # To samo z diakrytykami — normalizacja ma je zbić do tej samej formy.
+        "Hľadám vyťahovák Poľsko Slovensko",
+        # „ť" pisane jako „t" z apostrofem — klawiatura bez słowackiego układu.
+        "Zhanam vyt'ahovak Zilina - Krakov",
+        "Potrebujem plosinu do Zvolena",
+        "Hladam navijak na vytiahnutie auta z priekopy",
+    ):
+        wynik = w(tresc, prog=5)
+        assert wynik.werdykt, f"miało przejść przy progu 5: {tresc!r}"
+        assert wynik.powod == "prosba wprost", (
+            f"miało przejść WARSTWĄ 2, nie punktacją: {tresc!r} -> {wynik.powod}")
+
+
+def test_cs_sk_vytazovak_punktuje_bez_czasownika_szukania():
+    """Posty telegraficzne nie mają „hladam" — samo słowo waży +3 jak „odtah".
+
+    Przed zmianą: „surne" +3 i koniec, 3 < 5. Po zmianie rzeczownik domyka
+    post do progu punktacją, bez twardego przepuszczenia.
+    """
+    assert przepuszcza("Treba vytazovak Kosice - Presov, surne", prog=5)
+    assert przepuszcza("Treba plosinu Kosice - Zvolen, surne", prog=5)
+
+
+def test_cs_sk_vytazovak_kontrola_podazy_nadal_odpada():
+    """Rzeczownik wszedł do punktacji, więc strona PODAŻY musi odpadać nazwaną
+    regułą — inaczej reklama dozbierałaby punkty z „tel" i trasy."""
+    wynik = w("Ponukam vytazovak 24/7")
+    assert not wynik.werdykt, "autopromocja miała odpaść"
+    assert wynik.powod == "autopromocja", wynik.powod
+    assert not przepuszcza("Predam vytazovak, dobry stav")
+
+
+def test_cs_sk_volny_vytazovak_to_oferta_przewoznika():
+    """Odpowiednik polskiej „wolnej lawety" — kierunek rozstrzyga przed
+    warstwami, a POPYT bije OFERTĘ."""
+    wynik = w("Volny vytazovak Kosice - Zilina, tel. 0908 123 456")
+    assert not wynik.werdykt
+    assert wynik.powod == "oferta przewoznika"
+    # Ten sam rzeczownik z czasownikiem szukania NIE odpada jako oferta —
+    # sygnał popytu powstrzymuje odrzucenie kierunkiem, jak wszędzie w tej
+    # tabeli. Oba sygnały naraz dają „niejasne", które niczego nie odrzuca.
+    wynik = w("Hladam volny vytazovak Kosice - Zilina", prog=5)
+    assert wynik.kierunek != g.KIERUNEK_OFERTA
+    assert wynik.powod != "oferta przewoznika"
+
+
 def test_de_potrzeba_z_transportem_to_twarde_przepuszczenie():
     """Ta sama konstrukcja po niemiecku: przed zmianą twardym przepuszczeniem
     był tylko wariant „brauche ... transport"; „suche Transport" wisiał na
