@@ -67,6 +67,15 @@ gotowego klienta HTTP. Trzy rzeczy są tu istotne:
    kolejnego proxy przenosi na nie ~1/N kont, a nie prawie wszystkie.
 3. **Zero zmiany zachowania bez konfiguracji.** Pusty `.env` = wszystko działa
    (ruch wprost z VPS-a), tylko workery wypisują ostrzeżenie w logu.
+4. **Wyrównanie PO hashu.** Sam rendezvous hashing rozkłada konta po puli tylko
+   STATYSTYCZNIE równo (przy puli wielkości równej liczbie kluczy część adresów
+   dostaje dwa-trzy konta, część żadnego). `apify_proxy._wyrownaj_przypisania`
+   (wołane, gdy `run()` policzy konfigurację ze WSZYSTKIMI żywymi kluczami tego
+   przebiegu) dokłada drugi przebieg: konto, którego pierwszy wybór jest już
+   zajęty, dostaje najlepiej dopasowany WOLNY adres zamiast dzielić się z kimś
+   innym. Przy puli ≥ liczba kluczy każde konto kończy z WŁASNYM adresem.
+   Przypisanie zostaje stabilne dla tego samego zestawu (klucze, pula) —
+   zmienia się wyłącznie, gdy któryś z tych zbiorów faktycznie się zmieni.
 
 Objęte jest każde miejsce, które gada z Apify — dziś to fetcher grup
 (`laweta_radar/workers/fb_fetcher.py`), bo innego wejścia do Apify w tym repo
@@ -148,71 +157,115 @@ Login i hasło w URL-u trzeba zakodować procentowo, jeśli zawierają `@ : / ? 
 Na przykład hasło `p@ss:word` zapisujesz jako `p%40ss%3Aword`. Niezakodowane `@`
 rozjeżdża parsowanie adresu i ruch pójdzie nie tam, gdzie miał iść.
 
-### 4. Pula z pliku — WYŁĄCZONA, nie włączaj
+### 4. Pula z pliku — darmowa, odświeżana z WIELU źródeł
 
-`APIFY_PROXY_POOL` jest **wyłączone i ma takie zostać.** W repo źródłowym pulę
-wyłączono 2026-07-31 i decyzja przenosi się tutaj bez zmian.
+`APIFY_PROXY_POOL` jest **domyślnie wyłączone** — włączasz je świadomie, PO
+zobaczeniu, ile adresów realnie przeżywa weryfikację (patrz generator niżej).
 
-Powód jest pomiarowy, nie ideologiczny. Odświeżenie zwracało **zero
-zweryfikowanych adresów z 411 kandydatów**. W pliku zostawał jeden stary wpis,
-odpowiadający w ~20% prób — a rendezvous hashing kierował przez ten jeden wpis
-**komplet kont**. Scrapery zbierały timeouty na wywołaniach, za które Apify i tak
-nalicza. **Pula, której nikt nie odświeża, jest gorsza niż jej brak**, a plik
-leżący na dysku wygląda w logu identycznie w obu przypadkach.
+Pierwszy pomiar w tym repo (2026-07-31, **jedno** źródło) wyszedł źle: **zero
+zweryfikowanych adresów z 411 kandydatów**, a jeden stary wpis, który został
+w pliku, przejmował przez rendezvous hashing **komplet kont** i zamieniał runy
+w timeouty — za które Apify i tak nalicza. Wniosek nie brzmiał „darmowe proxy
+nie działa" — brzmiał: **pula, której nikt nie odświeża, jest gorsza niż jej
+brak**, i **jedno źródło daje za mało kandydatów, żeby ten pomiar w ogóle miał
+sens**. Generator dziś pobiera z **dziesięciu** źródeł naraz i weryfikuje
+etapowo — patrz niżej.
 
-`APIFY_PROXY_POOL*` jest też celowo **wykluczone z dziedziczenia** ze wspólnego
+`APIFY_PROXY_POOL*` jest celowo **wykluczone z dziedziczenia** ze wspólnego
 `.env` — gdyby ktoś włączył pulę w sales-core-engine, nie włączy jej tutaj po
 cichu.
 
-Kod czytający plik puli został w module nietknięty (jest kopią 1:1) i zadziała,
-jeśli świadomie ustawisz `APIFY_PROXY_POOL=1` i `APIFY_PROXY_POOL_FILE`.
-Format: `{"updated_at": "<ISO8601>", "proxies": [{"url": "...", "apify_ok": true}]}`,
-brane są wyłącznie wpisy z `apify_ok: true`.
+Format pliku: `{"updated_at": "<ISO8601>", "proxies": [{"url": "...",
+"apify_ok": true, "zrodlo": "...", "czas_ms": 842, "passy_pod_rzad": 3}]}` —
+`workers/apify_proxy.py` bierze wyłącznie wpisy z `apify_ok: true` i czyta
+`url`; `zrodlo`/`czas_ms`/`passy_pod_rzad` to RANKING do wglądu (patrz niżej),
+nieużywany przez samo przypisanie token→proxy.
 
-#### Generator: `scripts/odswiez_proxy.py`
+#### Generator: `scripts/odswiez_proxy.py` — dziesięć źródeł, weryfikacja etapowa
 
 Zdanie „pula, której nikt nie odświeża, jest gorsza niż jej brak" ma drugą
-połowę: **pulę odświeżaną da się w ogóle rozważać.** Generator pobiera publiczną
-listę z GitHuba (domyślnie
-[proxifly/free-proxy-list](https://github.com/proxifly/free-proxy-list)),
-sprawdza KAŻDY adres i zapisuje wyłącznie te, przez które realnie doszedł do
-`api.apify.com`.
+połowę: **pulę odświeżaną da się w ogóle rozważać, jeśli ma z czego wybierać.**
+Generator pobiera z listy zdefiniowanej w `laweta_radar/config/zrodla_proxy.py`
+(proxifly, TheSpeedX, monosans, jetkai, ShiftyTR, roosterkid, zloi-user —
+protokoły + kraje, po jednym pliku na wpis), scala i weryfikuje.
 
 ```bash
-python laweta_radar/scripts/odswiez_proxy.py --sucho      # plan, bez sieci
-python laweta_radar/scripts/odswiez_proxy.py              # pobierz i zweryfikuj
-python laweta_radar/scripts/odswiez_proxy.py --limit 200  # szybciej, na próbę
+python laweta_radar/scripts/odswiez_proxy.py --sucho        # plan, bez sieci
+python laweta_radar/scripts/odswiez_proxy.py                # pełne odświeżenie
+python laweta_radar/scripts/odswiez_proxy.py --limit 2000   # szybciej, na próbę
+python laweta_radar/scripts/odswiez_proxy.py --tylko-pula   # SZYBKA KONTROLA (patrz cron niżej)
 ```
 
-Weryfikacja idzie **TLS-em do api.apify.com i bez żadnego klucza**. Poprawny
-handshake z certyfikatem Apify dowodzi, że doszliśmy tam naprawdę; brak klucza
-znaczy, że przez cudze proxy nie leci nic wrażliwego. Odpowiedź `401` jest
-sukcesem — pytanie brzmi „czy dojdę", nie „czy mnie wpuszczą". To rozróżnienie
-jest sednem: „proxy żyje" i „proxy dochodzi do Apify" to dwie różne rzeczy,
-a w puli liczy się wyłącznie druga.
+**Każde źródło jest niezależne.** Awaria jednego (404, zmieniona struktura
+repo, timeout) NIE przerywa pobierania pozostałych — log pokazuje, ile
+kandydatów dało każde źródło i ile z nich przeszło. Repozytoria proxy
+zmieniają strukturę i znikają (patrz komentarz przy `mmpx12` w
+`config/zrodla_proxy.py` — usunięty po weryfikacji, nie zgadywany), więc
+literówkę albo martwe źródło widać jednym spojrzeniem w logu, a naprawia się
+jedną linią w pliku źródeł, bez dotykania logiki.
 
-**Zrób najpierw jeden przebieg i spójrz na liczbę.** Pomiar wyżej (0 z 411) to
-nie jest wynik, który generator unieważnia — to jest wynik, który generator
-POKAZUJE, zamiast pozwolić mu gnić w pliku. Jeśli u ciebie wyjdzie podobnie,
+**Skala zmienia wąskie gardło.** Dziesięć źródeł to rząd 20-50 tysięcy
+kandydatów po deduplikacji (po `host:port`, niezależnie od protokołu i
+źródła) — pełna weryfikacja WSZYSTKICH trwałaby godziny. Dlatego idzie w
+**trzech etapach**, od najtańszego:
+
+1. **Filtr formalny** (bez sieci) — poprawny `host:port`, odrzucenie adresów
+   prywatnych (10.x/192.168.x/127.x i pokrewne), dedup.
+2. **TCP connect** (`PROXY_CHECK_PARALLEL_TCP`, domyślnie 250 naraz, timeout
+   2 s) — goły connect, bez TLS i HTTP, odsiewa 80-90% martwych adresów za
+   ułamek kosztu etapu 3.
+3. **Cztery pełne testy** (`PROXY_CHECK_PARALLEL_HTTP`, domyślnie 32 naraz) —
+   dokładnie te z sekcji „Weryfikacja przed dopuszczeniem do puli" niżej, na
+   tym, co przeżyło etap 2. **PRZERYWA**, gdy zbierze `DOCELOWA_LICZBA_PROXY`
+   (domyślnie 3x liczba kluczy `APIFY_API_TOKEN*`) zaakceptowanych adresów —
+   reszta kandydatów zostaje NIEPRZETESTOWANA, bo nie ma sensu sprawdzać
+   dziesiątek tysięcy adresów, żeby użyć czterdziestu.
+
+Kolejność kandydatów jest **losowana przy każdym odświeżeniu** (po dedupie,
+przed etapem 2) — inaczej zawsze przechodziłyby te same adresy z początku
+listy pierwszego źródła, a pula byłaby ciągle ta sama mimo dziesięciu źródeł.
+
+**Ranking, nie goła lista.** Do pliku, obok adresu, trafia `zrodlo` (które
+źródło go dało — po tygodniu widać, które źródła warto trzymać), `czas_ms`
+(czas ostatniej odpowiedzi) i `passy_pod_rzad` (ile PEŁNYCH odświeżeń z rzędu
+przeszedł, dziedziczone z poprzedniego pliku — adres, który wypadł choć raz,
+wraca z passą 1). Plik jest zapisany posortowany od najlepszego. Samo
+przypisanie token→proxy nadal liczy czysty rendezvous hashing (kolejność w
+pliku go nie rusza) — ranking jest do wglądu operatora, nie do algorytmu.
+
+**Zrób najpierw jeden przebieg i spójrz na liczbę.** Zero zweryfikowanych
+adresów nie jest wynikiem, który generator unieważnia — jest wynikiem, który
+POKAZUJE, zamiast pozwolić mu gnić w pliku. Jeśli u ciebie wyjdzie zero,
 odpowiedź brzmi: płatne proxy (`APIFY_PROXY_URLS` / `APIFY_PROXY_URL`), nie
 częstszy cron.
 
-Cron ma sens **wyłącznie** razem z `APIFY_PROXY_POOL=1` — plik starszy niż
-`APIFY_PROXY_POOL_MAX_AGE_H` (domyślnie 6 h) worker i tak zgłasza jako stary:
+**Cron — dwupoziomowy, instaluje się SAM** (`scripts/setup_cron.sh`, wołany
+automatycznie przez `setup.sh`/`update.sh`, gdy `laweta_radar/.env` ma
+`APIFY_PROXY_POOL=1`):
 
 ```cron
-17 */3 * * * cd /home/ubuntu/laweta-radar && ./venv/bin/python laweta_radar/scripts/odswiez_proxy.py >> /var/log/laweta/proxy.log 2>&1
+0 */2 * * *   cd /home/ubuntu/laweta-radar && ./venv/bin/python laweta_radar/scripts/odswiez_proxy.py             >> /var/log/laweta/proxy.log 2>&1
+*/15 * * * *  cd /home/ubuntu/laweta-radar && ./venv/bin/python laweta_radar/scripts/odswiez_proxy.py --tylko-pula >> /var/log/laweta/proxy.log 2>&1
 ```
 
-Dwa zachowania, które są tu decyzją, a nie szczegółem:
+Darmowe proxy padają w **minutach**, nie godzinach — sam cykl co 2h zostawiałby
+konta na martwych adresach przez większość tego czasu. `--tylko-pula`
+(SZYBKA KONTROLA) sprawdza WYŁĄCZNIE adresy już w puli (tanio — bez
+pobierania źródeł), wyrzuca martwe i, jeśli po czyszczeniu zostało mniej niż
+liczba kluczy, odpala PEŁNE odświeżenie od razu, nie czekając na następny
+cykl dwugodzinny. Instalacja jest idempotentna (`bash
+laweta_radar/scripts/setup_cron.sh`, zdjęcie: `--usun`) — puszczona drugi raz
+podmienia stare wpisy zamiast dokładać kopie.
 
-- **Brak sieci NIE czyści puli.** Nieudane pobranie listy zostawia stary plik
-  nietknięty i kończy kodem 1. Stara pula jest zła, ale pusta jest gorsza, gdy
-  powodem jest zerwane łącze, a nie martwe adresy.
-- **Zero działających adresów zapisuje pustą pulę**, jawnie, i też kończy kodem
-  1. To jest dokładnie ta sytuacja z pomiaru: pusta pula przy
-  `APIFY_PROXY_REQUIRED=1` zatrzymuje zbieranie, zamiast puścić komplet kont
-  przez jeden przeżyty wpis.
+Dwa zachowania, które są tu decyzją, a nie szczegółem (bez zmian względem
+wersji jednożródłowej):
+
+- **Brak sieci NIE czyści puli.** Nieudane pobranie WSZYSTKICH źródeł
+  zostawia stary plik nietknięty i kończy kodem 1. Stara pula jest zła, ale
+  pusta jest gorsza, gdy powodem jest zerwane łącze, a nie martwe adresy.
+- **Zero działających adresów zapisuje pustą pulę**, jawnie, i też kończy
+  kodem 1. Pusta pula przy `APIFY_PROXY_REQUIRED=1` zatrzymuje zbieranie,
+  zamiast puścić komplet kont przez jeden przeżyty wpis.
 
 **Uczciwie o darmowych adresach**, gdyby kusiło: żyją krótko, są współdzielone
 przez tysiące ludzi i część jest już spalona na popularnych serwisach. Psują też
@@ -229,6 +282,14 @@ Bez działającego proxy workery Apify kończą **czysto** (komunikat + wyjście
 zamiast wychodzić z gołego IP VPS-a. Domyślnie `0`. Zły URL proxy zatrzymuje run
 **zawsze**, niezależnie od tej flagi: cichy fallback na bezpośrednie wyjście byłby
 dokładnie tym, czego chcemy uniknąć.
+
+**Wyczerpanie ŻYWYCH proxy** (wszystkie adresy puli naraz w kwarantannie) to
+INNY przypadek niż pojedynczy padnięty adres — ten obsługuje samoleczenie
+niżej. Przy `APIFY_PROXY_REQUIRED=1` fetcher sprawdza to na starcie przebiegu
+(`apify_proxy.zywe_proxy_w_puli`) i, jeśli wynik to zero, **przerywa PRZED
+pierwszym wywołaniem Apify** oraz wysyła alert na Telegram
+(`_alert_pula_proxy_wyczerpana`) — zamiast puszczać każdy klucz po kolei przez
+padnięte adresy, aż wyczerpie limit prób samoleczenia na każdym z nich.
 
 ## Weryfikacja (zrób to po konfiguracji)
 
@@ -324,6 +385,14 @@ do Apify" niżej), nie prosto do puli. Pierwsza próba idzie zwykłą, lepką
 ścieżką bez dotykania bazy — baza wchodzi do gry dopiero po pierwszej awarii,
 żeby happy path (99% wywołań) nie płacił za nic.
 
+**Eskalacja.** Trzy awarie Z RZĘDU (licznik `ile_bledow` zerowany wyłącznie
+przez udaną ponowną weryfikację, `apify_proxy.oznacz_aktywne`) wydłużają
+kwarantannę z 30 minut do **doby** (`KWARANTANNA_ESKALACJA_PROG` /
+`KWARANTANNA_ESKALACJA_MIN`) — adres, który wraca za pół godziny tylko po to,
+żeby paść znowu, marnuje cykle weryfikacji bez szans na co innego. Darmowe
+adresy bywają chwilowo przeciążone (stąd 30 minut na start, nie od razu doba),
+ale trzy awarie z rzędu to już wzorzec, nie przypadek.
+
 Alternatywnie, `transient_key_switches` w `KeyRotator` (rozsądnie: 2) przerzuca
 na **kolejny klucz** po kilku nieudanych próbach transportu tego samego —
 sensowne, gdy samoleczenie proxy per klucz akurat nie pomogło. Bez
@@ -366,9 +435,11 @@ pierwszym z dwóch pierwszych testów nie potrzebuje trzeciego zapytania.
 
 - ~~**Generatora darmowej puli proxy.**~~ Był tu pominięty świadomie; wrócił jako
   `scripts/odswiez_proxy.py` (sekcja 4), bo pominięcie zostawiało tylko gorszą
-  z dwóch opcji: pulę bez odświeżania. Sama pula nadal jest **domyślnie
-  wyłączona** i nadal nie jest zalecana — zmieniło się to, że da się ją włączyć
-  świadomie, z odświeżaniem i z liczbą działających adresów przed oczami.
+  z dwóch opcji: pulę bez odświeżania. Od pierwszej wersji (jedno źródło, 0 z
+  411) urósł do dziesięciu źródeł (`config/zrodla_proxy.py`) z etapową
+  weryfikacją i cronem dwupoziomowym instalującym się samemu. Pula nadal jest
+  **domyślnie wyłączona** — włączasz ją świadomie, z liczbą działających
+  adresów przed oczami, a nie na wiarę.
 - ~~**Monitora kredytów Apify.**~~ Był tu pominięty świadomie z tego samego
   powodu co darmowa pula: poll wszystkich kont naraz z jednego adresu to
   dokładnie ten sygnał multi-accountingu, przed którym broni cała ta strona.

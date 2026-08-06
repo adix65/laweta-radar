@@ -214,6 +214,11 @@ class ProxyConfig:
     pool_from_file: int = 0        # ile wpisów puli przyszło z darmowej puli (pliku)
     pool_age_h: float | None = None                         # wiek pliku puli w godzinach
     warnings: tuple[str, ...] = ()
+    # token -> proxy PO wyrównaniu (patrz `_wyrownaj_przypisania`). Puste, gdy
+    # `load_proxy_config` dostał `tokens=None` — wtedy `proxy_for_token` liczy
+    # samym rendezvous hashingiem, bez wiedzy o kolizjach z innymi tokenami
+    # (zachowanie sprzed wyrównania, patrz docstring `proxy_for_token`).
+    balanced: dict[str, str] = field(default_factory=dict)
 
     @property
     def enabled(self) -> bool:
@@ -231,6 +236,7 @@ class ProxyConfig:
                 f"gateway={'tak' if self.gateway else 'nie'}, "
                 f"sticky_per_key={self.sticky_per_key}, required={self.required}, "
                 f"tokens_znanych={len(self.token_index)}, "
+                f"wyrownanych={len(self.balanced)}, "
                 f"warnings={len(self.warnings)})")
 
 
@@ -339,8 +345,16 @@ def _token_index_map(env) -> dict[str, int]:
     return out
 
 
-def load_proxy_config(env=None) -> ProxyConfig:
-    """Zbierz konfigurację proxy ze środowiska. Rzuca ApifyProxyError przy złym URL-u."""
+def load_proxy_config(env=None, tokens=None) -> ProxyConfig:
+    """Zbierz konfigurację proxy ze środowiska. Rzuca ApifyProxyError przy złym URL-u.
+
+    `tokens` — opcjonalna lista WSZYSTKICH tokenów tego przebiegu. Podana, włącza
+    wyrównanie PO hashu (`_wyrownaj_przypisania`): rendezvous hashing sam z siebie
+    rozkłada tokeny po puli tylko STATYSTYCZNIE równo (przy puli wielkości równej
+    liczbie kluczy część adresów dostaje dwa konta, część żadnego — zwykłe
+    balls-in-bins), a wyrównanie PO fakcie przenosi nadmiarowe konto na wolny
+    adres, jeśli taki jest. Bez `tokens` (domyślnie) zachowanie jest DOKŁADNIE
+    takie jak przed wyrównaniem — `cfg.balanced` zostaje pustym słownikiem."""
     env = os.environ if env is None else env
     warnings: list[str] = []
 
@@ -432,15 +446,23 @@ def load_proxy_config(env=None) -> ProxyConfig:
                 f"pulę (APIFY_PROXY_POOL=0); ścieżka: APIFY_PROXY_POOL_FILE"
             )
 
+    token_index = _token_index_map(env)
+    balanced: dict[str, str] = {}
+    if tokens:
+        # Zdefiniowana NIŻEJ w module (funkcje modułowe rozwiązują się przy
+        # wywołaniu, nie przy definicji) — patrz `_wyrownaj_przypisania`.
+        balanced = _wyrownaj_przypisania(list(tokens), tuple(pool), per_key, token_index)
+
     return ProxyConfig(
         per_key=per_key,
         pool=tuple(pool),
         gateway=gateway,
         required=(env.get("APIFY_PROXY_REQUIRED") or "").strip().lower() in _TRUTHY,
-        token_index=_token_index_map(env),
+        token_index=token_index,
         pool_from_file=pool_from_file,
         pool_age_h=pool_age_h,
         warnings=tuple(warnings),
+        balanced=balanced,
     )
 
 
@@ -502,13 +524,13 @@ def _pick_from_pool(token: str, pool) -> str:
       • zmiana hasła u dostawcy nie rusza NICZEGO (waga liczona z tożsamości
         proxy, patrz _proxy_identity).
 
-    UWAGA (świadomy kompromis): rozkład jest równomierny STATYSTYCZNIE, nie 1:1.
-    Przy puli wielkości równej liczbie kont część adresów obsłuży dwa i więcej kont,
-    a część zostanie nieużyta — tak działa rozrzut losowy. Wybieramy to zamiast
-    przydziału idealnie równego, bo ten musiałby zależeć od CAŁEJ listy kluczy:
-    dołożenie jednego konta przesuwałoby wtedy adresy innym, a stabilność adresu
-    per konto jest tu ważniejsza niż wykorzystanie co do jednego IP. Realny rozkład
-    pokazuje `python -m laweta_radar.workers.apify_proxy`.
+    UWAGA (świadomy kompromis): SAM rendezvous hashing jest równomierny
+    STATYSTYCZNIE, nie 1:1 — przy puli wielkości równej liczbie kont część
+    adresów obsłuży dwa i więcej kont, a część zostanie nieużyta (zwykłe
+    balls-in-bins). `_wyrownaj_przypisania` niżej dokłada PO fakcie wyrównanie
+    dla wołających, którym zależy na ścisłym 1:1 — bez zmiany właściwości opisanych
+    wyżej (kolejność wpisów i zmiana hasła nadal niczego nie ruszają). Realny
+    rozkład pokazuje `python -m laweta_radar.workers.apify_proxy`.
     """
     return max(
         pool,
@@ -518,11 +540,61 @@ def _pick_from_pool(token: str, pool) -> str:
     )
 
 
+def _wyrownaj_przypisania(tokens, pool: tuple[str, ...], per_key: dict[int, str],
+                          token_index: dict[str, int]) -> dict[str, str]:
+    """token -> proxy PO wyrównaniu (sekcja 4 zadania „większa pula proxy").
+
+    Rendezvous hashing (`_pick_from_pool`) sam z siebie nie gwarantuje 1:1: przy
+    puli wielkości równej liczbie kluczy jeden adres bywa wybrany dla dwóch-trzech
+    tokenów, a inny dla żadnego. To wyrównanie robi DRUGI PRZEBIEG PO hashu: token,
+    którego pierwszy wybór jest już zajęty przez wcześniejszy token, dostaje
+    najlepiej dopasowany (wg WŁASNEGO rankingu rendezvous) z adresów, które
+    zostały wolne — zamiast dzielić adres z kimś innym.
+
+    STABILNOŚĆ. Kolejność przetwarzania to kolejność `tokens` (czyli numeracja
+    APIFY_API_TOKEN{N} — patrz `all_tokens_from_env`), nie kolejność w jakiejś
+    strukturze danych bez gwarantowanego porządku. Dla tego samego zestawu
+    (tokens, pool) wynik jest WIELOKROTNIE powtarzalny — przypisanie zmienia
+    się wyłącznie, gdy zmieni się któryś z tych dwóch zbiorów (proxy padło/
+    doszło, klucz doszedł/odszedł), dokładnie jak przy gołym rendezvous hashingu.
+
+    Tokeny z własnym APIFY_PROXY{N} (adres to WYBÓR OPERATORA, nie los z puli)
+    są pomijane — nie wchodzą do wyrównania i nie zajmują miejsca w puli.
+    """
+    if not pool:
+        return {}
+    zajete: dict[str, str] = {}      # proxy -> pierwszy token, który go dostał
+    wynik: dict[str, str] = {}
+    nadmiarowe: list[str] = []
+    for t in tokens:
+        idx = token_index.get(t)
+        if idx is not None and idx in per_key:
+            continue                 # adres operatora — poza wyrównaniem puli
+        best = _pick_from_pool(t, pool)
+        if best not in zajete:
+            zajete[best] = t
+            wynik[t] = best
+        else:
+            nadmiarowe.append(t)
+
+    wolne = [p for p in pool if p not in zajete]
+    for t in nadmiarowe:
+        ranked = _pool_ranking(t, pool)
+        wybrany = next((p for p in ranked if p in wolne), None)
+        if wybrany is not None:
+            wolne.remove(wybrany)
+        else:
+            wybrany = ranked[0]      # brak wolnych adresów — dzieli adres, jak bez wyrównania
+        wynik[t] = wybrany
+    return wynik
+
+
 def proxy_for_token(token: str, cfg: ProxyConfig | None = None, env=None) -> str | None:
     """URL proxy dla danego tokenu Apify albo None, gdy proxy nie skonfigurowano.
 
-    Priorytet: APIFY_PROXY{N} (jawnie pod numer klucza) -> pula APIFY_PROXY_URLS ->
-    brama APIFY_PROXY_URL z podmienionym {session}.
+    Priorytet: APIFY_PROXY{N} (jawnie pod numer klucza) -> wyrównane przypisanie
+    (`cfg.balanced`, patrz `load_proxy_config(tokens=...)`) -> pula APIFY_PROXY_URLS
+    samym rendezvous hashingiem -> brama APIFY_PROXY_URL z podmienionym {session}.
     """
     cfg = load_proxy_config(env) if cfg is None else cfg
     token = (token or "").strip()
@@ -537,6 +609,8 @@ def proxy_for_token(token: str, cfg: ProxyConfig | None = None, env=None) -> str
     idx = cfg.token_index.get(token)
     if idx is not None and idx in cfg.per_key:
         return cfg.per_key[idx]
+    if token in cfg.balanced:
+        return cfg.balanced[token]
     if cfg.pool:
         return _pick_from_pool(token, cfg.pool)
     if cfg.gateway:
@@ -635,7 +709,11 @@ def preflight(env=None, tokens=None) -> tuple[bool, list[str]]:
     fallback na bezpośrednie wyjście byłby dokładnie tym, czego chcemy uniknąć.
     """
     try:
-        cfg = load_proxy_config(env)
+        # `tokens=tokens` włącza wyrównanie PO hashu (patrz `load_proxy_config` i
+        # `_wyrownaj_przypisania`) — bez tego diagnostyka niżej ("ile RÓŻNYCH
+        # wyjść") liczyłaby surowy rendezvous hashing i myliłaby operatora
+        # informacją gorszą niż to, co run faktycznie dostanie.
+        cfg = load_proxy_config(env, tokens=tokens)
     except ApifyProxyError as e:
         return False, [f"[apify-proxy] BŁĄD KONFIGURACJI: {e}"]
     lines = [describe(cfg)] + [f"[apify-proxy] UWAGA: {w}" for w in cfg.warnings]
@@ -807,6 +885,25 @@ def weryfikuj_proxy(url: str, *, direct_ip: str | None = None,
     return WynikWeryfikacji(url, odpowiada, nietransparentne, unikalne, dochodzi, blad_d)
 
 
+def wlasny_ip(timeout: float = 10.0) -> str | None:
+    """Adres wyjściowy BEZ proxy — punkt odniesienia dla testu (b) w `weryfikuj_proxy`
+    (proxy, które go oddaje, jest przezroczyste, czyli bezużyteczne). `None`, gdy nie
+    da się ustalić (np. brak sieci) — test (b) jest wtedy łagodniejszy, patrz
+    `weryfikuj_proxy`.
+
+    Wydzielone z `zweryfikuj_pule`, żeby `scripts/odswiez_proxy.py` mogło policzyć
+    ten adres RAZ dla całego, wieloetapowego odświeżenia (etap TCP + etap pełny),
+    zamiast płacić za nie zapytanie przy KAŻDEJ partii kandydatów.
+    """
+    import httpx  # noqa: PLC0415
+
+    try:
+        with httpx.Client(timeout=timeout) as c:
+            return c.get(_CHECK_URL_DEFAULT).text.strip() or None
+    except Exception:  # noqa: BLE001 — brak adresu bezpośredniego, nie awaria wołającego
+        return None
+
+
 def zweryfikuj_pule(urls, *, timeout: float = 10.0) -> list[WynikWeryfikacji]:
     """Wszystkie kandydaty naraz — testy (a)/(b)/(d) RÓWNOLEGLE (są niezależne per
     adres), test (c) doliczony PO fakcie w kolejności wejściowej listy (pierwsze
@@ -816,14 +913,9 @@ def zweryfikuj_pule(urls, *, timeout: float = 10.0) -> list[WynikWeryfikacji]:
     `direct_ip` liczymy RAZ dla całej serii, nie per kandydat — jedno zapytanie
     bez proxy, niepotrzebne powtarzać setki razy.
     """
-    import httpx  # noqa: PLC0415
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
-    try:
-        with httpx.Client(timeout=timeout) as c:
-            direct_ip = c.get(_CHECK_URL_DEFAULT).text.strip() or None
-    except Exception:  # noqa: BLE001 — bez adresu bezpośredniego test (b) jest łagodniejszy
-        direct_ip = None
+    direct_ip = wlasny_ip(timeout)
 
     if not urls:
         return []
@@ -850,6 +942,12 @@ def zweryfikuj_pule(urls, *, timeout: float = 10.0) -> list[WynikWeryfikacji]:
 # UDOWODNIĆ, że znowu dochodzi do Apify, zanim ktoś znowu na niego trafi.
 # =============================================================================
 KWARANTANNA_MIN = 30
+# Trzy awarie Z RZĘDU (licznik zerowany wyłącznie przez `oznacz_aktywne`, czyli
+# udaną ponowną weryfikację) to sygnał, że pół godziny nie wystarcza: adres
+# wraca do testu, znowu pada, znowu wraca w kółko. Eskalacja do doby przestaje
+# marnować na taki adres cykle weryfikacji, które i tak kończą się tym samym.
+KWARANTANNA_ESKALACJA_PROG = 3
+KWARANTANNA_ESKALACJA_MIN = 24 * 60
 
 _STAN_AKTYWNE = "aktywne"
 _STAN_KWARANTANNA = "kwarantanna"
@@ -866,7 +964,17 @@ def _hash_proxy(url: str) -> str:
 
 def oznacz_kwarantanna(conn, url: str, powod: str, *, klucz_hash: str | None = None,
                        minuty: int = KWARANTANNA_MIN) -> None:
-    """Wyślij proxy do kwarantanny na `minuty` — upsert, licznik błędów rośnie."""
+    """Wyślij proxy do kwarantanny na `minuty` — upsert, licznik błędów rośnie.
+
+    ESKALACJA: gdy to już `KWARANTANNA_ESKALACJA_PROG`-ta awaria Z RZĘDU (licznik
+    NIE zerowany między nimi — zeruje go wyłącznie `oznacz_aktywne`), kwarantanna
+    wydłuża się do `KWARANTANNA_ESKALACJA_MIN` (doba) NIEZALEŻNIE od podanego
+    `minuty` — adres, który pada trzeci raz pod rząd, nie ma wracać za pół
+    godziny tylko po to, żeby paść znowu. Próg liczony w SQL-u (CASE na
+    `ile_bledow + 1`), nie w Pythonie w dwóch krokach: między odczytem licznika
+    a zapisem nowej wartości mógłby się wcisnąć drugi przebieg fetchera,
+    a wtedy oba przebiegi zobaczyłyby tę samą, już nieaktualną liczbę.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -878,13 +986,15 @@ def oznacz_kwarantanna(conn, url: str, powod: str, *, klucz_hash: str | None = N
                 etykieta               = EXCLUDED.etykieta,
                 status                 = %s,
                 od_kiedy               = NOW(),
-                wraca_o                = NOW() + make_interval(mins => %s),
+                wraca_o                = NOW() + make_interval(mins => CASE
+                                              WHEN zasoby_apify_proxy.ile_bledow + 1 >= %s
+                                              THEN %s ELSE %s END),
                 ile_bledow             = zasoby_apify_proxy.ile_bledow + 1,
                 przypisany_klucz_hash  = EXCLUDED.przypisany_klucz_hash,
                 zmieniono_at           = NOW()
             """,
             (_hash_proxy(url), proxy_label(url), _STAN_KWARANTANNA, minuty, klucz_hash,
-             _STAN_KWARANTANNA, minuty),
+             _STAN_KWARANTANNA, KWARANTANNA_ESKALACJA_PROG, KWARANTANNA_ESKALACJA_MIN, minuty),
         )
     conn.commit()
     _ = powod  # powód idzie do logu wołającego (fb_fetcher) — tabela trzyma tylko stan
@@ -973,6 +1083,24 @@ def proxy_zywy_dla_tokenu(token: str, conn, cfg: ProxyConfig | None = None,
         if not w_kwarantannie(conn, kandydat):
             return kandydat
     return None     # cała ranga w kwarantannie — wołający decyduje (APIFY_PROXY_REQUIRED)
+
+
+def zywe_proxy_w_puli(conn, cfg: ProxyConfig) -> int | None:
+    """Ile adresów z `cfg.pool` NIE jest TERAZ w kwarantannie. `None` = pula pusta
+    (przy proxy per-key/bramie z {session} pytanie o "żywe adresy puli" nie ma
+    sensu — tam adres jest wyborem operatora, nie losem z gnijącej puli).
+
+    Do bezpiecznika przy `APIFY_PROXY_REQUIRED=1` (sekcja 3 zadania „większa pula
+    proxy"): `0` znaczy, że KAŻDY adres w puli jest właśnie w kwarantannie — run
+    ma się zatrzymać, zamiast puszczać klucze przez padnięte adresy jeden po
+    drugim, aż wyczerpie limit prób samoleczenia (`fb_fetcher._PROXY_PROBY_SAMOLECZENIA`)
+    na każdym z nich po kolei.
+    """
+    if not cfg.pool:
+        return None
+    stan = wczytaj_stan_proxy(conn, cfg.pool)
+    w_kwarantannie = sum(1 for s in stan.values() if s["status"] == _STAN_KWARANTANNA)
+    return len(cfg.pool) - w_kwarantannie
 
 
 def _exit_ip(token: str | None, cfg: ProxyConfig, url: str, timeout: float) -> tuple[str, str]:

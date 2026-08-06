@@ -420,6 +420,20 @@ log "CRON fetchera NIE został zainstalowany — kosztuje kredyt Apify i wysyła
 log "alerty. Gdy instancja ma zbierać naprawdę, wklej (crontab -e):"
 echo "        */5 * * * * cd $ROOT_DIR && ./venv/bin/python -m laweta_radar.workers.fb_fetcher >> /var/log/laweta/fetcher.log 2>&1"
 
+echo
+# Cron darmowej puli proxy JEST instalowany automatycznie (w przeciwieństwie do
+# crona fetchera wyżej) — bez ryzyka: szybka kontrola sama nie dotyka Apify,
+# a bez APIFY_PROXY_POOL=1 worker i tak nie czyta pliku, który cron odświeża.
+POOL_PROXY="$(z_env APIFY_PROXY_POOL)"
+if [[ "${POOL_PROXY,,}" =~ ^(1|true|yes|on|tak)$ ]]; then
+    log "APIFY_PROXY_POOL=1 — instaluję cron darmowej puli proxy (pełne co 2h, szybka kontrola co 15 min):"
+    bash laweta_radar/scripts/setup_cron.sh || ostrzez "instalacja crona puli proxy nie powiodła się — patrz komunikaty wyżej"
+else
+    log "Darmowa pula proxy (APIFY_PROXY_POOL) wyłączona — cron NIE zainstalowany."
+    log "Sprawdzenie i włączenie: docs/APIFY-PROXY.md; potem ./setup.sh ponownie albo:"
+    log "  bash laweta_radar/scripts/setup_cron.sh"
+fi
+
 if [[ $BLEDY -ne 0 ]]; then
     echo
     ostrzez "zakończone Z BŁĘDAMI — patrz wyżej."

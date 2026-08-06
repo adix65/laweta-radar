@@ -363,7 +363,11 @@ def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
     `apify_credits.pula_stanu`), a cztery testy z docs/APIFY-PROXY.md robi
     osobno pętla samoleczenia w fetcherze, w reakcji na realną awarię.
     """
-    cfg = apify_proxy.load_proxy_config()
+    # tokens=tokeny włącza wyrównanie PO hashu (patrz apify_proxy._wyrownaj_przypisania)
+    # — bez tego /limity pokazywałoby surowy rendezvous hashing, czyli czasem inny
+    # adres niż ten, którym fetcher REALNIE poszedł (fetcher liczy cfg tak samo, z
+    # pełną listą tokenów tego przebiegu).
+    cfg = apify_proxy.load_proxy_config(tokens=tokeny)
     if not cfg.enabled:
         return ["", "🌐 *Proxy*: nieskonfigurowane — konta wychodzą z IP VPS-a"]
 

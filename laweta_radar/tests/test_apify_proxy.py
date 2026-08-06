@@ -914,3 +914,127 @@ def test_hash_proxy_stabilny_i_nie_niesie_haslo():
     assert h1 == h2                     # zmiana hasła nie rusza tożsamości
     assert "haslo1" not in h1 and "haslo2" not in h1
     assert len(h1) == 24
+
+
+def test_oznacz_kwarantanna_niesie_eskalacje_do_doby_w_zapytaniu():
+    """Trzecia awaria Z RZĘDU ma wydłużyć kwarantannę do doby (CASE na
+    ile_bledow+1). Prawdziwe liczenie "z rzędu" robi Postgres (ON CONFLICT DO
+    UPDATE) — offline sprawdzamy KONTRAKT zapytania: próg i wydłużony czas
+    faktycznie trafiają do parametrów, nie tylko stałe pół godziny."""
+    tabela: dict = {}
+    kursor = _KursorProxyDB(tabela)
+    conn = _JedenKursorConn(kursor)
+    ap.oznacz_kwarantanna(conn, "http://u:p@a.example:8000", "timeout")
+    sql, params = kursor.zapytania[0]
+    assert "CASE" in sql and "ile_bledow + 1" in sql
+    assert ap.KWARANTANNA_ESKALACJA_PROG in params
+    assert ap.KWARANTANNA_ESKALACJA_MIN in params
+    assert ap.KWARANTANNA_ESKALACJA_MIN == 24 * 60
+
+
+# =============================================================================
+# WYRÓWNANIE PO HASHU — sekcja 4 zadania „większa pula proxy"
+# =============================================================================
+def test_wyrownanie_daje_1_do_1_gdy_pula_wystarcza():
+    """Pula >= liczba kluczy -> KAŻDY klucz dostaje WŁASNY adres, bez dzielenia."""
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(10))
+    tokens = [f"apify_api_token_{i}" for i in range(10)]
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": pool}, tokens=tokens)
+    assert len(cfg.balanced) == 10
+    przydzielone = [ap.proxy_for_token(t, cfg) for t in tokens]
+    assert len(set(przydzielone)) == 10          # zero powtórzeń
+
+
+def test_wyrownanie_bez_tokens_nie_zmienia_zachowania():
+    """Stary kontrakt: `load_proxy_config` bez `tokens` -> `balanced` puste,
+    zachowanie identyczne jak przed wyrównaniem (sam rendezvous hashing)."""
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(3))
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": pool})
+    assert cfg.balanced == {}
+
+
+def test_wyrownanie_jest_stabilne_dla_tego_samego_zestawu():
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(5))
+    tokens = [f"apify_api_token_{i}" for i in range(5)]
+    cfg1 = ap.load_proxy_config({"APIFY_PROXY_URLS": pool}, tokens=tokens)
+    cfg2 = ap.load_proxy_config({"APIFY_PROXY_URLS": pool}, tokens=tokens)
+    assert cfg1.balanced == cfg2.balanced
+
+
+def test_wyrownanie_nie_zalezy_od_kolejnosci_puli_w_env():
+    urls = [f"http://u:p@n{i}.example:8000" for i in range(6)]
+    tokens = [f"apify_api_token_{i}" for i in range(6)]
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": ",".join(urls)}, tokens=tokens)
+    cfg_rev = ap.load_proxy_config({"APIFY_PROXY_URLS": ",".join(reversed(urls))}, tokens=tokens)
+    assert cfg.balanced == cfg_rev.balanced
+
+
+def test_wyrownanie_pomija_tokeny_z_wlasnym_proxy_per_klucz():
+    """APIFY_PROXY{N} to wybór operatora — nie wchodzi do wyrównania puli."""
+    env = {
+        "APIFY_API_TOKEN1": "tok_a",
+        "APIFY_PROXY1": "http://u:p@dedicated.example:8000",
+        "APIFY_PROXY_URLS": "http://u:p@n0.example:8000,http://u:p@n1.example:8000",
+    }
+    cfg = ap.load_proxy_config(env, tokens=["tok_a", "tok_b"])
+    assert "tok_a" not in cfg.balanced
+    assert ap.proxy_for_token("tok_a", cfg) == "http://u:p@dedicated.example:8000"
+    assert "tok_b" in cfg.balanced
+
+
+def test_wyrownanie_przy_niedoborze_puli_niektorzy_dziela_adres():
+    """Więcej kluczy niż proxy -> wyrównanie nie ma czarów, ktoś musi dzielić,
+    ale KAŻDY token nadal dostaje jakiś adres (nikt nie zostaje bez proxy)."""
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(3))
+    tokens = [f"apify_api_token_{i}" for i in range(7)]
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": pool}, tokens=tokens)
+    assert len(cfg.balanced) == 7
+    assert all(ap.proxy_for_token(t, cfg) for t in tokens)
+    assert len({ap.proxy_for_token(t, cfg) for t in tokens}) == 3
+
+
+def test_wyrownanie_dolozenie_klucza_rusza_najwyzej_garstke_przypisan():
+    """Dołożenie JEDNEGO klucza MOŻE skonsumować adres, który wcześniej był
+    zapasowym wyborem dla nadmiarowego tokenu (nowy klucz ma prawo do WŁASNEGO
+    najlepszego wolnego adresu) — ale ma to poruszyć co najwyżej garstkę
+    przypisań, a nie przetasować całą pulę. Każdy token, który miał WŁASNY
+    (niedzielony) adres, zatrzymuje go zawsze — pass-1 to czysta funkcja
+    (token, pool), niezależna od reszty zestawu kluczy."""
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(20))
+    tokens = [f"apify_api_token_{i}" for i in range(15)]
+    cfg_przed = ap.load_proxy_config({"APIFY_PROXY_URLS": pool}, tokens=tokens)
+    cfg_po = ap.load_proxy_config({"APIFY_PROXY_URLS": pool},
+                                  tokens=[*tokens, "apify_api_token_15"])
+    zmienione = sum(1 for t in tokens if cfg_przed.balanced[t] != cfg_po.balanced[t])
+    assert zmienione <= 2
+
+
+# =============================================================================
+# zywe_proxy_w_puli — bezpiecznik przy wyczerpaniu żywych adresów (sekcja 3)
+# =============================================================================
+def test_zywe_proxy_w_puli_bez_puli_jest_none():
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URL": _GW})
+    assert ap.zywe_proxy_w_puli(_PolaczenieProxyDB(), cfg) is None
+
+
+def test_zywe_proxy_w_puli_liczy_aktywne():
+    pool = ["http://u:p@a.example:8000", "http://u:p@b.example:8000",
+            "http://u:p@c.example:8000"]
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": ",".join(pool)})
+    from datetime import datetime, timedelta, timezone
+    teraz = datetime.now(timezone.utc)
+    tabela = {ap._hash_proxy(pool[0]): ("x", "kwarantanna", teraz,
+                                        teraz + timedelta(minutes=5), 1)}
+    conn = _PolaczenieProxyDB(tabela)
+    assert ap.zywe_proxy_w_puli(conn, cfg) == 2
+
+
+def test_zywe_proxy_w_puli_zero_gdy_wszystko_w_kwarantannie():
+    pool = ["http://u:p@a.example:8000", "http://u:p@b.example:8000"]
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": ",".join(pool)})
+    from datetime import datetime, timedelta, timezone
+    teraz = datetime.now(timezone.utc)
+    tabela = {ap._hash_proxy(u): ("x", "kwarantanna", teraz, teraz + timedelta(minutes=5), 1)
+              for u in pool}
+    conn = _PolaczenieProxyDB(tabela)
+    assert ap.zywe_proxy_w_puli(conn, cfg) == 0
