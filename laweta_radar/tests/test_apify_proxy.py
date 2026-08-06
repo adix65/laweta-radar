@@ -634,3 +634,283 @@ def test_describe_mentions_the_free_pool_and_its_age(monkeypatch, tmp_path):
     _pool_env(monkeypatch, p)
     text = ap.describe(ap.load_proxy_config(_POOL_ON))
     assert "darmowej puli" in text
+
+
+# =============================================================================
+# WERYFIKACJA — cztery testy z docs/APIFY-PROXY.md (workers/apify_proxy.weryfikuj_proxy)
+# =============================================================================
+class _FakeResp:
+    def __init__(self, text: str = "", status_code: int = 200) -> None:
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeVerifyClient:
+    def __init__(self, respond) -> None:
+        self._respond = respond
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get(self, url):
+        return self._respond(url)
+
+
+def _client_maker(respond_factory):
+    """respond_factory(proxy_kwarg) -> callable(url) -> _FakeResp albo rzuca."""
+    def _Client(**kw):
+        return _FakeVerifyClient(respond_factory(kw.get("proxy")))
+    return _Client
+
+
+def _respond_szczesliwie(_proxy):
+    def _r(url):
+        if "ipify" in url:
+            return _FakeResp("5.6.7.8")
+        if "apify.com" in url:
+            return _FakeResp("", 401)     # 401 bez tokenu = SUKCES testu (d)
+        raise AssertionError(f"nieoczekiwany url {url}")
+    return _r
+
+
+def test_weryfikuj_proxy_przechodzi_wszystkie_cztery_testy(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    monkeypatch.setattr(httpx, "Client", _client_maker(_respond_szczesliwie))
+    w = ap.weryfikuj_proxy("http://u:p@proxy.example:8000", direct_ip="1.2.3.4")
+    assert w.ok is True
+    assert (w.odpowiada, w.nietransparentne, w.unikalne, w.dochodzi_do_apify) == (True,) * 4
+
+
+def test_weryfikuj_proxy_nie_odpowiada(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+
+    def respond_factory(_proxy):
+        def _r(_url):
+            raise RuntimeError("connection refused")
+        return _r
+
+    monkeypatch.setattr(httpx, "Client", _client_maker(respond_factory))
+    w = ap.weryfikuj_proxy("http://u:p@martwe.example:8000", direct_ip="1.2.3.4")
+    assert w.ok is False
+    assert w.odpowiada is False
+    assert w.blad     # powód zapisany, nie pusty
+
+
+def test_weryfikuj_proxy_transparentne_oddaje_ip_vpsa(monkeypatch):
+    """Test (b): proxy odpowiada, ale zwraca to samo IP, co bezpośrednie wyjście
+    — czyli nie jest wcale proxy, tylko przezroczystym pass-through."""
+    httpx = pytest.importorskip("httpx")
+
+    def respond_factory(_proxy):
+        def _r(url):
+            if "ipify" in url:
+                return _FakeResp("9.9.9.9")     # to samo co direct_ip niżej
+            raise AssertionError("test (d) nie powinien być wołany po (b)")
+        return _r
+
+    monkeypatch.setattr(httpx, "Client", _client_maker(respond_factory))
+    w = ap.weryfikuj_proxy("http://u:p@transparentne.example:8000", direct_ip="9.9.9.9")
+    assert w.odpowiada is True
+    assert w.nietransparentne is False
+    assert w.ok is False
+    assert "IP VPS" in w.blad
+
+
+def test_weryfikuj_proxy_nie_dochodzi_do_apify(monkeypatch):
+    """Test (d): proxy 'działa' (inne serwisy odpowiadają), ale do api.apify.com
+    nie dochodzi — dokładnie ten przypadek, na którym kończy się większość
+    darmowych list (docs/APIFY-PROXY.md)."""
+    httpx = pytest.importorskip("httpx")
+
+    def respond_factory(_proxy):
+        def _r(url):
+            if "ipify" in url:
+                return _FakeResp("5.6.7.8")
+            if "apify.com" in url:
+                raise RuntimeError("connection timed out")
+            raise AssertionError(url)
+        return _r
+
+    monkeypatch.setattr(httpx, "Client", _client_maker(respond_factory))
+    w = ap.weryfikuj_proxy("http://u:p@nie-dochodzi.example:8000", direct_ip="1.2.3.4")
+    assert w.odpowiada is True and w.nietransparentne is True
+    assert w.dochodzi_do_apify is False
+    assert w.ok is False
+
+
+def test_weryfikuj_proxy_bez_znanego_direct_ip_nie_oznacza_transparentnosci(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    monkeypatch.setattr(httpx, "Client", _client_maker(_respond_szczesliwie))
+    w = ap.weryfikuj_proxy("http://u:p@proxy.example:8000", direct_ip=None)
+    assert w.nietransparentne is True
+
+
+def test_zweryfikuj_pule_wykrywa_duplikat_tozsamosci(monkeypatch):
+    """(c): dwa wpisy z tym samym host:port (różny tylko login) to JEDNO
+    proxy — drugie wystąpienie ma wyjść jako NIE unikalne."""
+    httpx = pytest.importorskip("httpx")
+    monkeypatch.setattr(httpx, "Client", _client_maker(_respond_szczesliwie))
+    wyniki = ap.zweryfikuj_pule([
+        "http://usera:p@dup.example:8000",
+        "http://userb:p@dup.example:8000",
+        "http://inny.example:8000",
+    ])
+    assert [w.unikalne for w in wyniki] == [True, False, True]
+
+
+def test_zweryfikuj_pule_pusta_lista(monkeypatch):
+    assert ap.zweryfikuj_pule([]) == []
+
+
+# =============================================================================
+# KWARANTANNA — stan w bazie (workers/apify_proxy.oznacz_kwarantanna i spółka)
+# =============================================================================
+class _KursorProxyDB:
+    def __init__(self, tabela: dict) -> None:
+        self._tabela = tabela      # {proxy_hash: (etykieta, status, od_kiedy, wraca_o, ile_bledow)}
+        self._wynik: list = []
+        self.zapytania: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql: str, params=None) -> None:
+        self.zapytania.append((sql, params))
+        if sql.strip().startswith("SELECT proxy_hash"):
+            (hashes,) = params
+            self._wynik = [(h, *self._tabela[h]) for h in hashes if h in self._tabela]
+
+    def fetchall(self):
+        return self._wynik
+
+
+class _PolaczenieProxyDB:
+    def __init__(self, tabela: dict | None = None) -> None:
+        self._tabela = tabela if tabela is not None else {}
+        self.commity = 0
+
+    def cursor(self):
+        return _KursorProxyDB(self._tabela)
+
+    def commit(self):
+        self.commity += 1
+
+
+def test_oznacz_kwarantanna_zapisuje_hash_i_etykiete_bez_hasla():
+    tabela: dict = {}
+    conn = _PolaczenieProxyDB(tabela)
+    kursor = conn.cursor()
+    kursor._tabela = tabela
+    ap_conn = _JedenKursorConn(kursor)
+    ap.oznacz_kwarantanna(ap_conn, "http://user:tajnehaslo@a.example:8000", "timeout")
+    sql, params = kursor.zapytania[0]
+    assert "zasoby_apify_proxy" in sql
+    assert params[0] == ap._hash_proxy("http://user:tajnehaslo@a.example:8000")
+    assert "tajnehaslo" not in " ".join(str(p) for p in params)
+    assert "a.example:8000" in params[1]     # etykieta = host:port
+    assert ap_conn.commity == 1
+
+
+class _JedenKursorConn:
+    """Połączenie oddające ZAWSZE ten sam kursor — do sprawdzenia, co realnie
+    poszło do execute() bez polegania na tym, ile razy woła się `cursor()`."""
+
+    def __init__(self, kursor) -> None:
+        self._kursor = kursor
+        self.commity = 0
+
+    def cursor(self):
+        return self._kursor
+
+    def commit(self):
+        self.commity += 1
+
+
+def test_wczytaj_stan_proxy_mapuje_hash_z_powrotem_na_url():
+    from datetime import datetime, timezone
+
+    url = "http://u:p@a.example:8000"
+    h = ap._hash_proxy(url)
+    teraz = datetime.now(timezone.utc)
+    conn = _PolaczenieProxyDB({h: ("a.example:8000", "kwarantanna", teraz, teraz, 2)})
+    stan = ap.wczytaj_stan_proxy(conn, [url])
+    assert stan[url]["status"] == "kwarantanna"
+    assert stan[url]["ile_bledow"] == 2
+
+
+def test_w_kwarantannie_prawda_gdy_nie_minelo(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    url = "http://u:p@a.example:8000"
+    h = ap._hash_proxy(url)
+    teraz = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    wraca_o = teraz + timedelta(minutes=10)
+    conn = _PolaczenieProxyDB({h: ("a.example:8000", "kwarantanna", teraz, wraca_o, 1)})
+    assert ap.w_kwarantannie(conn, url, teraz=teraz) is True
+
+
+def test_w_kwarantannie_falsz_po_uplywie_czasu():
+    from datetime import datetime, timedelta, timezone
+
+    url = "http://u:p@a.example:8000"
+    h = ap._hash_proxy(url)
+    teraz = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    wraca_o = teraz - timedelta(minutes=1)      # kwarantanna już minęła
+    conn = _PolaczenieProxyDB({h: ("a.example:8000", "kwarantanna", teraz, wraca_o, 1)})
+    assert ap.w_kwarantannie(conn, url, teraz=teraz) is False
+
+
+def test_w_kwarantannie_falsz_dla_nieznanego_proxy():
+    assert ap.w_kwarantannie(_PolaczenieProxyDB(), "http://u:p@nieznane.example:8000") is False
+
+
+def test_proxy_zywy_dla_tokenu_pomija_kwarantanne():
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(5))
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": pool})
+    ranking = ap.proxies_for_token("tok_a", cfg)
+    pierwszy, drugi = ranking[0], ranking[1]
+
+    from datetime import datetime, timedelta, timezone
+    teraz = datetime.now(timezone.utc)
+    tabela = {ap._hash_proxy(pierwszy): ("x", "kwarantanna", teraz, teraz + timedelta(minutes=5), 1)}
+    conn = _PolaczenieProxyDB(tabela)
+
+    assert ap.proxy_zywy_dla_tokenu("tok_a", conn, cfg) == drugi
+
+
+def test_proxy_zywy_dla_tokenu_none_gdy_cala_ranga_w_kwarantannie():
+    cfg = ap.load_proxy_config({"APIFY_PROXY_URLS": "http://u:p@n0.example:8000"})
+    ranking = ap.proxies_for_token("tok_a", cfg)
+    from datetime import datetime, timedelta, timezone
+    teraz = datetime.now(timezone.utc)
+    tabela = {ap._hash_proxy(u): ("x", "kwarantanna", teraz, teraz + timedelta(minutes=5), 1)
+              for u in ranking}
+    conn = _PolaczenieProxyDB(tabela)
+    assert ap.proxy_zywy_dla_tokenu("tok_a", conn, cfg) is None
+
+
+def test_proxy_zywy_dla_tokenu_bez_puli_zwraca_wybor_operatora():
+    """Przy APIFY_PROXY{N} / bramie z {session} adres jest wyborem operatora —
+    proxy_zywy_dla_tokenu nie ma go czym podmienić, nawet gdyby był w kwarantannie."""
+    cfg = ap.load_proxy_config({"APIFY_API_TOKEN1": "tok_a",
+                                "APIFY_PROXY1": "http://u:p@dedicated.example:8000"})
+    conn = _PolaczenieProxyDB()
+    assert ap.proxy_zywy_dla_tokenu("tok_a", conn, cfg) == "http://u:p@dedicated.example:8000"
+
+
+def test_hash_proxy_stabilny_i_nie_niesie_haslo():
+    h1 = ap._hash_proxy("http://user:haslo1@a.example:8000")
+    h2 = ap._hash_proxy("http://user:haslo2@a.example:8000")
+    assert h1 == h2                     # zmiana hasła nie rusza tożsamości
+    assert "haslo1" not in h1 and "haslo2" not in h1
+    assert len(h1) == 24

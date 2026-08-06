@@ -26,12 +26,24 @@ UŻYCIE:
 
 `call`:
   - aktualnym kluczem próbuje fn(token);
-  - błąd PRZEJŚCIOWY (timeout / sieć / proxy / HTTP 5xx / 429) -> kilka ponowień TYM
-    SAMYM kluczem z krótkim odstępem (nie marnujemy dobrych kluczy na chwilowej awarii
+  - BŁĄD SIECI (timeout / sieć / proxy / HTTP 5xx) -> kilka ponowień TYM SAMYM
+    kluczem z krótkim odstępem (nie marnujemy dobrych kluczy na chwilowej awarii
     sieci ani na zadławionym proxy — patrz laweta_radar/workers/apify_proxy.py);
-  - błąd WYCZERPANIA (HTTP 401/402/403 albo komunikat z usage/limit/exceeded/credit/
-    quota/payment) -> log, przeskok na następny klucz, ponowienie;
-  - gdy WSZYSTKIE klucze wyczerpane -> AllKeysExhausted (czysty, czytelny błąd).
+  - RATE LIMIT (HTTP 429) -> odstęp rosnący 5/15/45 s, TEN SAM klucz — to nie jest
+    błąd konta, tylko "za szybko", więc zmiana klucza niczego by nie przyspieszyła;
+  - KLUCZ MARTWY (HTTP 401/403 albo komunikat "token/user-not-found") -> klucz
+    WYPADA NA STAŁE z rotacji (zwykle ban/odwołanie tokenu — nie wróci sam);
+  - KREDYT WYCZERPANY (HTTP 402 albo komunikat usage/limit/exceeded/credit/quota/
+    payment) -> klucz pomijamy W TYM przebiegu, wróci sam 1. dnia miesiąca;
+  - oba stany wyczerpania -> log, przeskok na następny klucz, ponowienie;
+  - gdy WSZYSTKIE klucze wyczerpane/martwe -> AllKeysExhausted (czysty, czytelny błąd).
+
+Rozróżnienie martwy/wyczerpany jest CELOWE, nie kosmetyczne: to dwie różne
+reakcje operatora. "Wyczerpany kredyt" znaczy "poczekaj do przyszłego miesiąca" —
+system sam sobie z tym poradzi. "Martwy klucz" znaczy "konta już nie ma" —
+zwykle ban, i BEZ CZŁOWIEKA klucz nigdy nie wróci do puli. Zlepienie tych dwóch
+w jeden worek "wyczerpany" (jak było wcześniej) chowa alarm w szumie normalnego
+miesięcznego resetu.
 
 `transient_key_switches` (domyślnie 0 = zachowanie jak dotąd): ile razy TRWAŁY błąd
 transportu może przerzucić na następny klucz. Sens ma wyłącznie przy proxy per klucz
@@ -63,24 +75,49 @@ except Exception:  # noqa: BLE001 — brak httpx nie może wywalić importu modu
 T = TypeVar("T")
 
 # Plik stanu obok .env (katalog projektu). Trzyma indeks ostatnio działającego klucza.
+# UWAGA: to jest tylko PODPOWIEDŹ startowa dla jednego procesu — prawda o tym,
+# który klucz jest martwy/wyczerpany, żyje w tabeli `zasoby_apify` (patrz niżej),
+# bo to jedyne miejsce widoczne dla RÓWNOLEGŁYCH przebiegów naraz.
 _STATE_PATH = Path(__file__).resolve().parent.parent / ".apify_key_state"
+
+# Cztery stany, na jakie rozbijamy dawny worek "wyczerpany" (patrz docstring modułu).
+STATUS_AKTYWNY = "aktywny"
+STATUS_KREDYT_WYCZERPANY = "kredyt_wyczerpany"    # 402 / limit -> wraca 1. dnia miesiąca
+STATUS_KLUCZ_MARTWY = "klucz_martwy"              # 401/403 / token-not-found -> na stałe
+STATUS_BLAD_SIECI = "blad_sieci"                  # timeout/sieć/proxy/5xx -> ponów tym kluczem
+STATUS_RATE_LIMIT = "rate_limit"                  # 429 -> odczekaj, ten sam klucz
+_STATUS_FATAL = "fatal"                           # inny 4xx — nie dotyczy klucza, oddaj wyżej
+
+# Komunikat jednoznacznie mówiący "tokenu/konta nie ma" — SILNIEJSZY sygnał niż
+# sam kod HTTP, bo Apify bywa niekonsekwentne w kodach akurat dla tego przypadku
+# (patrz historia tego pliku: pięć kont padło naraz z "user-or-token-not-found").
+# Świadomie WĄSKIE dopasowania — samo "not found" złapałoby też np. "actor not
+# found", co nie ma nic wspólnego ze stanem klucza.
+_DEAD_KEY_HINTS = ("user-or-token-not-found", "token-not-found", "user-not-found")
 
 # Słowa w komunikacie błędu jednoznacznie znaczące "ten klucz nie zapłaci".
 _EXHAUSTION_HINTS = (
     "usage", "limit", "exceeded", "credit", "quota", "payment", "insufficient",
 )
 
-# Ile RAZEM prób tym samym kluczem przy błędzie przejściowym i odstęp między nimi.
+# Odstępy backoffu przy 429 — rosnące, TEN SAM klucz (patrz docstring modułu).
+_RATE_LIMIT_BACKOFF_S = (5.0, 15.0, 45.0)
+
+# Ile RAZEM prób tym samym kluczem przy błędzie SIECI i odstęp między nimi.
 _TRANSIENT_ATTEMPTS = 3        # 1 pierwsza + 2 ponowienia
 _TRANSIENT_DELAY_S = 3.0
 
 
 class AllKeysExhausted(RuntimeError):
-    """Wszystkie klucze Apify wyczerpane (żaden nie ma już darmowego kredytu)."""
+    """Wszystkie klucze Apify wyczerpane albo martwe (żaden nie odpowie teraz)."""
 
 
-class _KeyExhausted(Exception):
-    """Sygnał wewnętrzny: bieżący klucz wyczerpany — przeskocz na następny."""
+class _KluczMartwy(Exception):
+    """Sygnał wewnętrzny: bieżący klucz martwy na stałe — przeskocz, nie wróci sam."""
+
+
+class _KredytWyczerpany(Exception):
+    """Sygnał wewnętrzny: bieżący klucz bez kredytu W TYM miesiącu — przeskocz."""
 
 
 # ---------------------------------------------------------------------------
@@ -147,37 +184,53 @@ def _is_network_error(exc: BaseException) -> bool:
 
 
 def classify_apify_error(exc: BaseException) -> str:
-    """Zaklasyfikuj wyjątek z wołania Apify: 'exhausted' | 'transient' | 'fatal'.
+    """Zaklasyfikuj wyjątek z wołania Apify na jeden z pięciu stanów:
 
-    - 'exhausted': klucz bez kredytu / limit / wymagana płatność / martwy token
-                   -> przeskocz na następny klucz.
-    - 'transient': timeout / sieć / HTTP 5xx / 429 -> ponów TYM SAMYM kluczem.
-    - 'fatal':     inny błąd klienta (4xx) -> nie ponawiaj i nie pal kluczy; oddaj wyżej.
+        STATUS_KLUCZ_MARTWY        401/403 albo "token/user-not-found" -> na stałe
+        STATUS_KREDYT_WYCZERPANY   402 albo usage/limit/exceeded/credit/quota/payment
+        STATUS_RATE_LIMIT          429 -> odczekaj, ten sam klucz
+        STATUS_BLAD_SIECI          timeout/sieć/proxy/5xx -> ponów tym samym kluczem
+        _STATUS_FATAL              inny błąd klienta (4xx), nie dotyczy klucza -> oddaj wyżej
+
+    Kolejność sprawdzeń jest tu tak samo istotna jak w oryginalnym 3-stanowym
+    podziale i z tych samych powodów — patrz komentarze przy każdym kroku.
     """
-    status = _http_status(exc)
-    # 1) Jednoznaczne kody "ten klucz nie zapłaci".
-    if status in (401, 402, 403):
-        return "exhausted"
-    # 2) Rate limit i błędy serwera Apify — przejściowe. SPRAWDZAMY PRZED słowami w
-    #    komunikacie, bo 429 często niesie "rate limit exceeded" (fałszywe 'exhausted').
-    if status == 429 or (status is not None and 500 <= status < 600):
-        return "transient"
-    # 3) Sieć/timeout/proxy — SPRAWDZAMY PRZED słowami w komunikacie. Wyczerpanie
-    #    kredytu Apify przychodzi ZAWSZE jako odpowiedź HTTP, nigdy jako błąd
-    #    transportu; za to komunikat od dostawcy proxy potrafi nieść "limit"
-    #    albo "quota" (wyczerpany transfer proxy) i bez tej kolejności zdrowe
-    #    klucze byłyby po kolei oznaczane jako puste — aż do AllKeysExhausted.
-    if _is_network_error(exc):
-        return "transient"
-    # 4) Komunikat o wyczerpaniu/limicie/płatności — łapie też przypadki bez kodu HTTP.
     msg = str(exc).lower()
+    # 0) Komunikat JEDNOZNACZNIE mówiący "tokenu/konta nie ma" — sprawdzamy
+    #    PRZED kodem HTTP, bo Apify bywa niekonsekwentne w kodzie dla akurat
+    #    tego przypadku (patrz nagłówek modułu: 5 kont padło naraz właśnie tak).
+    if any(w in msg for w in _DEAD_KEY_HINTS):
+        return STATUS_KLUCZ_MARTWY
+
+    status = _http_status(exc)
+    # 1) 401 = token unieważniony/nieznany. 403 traktujemy tak samo — to samo
+    #    odrzucenie tożsamości, nie przejściowe ograniczenie (to jest 429).
+    #    Żaden z nich nie wróci sam — stąd "martwy", nie "wyczerpany".
+    if status in (401, 403):
+        return STATUS_KLUCZ_MARTWY
+    # 2) 402 = wymagana płatność, czyli wyczerpany darmowy kredyt -> wraca
+    #    samoistnie 1. dnia kolejnego miesiąca, bez udziału człowieka.
+    if status == 402:
+        return STATUS_KREDYT_WYCZERPANY
+    # 3) Rate limit — SPRAWDZAMY PRZED analizą komunikatu i przed 5xx, bo 429
+    #    często niesie "rate limit exceeded" (fałszywe dopasowanie do wyczerpania).
+    if status == 429:
+        return STATUS_RATE_LIMIT
+    # 4) Błędy serwera Apify i sieć/timeout/proxy — SPRAWDZAMY PRZED słowami w
+    #    komunikacie. Wyczerpanie kredytu Apify przychodzi ZAWSZE jako odpowiedź
+    #    HTTP, nigdy jako błąd transportu; za to komunikat od dostawcy proxy
+    #    potrafi nieść "limit" albo "quota" (wyczerpany transfer proxy) i bez tej
+    #    kolejności zdrowe klucze byłyby po kolei oznaczane jako martwe/wyczerpane.
+    if (status is not None and 500 <= status < 600) or _is_network_error(exc):
+        return STATUS_BLAD_SIECI
+    # 5) Komunikat o wyczerpaniu/limicie/płatności — łapie też przypadki bez kodu HTTP.
     if any(w in msg for w in _EXHAUSTION_HINTS):
-        return "exhausted"
-    # 5) Pozostałe 4xx — błąd trwały, ale NIE wyczerpanie klucza.
+        return STATUS_KREDYT_WYCZERPANY
+    # 6) Pozostałe 4xx — błąd trwały, ale NIE dotyczy stanu klucza (np. zły actor).
     if status is not None and 400 <= status < 500:
-        return "fatal"
-    # 6) Nieznane — ostrożnie jako przejściowe (lepiej ponowić niż spalić dobry klucz).
-    return "transient"
+        return _STATUS_FATAL
+    # 7) Nieznane — ostrożnie jako błąd sieci (lepiej ponowić niż spalić dobry klucz).
+    return STATUS_BLAD_SIECI
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +275,8 @@ class KeyRotator:
         transient_attempts: int = _TRANSIENT_ATTEMPTS,
         transient_delay: float = _TRANSIENT_DELAY_S,
         transient_key_switches: int = 0,
+        rate_limit_backoff: tuple[float, ...] = _RATE_LIMIT_BACKOFF_S,
+        on_wynik: Callable[[str, str, str], None] | None = None,
         log: Callable[[str], None] = print,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -234,6 +289,12 @@ class KeyRotator:
         self._transient_attempts = max(1, int(transient_attempts))
         self._transient_delay = float(transient_delay)
         self._transient_key_switches = max(0, int(transient_key_switches))
+        self._rate_limit_backoff = tuple(rate_limit_backoff)
+        # Wołany po KAŻDEJ próbie (token, stan, powód) — stan to jeden z
+        # STATUS_* albo STATUS_AKTYWNY przy sukcesie. Rotator sam nie dotyka
+        # bazy ani Telegrama (ma zostać czysty i testowalny bez sieci/DB) —
+        # to wołający (fb_fetcher) persystuje stan i wysyła alerty.
+        self._on_wynik = on_wynik
         self._log = log
         self._sleep = sleep
 
@@ -264,35 +325,64 @@ class KeyRotator:
             _write_state_index(self._state_path, idx)
             self._persisted_idx = idx
 
-    def _attempt_one_key(self, fn: Callable[[str], T], token: str, human_idx: int) -> T:
-        """Jedno użycie klucza: fn(token) z ponowieniami na błędach PRZEJŚCIOWYCH.
+    def _zglos(self, token: str, stan: str, exc: BaseException | None = None) -> None:
+        if self._on_wynik is None:
+            return
+        powod = "" if exc is None else f"{type(exc).__name__}: {str(exc)[:200]}"
+        self._on_wynik(token, stan, powod)
 
-        Zwraca wynik fn; rzuca _KeyExhausted (klucz pusty -> rotacja wyżej) albo
-        oryginalny wyjątek (trwały błąd nie związany z kredytem -> oddaj do wołającego).
+    def _attempt_one_key(self, fn: Callable[[str], T], token: str, human_idx: int) -> T:
+        """Jedno użycie klucza z ponowieniami na błędach SIECI i RATE LIMIT.
+
+        Zwraca wynik fn. Rzuca `_KluczMartwy`/`_KredytWyczerpany` (rotacja wyżej
+        przeskoczy na następny klucz) albo oryginalny wyjątek — błąd sieci po
+        wyczerpaniu ponowień, błąd trwały (fatal) od razu.
         """
-        last_exc: BaseException | None = None
-        for attempt in range(1, self._transient_attempts + 1):
+        siec_prob = 0
+        limit_prob = 0
+        while True:
             try:
-                return fn(token)
-            except _KeyExhausted:
+                wynik = fn(token)
+            except (_KluczMartwy, _KredytWyczerpany):
                 raise
             except BaseException as exc:  # noqa: BLE001 — klasyfikujemy poniżej
                 kind = classify_apify_error(exc)
-                if kind == "exhausted":
-                    raise _KeyExhausted() from exc
-                if kind == "fatal":
+                if kind == STATUS_KLUCZ_MARTWY:
+                    self._zglos(token, kind, exc)
+                    raise _KluczMartwy(str(exc)) from exc
+                if kind == STATUS_KREDYT_WYCZERPANY:
+                    self._zglos(token, kind, exc)
+                    raise _KredytWyczerpany(str(exc)) from exc
+                if kind == _STATUS_FATAL:
                     raise
-                last_exc = exc           # transient — ponawiamy tym samym kluczem
-                if attempt < self._transient_attempts:
+                if kind == STATUS_RATE_LIMIT:
+                    self._zglos(token, kind, exc)
+                    if limit_prob >= len(self._rate_limit_backoff):
+                        raise
+                    delay = self._rate_limit_backoff[limit_prob]
+                    limit_prob += 1
                     self._log(
-                        f"[apify-keys] klucz #{human_idx} ({_mask(token)}): błąd "
-                        f"przejściowy {type(exc).__name__}: {exc} "
-                        f"(próba {attempt}/{self._transient_attempts}) — ponawiam za "
-                        f"{self._transient_delay:g}s"
+                        f"[apify-keys] klucz #{human_idx} ({_mask(token)}): 429 rate limit "
+                        f"— czekam {delay:g}s (próba {limit_prob}/{len(self._rate_limit_backoff)})"
                     )
-                    self._sleep(self._transient_delay)
-        assert last_exc is not None      # pętla zawsze ustawia last_exc przed wyjściem
-        raise last_exc
+                    self._sleep(delay)
+                    continue
+                # kind == STATUS_BLAD_SIECI — ponawiamy TYM SAMYM kluczem.
+                self._zglos(token, kind, exc)
+                siec_prob += 1
+                if siec_prob >= self._transient_attempts:
+                    raise
+                self._log(
+                    f"[apify-keys] klucz #{human_idx} ({_mask(token)}): błąd "
+                    f"sieci {type(exc).__name__}: {exc} "
+                    f"(próba {siec_prob}/{self._transient_attempts}) — ponawiam za "
+                    f"{self._transient_delay:g}s"
+                )
+                self._sleep(self._transient_delay)
+                continue
+            else:
+                self._zglos(token, STATUS_AKTYWNY)
+                return wynik
 
     def call(self, fn: Callable[[str], T]) -> T:
         """Uruchom fn(token) z reaktywną rotacją kluczy; zwróć wynik fn.
@@ -314,11 +404,21 @@ class KeyRotator:
             token = self._tokens[idx]
             try:
                 result = self._attempt_one_key(fn, token, idx + 1)
-            except _KeyExhausted:
+            except _KluczMartwy:
+                self._exhausted.add(idx)
+                self._log(
+                    f"[apify-keys] klucz #{idx + 1} ({_mask(token)}) MARTWY (401/403 "
+                    f"— zwykle ban albo odwołany token) — wypada na stałe, "
+                    f"przełączam na następny"
+                )
+                self._advance()
+                continue
+            except _KredytWyczerpany:
                 self._exhausted.add(idx)
                 self._log(
                     f"[apify-keys] klucz #{idx + 1} ({_mask(token)}) wyczerpany "
-                    f"(brak kredytu / limit) — przełączam na następny"
+                    f"(brak kredytu / limit) — wraca 1. dnia miesiąca, "
+                    f"przełączam na następny"
                 )
                 self._advance()
                 continue
@@ -330,7 +430,7 @@ class KeyRotator:
                 # Z KLUCZEM (padło JEGO proxy), a następny klucz ma inne wyjście,
                 # więc opłaca się spróbować — ale tylko kilka razy, żeby globalna
                 # awaria nadal kończyła się szybko i czytelnym błędem.
-                if switches_left <= 0 or classify_apify_error(exc) != "transient":
+                if switches_left <= 0 or classify_apify_error(exc) != STATUS_BLAD_SIECI:
                     raise
                 switches_left -= 1
                 last_transient = exc
@@ -348,9 +448,108 @@ class KeyRotator:
             # operator ma zobaczyć błąd proxy/sieci, nie "skończył się kredyt".
             raise last_transient
         raise AllKeysExhausted(
-            f"Wszystkie {n} kluczy Apify wyczerpane — żaden nie ma darmowego kredytu. "
-            f"Dodaj kolejne APIFY_API_TOKEN{{N}} do .env albo poczekaj na miesięczny reset."
+            f"Wszystkie {n} kluczy Apify wyczerpane albo martwe — żaden nie odpowie "
+            f"teraz. Dodaj kolejne APIFY_API_TOKEN{{N}} do .env, poczekaj na miesięczny "
+            f"reset (kredyt) albo sprawdź konta w panelu Apify (martwe klucze)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Stan w BAZIE (tabela `zasoby_apify`, migracja 0012) — PRZEŻYWA równoległe
+# przebiegi, w odróżnieniu od pliku stanu wyżej. Rotator sam tego nie woła
+# (ma zostać czysty i testowalny bez DB) — to fb_fetcher.py podpina `on_wynik`
+# i persystuje przez funkcje niżej.
+# ---------------------------------------------------------------------------
+def _hash_klucza(token: str) -> str:
+    """Odcisk tokenu do bazy — NIGDY surowa wartość (patrz migracja 0012)."""
+    import hashlib  # noqa: PLC0415 — moduł ma zostać lekki przy imporcie z workera
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+
+
+def zapisz_stan(conn, token: str, status: str, powod: str = "") -> None:
+    """Upsert stanu jednego klucza. `status='aktywny'` zeruje licznik błędów —
+    to jest sygnał "klucz znowu żyje", a nie kolejne zdarzenie do zliczenia.
+
+    UPSERT, nie INSERT: jeden wiersz na klucz. Gdy status SIĘ NIE ZMIENIA
+    względem ostatniego zapisu, `ile_bledow` rośnie (kolejne wystąpienie tego
+    samego problemu z rzędu) — inaczej licznik zawsze wynosiłby 1 i nie dałoby
+    się odróżnić klucza, który padł raz, od takiego, który pada bez przerwy.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO zasoby_apify (klucz_hash, status, powod, od_kiedy, ile_bledow)
+            VALUES (%s, %s, %s, NOW(), %s)
+            ON CONFLICT (klucz_hash) DO UPDATE SET
+                status       = EXCLUDED.status,
+                powod        = EXCLUDED.powod,
+                od_kiedy     = CASE WHEN zasoby_apify.status = EXCLUDED.status
+                                    THEN zasoby_apify.od_kiedy ELSE NOW() END,
+                ile_bledow   = CASE WHEN EXCLUDED.status = %s THEN 0
+                                    WHEN zasoby_apify.status = EXCLUDED.status
+                                    THEN zasoby_apify.ile_bledow + 1
+                                    ELSE 1 END,
+                zmieniono_at = NOW()
+            """,
+            (_hash_klucza(token), status, powod[:500], 0 if status == STATUS_AKTYWNY else 1,
+             STATUS_AKTYWNY),
+        )
+    conn.commit()
+
+
+def wczytaj_stany(conn, tokens) -> dict[str, dict]:
+    """{token: {status, powod, od_kiedy, ile_bledow}} dla tokenów, które MAJĄ wpis.
+
+    Token bez wpisu w tabeli (jeszcze nigdy nie zawiódł) po prostu nie ma tu
+    klucza — wołający ma to czytać jako 'aktywny', nie jako brak danych.
+    """
+    if not tokens:
+        return {}
+    hash_to_token = {_hash_klucza(t): t for t in tokens}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT klucz_hash, status, powod, od_kiedy, ile_bledow FROM zasoby_apify "
+            " WHERE klucz_hash = ANY(%s)",
+            (list(hash_to_token),),
+        )
+        wiersze = cur.fetchall()
+    out: dict[str, dict] = {}
+    for klucz_hash, status, powod, od_kiedy, ile_bledow in wiersze:
+        token = hash_to_token.get(klucz_hash)
+        if token is not None:
+            out[token] = {"status": status, "powod": powod,
+                         "od_kiedy": od_kiedy, "ile_bledow": ile_bledow}
+    return out
+
+
+def klucze_zywe(conn, tokens, *, teraz=None) -> list[str]:
+    """Tokeny NADAJĄCE SIĘ do rotacji teraz — bez martwych i bez tegomiesięcznie
+    wyczerpanych.
+
+    "Wraca 1. dnia miesiąca" liczymy PORÓWNANIEM miesiąca/roku z `od_kiedy` do
+    bieżącego — bez osobnego zadania czyszczącego. Klucz oznaczony wyczerpanym
+    31 lipca jest znowu żywy 1 sierpnia, bo to już inny (rok, miesiąc), nawet
+    gdy nikt nie zdążył go jeszcze użyć i nadpisać statusu na 'aktywny'.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    teraz = teraz or datetime.now(timezone.utc)
+    stany = wczytaj_stany(conn, tokens)
+    zywe = []
+    for token in tokens:
+        wpis = stany.get(token)
+        if wpis is None:
+            zywe.append(token)
+            continue
+        if wpis["status"] == STATUS_KLUCZ_MARTWY:
+            continue
+        if wpis["status"] == STATUS_KREDYT_WYCZERPANY:
+            od = wpis["od_kiedy"]
+            if od is not None and (od.year, od.month) == (teraz.year, teraz.month):
+                continue    # wyczerpany W TYM miesiącu — jeszcze nie wraca
+        zywe.append(token)
+    return zywe
 
 
 # ---------------------------------------------------------------------------
