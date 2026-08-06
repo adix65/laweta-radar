@@ -444,10 +444,18 @@ curl -s "localhost:8002/zdrowie?glebokie=1"   # dopytuje Apify o saldo (WYMAGA S
 ```
 
 Bot (`workers/bot.py`, osobny proces PM2, long polling) obsługuje przyciski pod
-powiadomieniem i cztery komendy: `/dzis`, `/ostatnie 10`, `/stop`, `/start`.
-`/stop` wycisza **wyłącznie brzęczenie** — fetcher zbiera dalej i wszystko trafia
-do panelu. Przyjmuje wiadomości **tylko z `TELEGRAM_CHAT_ID`**: nazwa bota jest
-publiczna, a jego komendy zmieniają statusy zleceń.
+powiadomieniem i komendy: `/dzis`, `/ostatnie 10`, `/limity` (alias `/limityapi`),
+`/stop`, `/start`. `/stop` wycisza **wyłącznie brzęczenie** — fetcher zbiera dalej
+i wszystko trafia do panelu. Przyjmuje wiadomości **tylko z `TELEGRAM_CHAT_ID`**:
+nazwa bota jest publiczna, a jego komendy zmieniają statusy zleceń.
+
+`/limity` pokazuje stan puli kont Apify na żądanie, bez logowania na VPS: saldo
+per konto (rozróżnia „żywe konto bez odczytu salda" od „martwy klucz" — pierwsze
+jest normalnym stanem darmowych kont, drugie wymaga wymiany), tempo zużycia
+liczone z tabeli `posty`, budżet dobowy i — gdy skonfigurowana jest pula proxy —
+ile adresów jest aktywnych/w kwarantannie i które konto z którego wychodzi
+(host:port, nigdy hasło). Wynik jest cache'owany 5 minut, żeby kilka `/limity`
+pod rząd nie generowało lawiny zapytań do Apify.
 
 ### Pętla zwrotna: każde „Śmieć" to dane
 
@@ -519,9 +527,11 @@ laweta_radar/
   workers/
     fb_fetcher.py      # CRON: Apify -> bramka -> baza; budżet w postach
     gate.py            # tani filtr słowny PRZED modelem, PL/DE/CS/SK
-    bot.py             # PM2: przyciski pod alertem + /dzis /ostatnie /stop /start
-    apify_keys.py      # rotacja puli kluczy APIFY_API_TOKEN1..N     [kopia 1:1]
-    apify_proxy.py     # przypisanie token->proxy, sesje lepkie      [kopia 1:1]
+    bot.py             # PM2: przyciski pod alertem + /dzis /ostatnie /limity /stop /start
+    apify_keys.py      # rotacja puli kluczy + 4-stanowa klasyfikacja błędów,
+                       # stan w tabeli `zasoby_apify` (nie plik — przeżywa równoległe runy)
+    apify_proxy.py     # przypisanie token->proxy, sesje lepkie, weryfikacja
+                       # (4 testy) i kwarantanna w tabeli `zasoby_apify_proxy`
     apify_run.py       # odpal actora, doczekaj, oddaj itemy + koszt + czas
     apify_credits.py   # saldo miesięcznego kredytu konta (do pomiaru kosztu)
     classifier.py      # ekstrakcja zlecenia z posta: prompt, rozbiór, walidacja

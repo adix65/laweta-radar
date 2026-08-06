@@ -286,25 +286,53 @@ do bramy otwartym tekstem. Sam ruch do Apify jest szyfrowany w obu przypadkach
 
 ## Co się dzieje, gdy proxy padnie
 
-Awaria proxy to dla rotatora kluczy błąd **przejściowy**
-(`laweta_radar/workers/apify_keys.py`): trzy próby tym samym kluczem, co 3 sekundy.
-Świadomie sprawdzamy to **przed** analizą treści komunikatu — wyczerpanie kredytu
-Apify przychodzi zawsze jako odpowiedź HTTP, nigdy jako błąd transportu, a komunikat
-od dostawcy proxy potrafi nieść słowo „limit" czy „quota" (wyczerpany transfer).
-Bez tej kolejności zdrowe klucze byłyby po kolei oznaczane jako puste, aż do
-`AllKeysExhausted` — czyli awaria proxy zjadłaby całą pulę kont w logach.
+Awaria proxy to dla rotatora kluczy `STATUS_BLAD_SIECI`
+(`laweta_radar/workers/apify_keys.classify_apify_error`) — jeden z **czterech**
+rozłącznych stanów, na jakie rozbity jest dawny worek „wyczerpany":
 
-Jeśli po ponowieniach klucz nadal nie przechodzi, a proxy **jest** skonfigurowane,
-warto pozwolić fetcherowi spróbować **kilku kolejnych kluczy** — każdy ma inne
-wyjście, więc jedno zdechłe proxy nie kończy całego runu. Robi to parametr
-`transient_key_switches` w `KeyRotator` (rozsądnie: 2). Limit jest po to, żeby
-prawdziwa awaria łącza nadal kończyła się szybko i prawdziwym błędem transportu,
-a nie godziną ponowień po stu kluczach. Bez skonfigurowanego proxy zostaw 0:
-awaria sieci jest wtedy globalna, więc nie ma po co przeskakiwać.
+| Stan | Sygnał | Reakcja |
+|------|--------|---------|
+| `STATUS_KLUCZ_MARTWY` | 401/403 albo „token/user-not-found" | klucz WYPADA NA STAŁE (zwykle ban) |
+| `STATUS_KREDYT_WYCZERPANY` | 402 albo usage/limit/exceeded/credit/quota | pomiń w TYM przebiegu, wraca 1. dnia miesiąca |
+| `STATUS_RATE_LIMIT` | 429 | backoff 5/15/45 s, TEN SAM klucz |
+| `STATUS_BLAD_SIECI` | timeout/sieć/proxy/5xx | ponów TYM SAMYM kluczem |
+
+Rozróżnienie martwy/wyczerpany jest celowe: „wyczerpany kredyt" system naprawia
+sam (miesięczny reset), „martwy klucz" nigdy nie wróci bez człowieka. Zlepienie
+ich w jeden worek (jak wcześniej) chowa alarm w szumie normalnego resetu —
+dokładnie to się stało, gdy pięć kont padło naraz z `user-or-token-not-found`
+i rotator to zaraportował jako zwykłe „wyczerpane".
+
+Stan każdego klucza żyje w tabeli `zasoby_apify` (migracja `0012`), NIE w pliku
+— plik nie przeżywa równoległych przebiegów. `apify_keys.klucze_zywe()` filtruje
+martwe i tegomiesięcznie-wyczerpane klucze PRZED rotacją, w każdym przebiegu.
+
+Świadomie sprawdzamy klasyfikację **przed** analizą treści komunikatu —
+wyczerpanie kredytu Apify przychodzi zawsze jako odpowiedź HTTP, nigdy jako
+błąd transportu, a komunikat od dostawcy proxy potrafi nieść słowo „limit" czy
+„quota" (wyczerpany transfer). Bez tej kolejności zdrowe klucze byłyby po
+kolei oznaczane jako martwe/wyczerpane, aż do `AllKeysExhausted`.
+
+### Samoleczenie — kolejne proxy i kwarantanna
+
+Przy `STATUS_BLAD_SIECI` fetcher (`_apify_run_group_samoleczaca` w
+`workers/fb_fetcher.py`) próbuje TEGO SAMEGO klucza z KOLEJNYM proxy — max
+3 razy — zamiast od razu przeskakiwać na inny klucz. Padnięty adres ląduje w
+kwarantannie na 30 minut (`apify_proxy.oznacz_kwarantanna`, tabela
+`zasoby_apify_proxy`) i po tym czasie wraca do **weryfikacji** (test „dochodzi
+do Apify" niżej), nie prosto do puli. Pierwsza próba idzie zwykłą, lepką
+ścieżką bez dotykania bazy — baza wchodzi do gry dopiero po pierwszej awarii,
+żeby happy path (99% wywołań) nie płacił za nic.
+
+Alternatywnie, `transient_key_switches` w `KeyRotator` (rozsądnie: 2) przerzuca
+na **kolejny klucz** po kilku nieudanych próbach transportu tego samego —
+sensowne, gdy samoleczenie proxy per klucz akurat nie pomogło. Bez
+skonfigurowanego proxy zostaw 0: awaria sieci jest wtedy globalna.
 
 Wołający, który sam steruje kolejnością prób, ma do dyspozycji
-`proxies_for_token()` — cały ranking proxy dla danego tokenu, od pierwszego
-wyboru po zapasowe. Kolejność jest deterministyczna, więc konto, które spadło na
+`proxies_for_token()` — cały ranking proxy dla danego tokenu — oraz
+`proxy_zywy_dla_tokenu()`, który dodatkowo POMIJA adresy aktualnie w
+kwarantannie. Kolejność jest deterministyczna, więc konto, które spadło na
 adres zapasowy, będzie tam wracać, dopóki pula się nie zmieni.
 
 Gdy nie wiadomo, przez co realnie wychodzimy:
@@ -312,6 +340,25 @@ Gdy nie wiadomo, przez co realnie wychodzimy:
 ```bash
 python -m laweta_radar.workers.apify_proxy --check --limit 10
 ```
+
+### Weryfikacja przed dopuszczeniem do puli — cztery testy
+
+`apify_proxy.weryfikuj_proxy()` / `zweryfikuj_pule()` sprawdzają KAŻDY adres
+czterema testami, zanim uzna się go za użyteczny — adres, który „działa"
+(odpowiada na ping), potrafi być bezużyteczny na trzy różne sposoby:
+
+  a) **odpowiada w ogóle** — proxy żyje;
+  b) **NIE przepuszcza gołego IP VPS-a** — inaczej to nie jest proxy, tylko
+     przezroczysty pass-through, i problem „jednego IP" zostaje;
+  c) **nie dubluje adresu innego proxy z puli** — dwa „różne" wpisy prowadzące
+     do jednego adresu to jedno wyjście, nie dwa;
+  d) **DOCHODZI do api.apify.com po HTTPS** — CONNECT na 443, bez tokenu ma
+     wrócić 401 od Apify (sukces: dowodzi poprawnego TLS-handshake'u), nie
+     błąd połączenia. To jest test, na którym kończy się większość darmowych
+     list — patrz `scripts/odswiez_proxy.py` i pomiar 0 z 411 wyżej.
+
+Test (d) jest pomijany, gdy (a) albo (b) już padły — adres bezużyteczny na
+pierwszym z dwóch pierwszych testów nie potrzebuje trzeciego zapytania.
 
 ## Czego tu nie ma (w stosunku do repo źródłowego)
 
@@ -322,18 +369,28 @@ python -m laweta_radar.workers.apify_proxy --check --limit 10
   z dwóch opcji: pulę bez odświeżania. Sama pula nadal jest **domyślnie
   wyłączona** i nadal nie jest zalecana — zmieniło się to, że da się ją włączyć
   świadomie, z odświeżaniem i z liczbą działających adresów przed oczami.
-- **Monitora kredytów Apify.** Osobny worker odpytujący saldo **wszystkich** kont
-  (i cała rodzina `APIFY_CREDITS_*`) nadal nie jest przeniesiony i nadal nie ma
-  być: poll wszystkich kont naraz z jednego adresu to dokładnie ten sygnał, przed
-  którym broni cała ta strona.
+- ~~**Monitora kredytów Apify.**~~ Był tu pominięty świadomie z tego samego
+  powodu co darmowa pula: poll wszystkich kont naraz z jednego adresu to
+  dokładnie ten sygnał multi-accountingu, przed którym broni cała ta strona.
+  Wrócił jako komenda Telegrama `/limity` (`laweta_radar/workers/bot.py` +
+  `apify_credits.pula_stanu`), bo operator bez niej musiał logować się na
+  VPS, żeby sprawdzić, czy pula żyje. Trzy różnice wobec worka z crona, które
+  czynią to bezpiecznym:
+    1. **Każde konto WYCHODZI PRZEZ SWOJE proxy** (`client_for_token` per
+       token) — pięć kont odpytanych "naraz" to i tak pięć różnych adresów
+       wyjściowych, nie jeden.
+    2. **Wyzwala CZŁOWIEK, na żądanie.** Nie ma crona odpytującego w kółko —
+       jest komenda, którą ktoś wpisuje, kiedy chce wiedzieć.
+    3. **Cache 5 minut.** Kilka `/limity` pod rząd (albo alias `/limityapi`)
+       oddaje ten sam wynik zamiast generować kolejną serię zapytań.
 
-  Jest za to `laweta_radar/workers/apify_credits.py` — odczyt zużycia
-  **pojedynczego** konta, na żądanie wołającego, wychodzący przez
-  `client_for_token()`, czyli przez proxy tego właśnie konta. Powstał, bo pomiar
-  actora (`scripts/pomiar_actora.py`) musi policzyć koszt jednego pobranego posta,
-  a to wymaga odczytu licznika przed serią i po niej. Różnica wobec monitora jest
-  istotna i warto ją utrzymać: jedno konto, jeden moment wybrany przez człowieka,
-  jego własne wyjście — zamiast stu kont odpytywanych naraz w kółko z crona.
+  `apify_credits.py` ma teraz DWA wejścia: `saldo()` — odczyt **pojedynczego**
+  konta na żądanie pomiaru (`scripts/pomiar_actora.py`, licznik przed serią
+  i po niej) — oraz `stan_konta()`/`pula_stanu()` — trzy ROZŁĄCZNE stany konta
+  (saldo znane / saldo nieznane / klucz martwy) dla `/limity`. Rozróżnienie
+  jest celowe: konto, które odpowiada na `/users/me`, ale nie na
+  `/users/me/limits` (typowe dla darmowych kont), jest SPRAWNE — tylko nie
+  podaje salda, i nie wolno tego pokazać jako błędu.
 
 ## Czego to NIE załatwia
 

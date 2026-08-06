@@ -721,6 +721,260 @@ _CHECK_URL_DEFAULT = "https://api.ipify.org"
 _CHECK_TIMEOUT = 20.0
 
 
+# =============================================================================
+# WERYFIKACJA PROXY — CZTERY TESTY przed dopuszczeniem do puli (docs/APIFY-PROXY.md)
+#
+# Adres, który "działa" (odpowiada na ping), potrafi być bezużyteczny na trzy
+# różne sposoby: jest transparentne (oddaje IP VPS-a — dokładnie problem, po
+# który sięgamy po proxy), dubluje inny wpis w puli (dwa "różne" adresy = jedno
+# IP wyjściowe, gubi się cel puli) albo nie dochodzi do api.apify.com mimo że
+# odpowiada na inne serwisy. TEN OSTATNI test jest sednem: większość darmowych
+# list proxy kończy się właśnie tutaj — i to jest powód, dla którego darmowa
+# pula (`APIFY_PROXY_POOL`) została w tym repo wyłączona domyślnie.
+# =============================================================================
+@dataclass(frozen=True)
+class WynikWeryfikacji:
+    """Wynik czterech testów jednego adresu proxy. `ok` = przeszedł WSZYSTKIE."""
+
+    url: str
+    odpowiada: bool            # (a) w ogóle odpowiada
+    nietransparentne: bool     # (b) NIE oddaje gołego IP VPS-a
+    unikalne: bool             # (c) nie dubluje adresu innego proxy z puli
+    dochodzi_do_apify: bool    # (d) CONNECT 443 do api.apify.com się udaje
+    blad: str = ""             # pierwszy napotkany powód niepowodzenia
+
+    @property
+    def ok(self) -> bool:
+        return self.odpowiada and self.nietransparentne and self.unikalne and self.dochodzi_do_apify
+
+
+# Endpoint do testu (d). BEZ tokenu — pytanie brzmi "czy dojdę", nie "czy mnie
+# wpuszczą": 401 od Apify JEST sukcesem (dowodzi poprawnego uścisku TLS z ich
+# certyfikatem), błąd połączenia/timeout NIE jest. Ta sama zasada co w
+# `scripts/odswiez_proxy.py`, tu zastosowana do KAŻDEGO skonfigurowanego proxy,
+# nie tylko do darmowej puli.
+_APIFY_PROBE_URL = "https://api.apify.com/v2/users/me"
+
+
+def _test_odpowiada_i_transparentne(url: str, direct_ip: str | None,
+                                    timeout: float) -> tuple[bool, bool, str]:
+    """(a) odpowiada, (b) NIE oddaje IP VPS-a — jednym zapytaniem do serwisu IP."""
+    import httpx  # noqa: PLC0415
+
+    try:
+        with httpx.Client(proxy=url, timeout=timeout) as c:
+            r = c.get(_CHECK_URL_DEFAULT)
+            r.raise_for_status()
+            ip = r.text.strip()
+    except Exception as e:  # noqa: BLE001 — każdy błąd = proxy nie odpowiada
+        return False, False, f"{type(e).__name__}: {e}"
+    if not ip:
+        return False, False, "pusta odpowiedź serwisu IP"
+    if direct_ip and ip == direct_ip:
+        return True, False, f"oddaje IP VPS-a ({ip}) — transparentne, bezużyteczne"
+    return True, True, ""
+
+
+def _test_dochodzi_do_apify(url: str, timeout: float) -> tuple[bool, str]:
+    """(d) CONNECT 443 do api.apify.com. KAŻDA odpowiedź HTTP jest sukcesem —
+    401 bez tokenu dowodzi poprawnego TLS-handshake'u z prawdziwym Apify."""
+    import httpx  # noqa: PLC0415
+
+    try:
+        with httpx.Client(proxy=url, timeout=timeout) as c:
+            c.get(_APIFY_PROBE_URL)
+        return True, ""
+    except Exception as e:  # noqa: BLE001 — błąd transportu = nie dochodzi
+        return False, f"{type(e).__name__}: {e}"
+
+
+def weryfikuj_proxy(url: str, *, direct_ip: str | None = None,
+                    znane_tozsamosci: set | None = None, timeout: float = 10.0) -> WynikWeryfikacji:
+    """Cztery testy dla JEDNEGO adresu. `znane_tozsamosci` — zbiór tożsamości
+    (patrz `_proxy_identity`) już zaakceptowanych do puli, do testu (c); brak
+    (None) = test (c) zawsze przechodzi (wywołanie ad hoc, poza kontekstem puli).
+
+    Test (d) jest POMIJANY, gdy (a) albo (b) już padły — brak sensu pytać o
+    Apify przez adres, który w ogóle nie odpowiada albo jest transparentny
+    (oddaje IP VPS-a): taki adres jest bezużyteczny niezależnie od wyniku (d).
+    """
+    tozsamosc = _proxy_identity(url)
+    unikalne = znane_tozsamosci is None or tozsamosc not in znane_tozsamosci
+    odpowiada, nietransparentne, blad = _test_odpowiada_i_transparentne(url, direct_ip, timeout)
+    if not (odpowiada and nietransparentne):
+        return WynikWeryfikacji(url, odpowiada, nietransparentne, unikalne, False, blad)
+    dochodzi, blad_d = _test_dochodzi_do_apify(url, timeout)
+    return WynikWeryfikacji(url, odpowiada, nietransparentne, unikalne, dochodzi, blad_d)
+
+
+def zweryfikuj_pule(urls, *, timeout: float = 10.0) -> list[WynikWeryfikacji]:
+    """Wszystkie kandydaty naraz — testy (a)/(b)/(d) RÓWNOLEGLE (są niezależne per
+    adres), test (c) doliczony PO fakcie w kolejności wejściowej listy (pierwsze
+    wystąpienie tożsamości wygrywa jako „unikalne" — bez tego zrównoleglenie
+    zrobiłoby z testu (c) loterię zależną od kolejności odpowiedzi sieci).
+
+    `direct_ip` liczymy RAZ dla całej serii, nie per kandydat — jedno zapytanie
+    bez proxy, niepotrzebne powtarzać setki razy.
+    """
+    import httpx  # noqa: PLC0415
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    try:
+        with httpx.Client(timeout=timeout) as c:
+            direct_ip = c.get(_CHECK_URL_DEFAULT).text.strip() or None
+    except Exception:  # noqa: BLE001 — bez adresu bezpośredniego test (b) jest łagodniejszy
+        direct_ip = None
+
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(urls)))) as pool:
+        czesciowe = list(pool.map(
+            lambda u: weryfikuj_proxy(u, direct_ip=direct_ip, timeout=timeout), urls))
+
+    widziane: set[str] = set()
+    wyniki: list[WynikWeryfikacji] = []
+    for w in czesciowe:
+        tozsamosc = _proxy_identity(w.url)
+        unikalne = tozsamosc not in widziane
+        widziane.add(tozsamosc)
+        wyniki.append(w if unikalne == w.unikalne else replace(w, unikalne=unikalne))
+    return wyniki
+
+
+# =============================================================================
+# KWARANTANNA — stan proxy w bazie (tabela `zasoby_apify_proxy`, migracja 0012)
+#
+# Przepinanie TYLKO gdy proxy padnie: klucz dostaje kolejne wolne proxy z
+# rankingu (`proxies_for_token`), a stare ląduje tu na 30 minut i po niej
+# wraca do WERYFIKACJI (test d), nie prosto do puli — padnięty adres ma
+# UDOWODNIĆ, że znowu dochodzi do Apify, zanim ktoś znowu na niego trafi.
+# =============================================================================
+KWARANTANNA_MIN = 30
+
+_STAN_AKTYWNE = "aktywne"
+_STAN_KWARANTANNA = "kwarantanna"
+
+
+def _hash_proxy(url: str) -> str:
+    """Odcisk TOŻSAMOŚCI proxy (bez loginu/hasła — patrz `_proxy_identity`) do
+    bazy. NIGDY hasło, NIGDY cały URL: to jest dokładnie ta sama zasada, dla
+    której `mask_url`/`proxy_label` istnieją do logów."""
+    import hashlib  # noqa: PLC0415
+
+    return hashlib.sha256(_proxy_identity(url).encode("utf-8")).hexdigest()[:24]
+
+
+def oznacz_kwarantanna(conn, url: str, powod: str, *, klucz_hash: str | None = None,
+                       minuty: int = KWARANTANNA_MIN) -> None:
+    """Wyślij proxy do kwarantanny na `minuty` — upsert, licznik błędów rośnie."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO zasoby_apify_proxy
+                (proxy_hash, etykieta, status, od_kiedy, wraca_o, ile_bledow,
+                 przypisany_klucz_hash)
+            VALUES (%s, %s, %s, NOW(), NOW() + make_interval(mins => %s), 1, %s)
+            ON CONFLICT (proxy_hash) DO UPDATE SET
+                etykieta               = EXCLUDED.etykieta,
+                status                 = %s,
+                od_kiedy               = NOW(),
+                wraca_o                = NOW() + make_interval(mins => %s),
+                ile_bledow             = zasoby_apify_proxy.ile_bledow + 1,
+                przypisany_klucz_hash  = EXCLUDED.przypisany_klucz_hash,
+                zmieniono_at           = NOW()
+            """,
+            (_hash_proxy(url), proxy_label(url), _STAN_KWARANTANNA, minuty, klucz_hash,
+             _STAN_KWARANTANNA, minuty),
+        )
+    conn.commit()
+    _ = powod  # powód idzie do logu wołającego (fb_fetcher) — tabela trzyma tylko stan
+
+
+def oznacz_aktywne(conn, url: str, *, klucz_hash: str | None = None) -> None:
+    """Proxy wraca do puli (przeszło ponowną weryfikację po kwarantannie albo
+    właśnie zostało przydzielone kluczowi po raz pierwszy)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO zasoby_apify_proxy
+                (proxy_hash, etykieta, status, od_kiedy, wraca_o, ile_bledow,
+                 przypisany_klucz_hash)
+            VALUES (%s, %s, %s, NOW(), NULL, 0, %s)
+            ON CONFLICT (proxy_hash) DO UPDATE SET
+                etykieta               = EXCLUDED.etykieta,
+                status                 = %s,
+                od_kiedy               = CASE WHEN zasoby_apify_proxy.status = %s
+                                              THEN zasoby_apify_proxy.od_kiedy ELSE NOW() END,
+                wraca_o                = NULL,
+                ile_bledow             = 0,
+                przypisany_klucz_hash  = EXCLUDED.przypisany_klucz_hash,
+                zmieniono_at           = NOW()
+            """,
+            (_hash_proxy(url), proxy_label(url), _STAN_AKTYWNE, klucz_hash,
+             _STAN_AKTYWNE, _STAN_AKTYWNE),
+        )
+    conn.commit()
+
+
+def wczytaj_stan_proxy(conn, urls) -> dict[str, dict]:
+    """{url: {etykieta, status, od_kiedy, wraca_o, ile_bledow}} dla ZNANYCH adresów.
+
+    Adres bez wpisu (jeszcze nigdy nie zawiódł ani nie był przydzielony) po
+    prostu nie ma tu klucza — wołający ma to czytać jako 'aktywne'."""
+    urls = list(urls)
+    if not urls:
+        return {}
+    hash_to_url = {_hash_proxy(u): u for u in urls}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT proxy_hash, etykieta, status, od_kiedy, wraca_o, ile_bledow "
+            " FROM zasoby_apify_proxy WHERE proxy_hash = ANY(%s)",
+            (list(hash_to_url),),
+        )
+        wiersze = cur.fetchall()
+    out: dict[str, dict] = {}
+    for proxy_hash, etykieta, status, od_kiedy, wraca_o, ile_bledow in wiersze:
+        url = hash_to_url.get(proxy_hash)
+        if url is not None:
+            out[url] = {"etykieta": etykieta, "status": status, "od_kiedy": od_kiedy,
+                       "wraca_o": wraca_o, "ile_bledow": ile_bledow}
+    return out
+
+
+def w_kwarantannie(conn, url: str, *, teraz=None) -> bool:
+    """Czy `url` jest TERAZ w kwarantannie (a jej koniec jeszcze nie minął).
+
+    Przeterminowana kwarantanna oddaje False CELOWO — worker ma wtedy sięgnąć
+    po ten adres i (przez normalny użytek albo `--zweryfikuj-kwarantanne`)
+    wrócić do testu (d), a nie ufać mu automatycznie tylko dlatego, że zegar minął.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    teraz = teraz or datetime.now(timezone.utc)
+    stan = wczytaj_stan_proxy(conn, [url]).get(url)
+    if stan is None or stan["status"] != _STAN_KWARANTANNA:
+        return False
+    wraca_o = stan["wraca_o"]
+    return wraca_o is None or teraz < wraca_o
+
+
+def proxy_zywy_dla_tokenu(token: str, conn, cfg: ProxyConfig | None = None,
+                          env=None) -> str | None:
+    """Jak `proxy_for_token`, ale POMIJA adresy aktualnie w kwarantannie — klucz
+    dostaje kolejne wolne proxy z rankingu `proxies_for_token`.
+
+    Sensowne WYŁĄCZNIE przy puli: przy proxy przypisanym wprost (APIFY_PROXY{N})
+    i przy bramie z {session} adres jest wyborem operatora / nośnikiem lepkości,
+    więc `proxies_for_token` i tak oddaje listę jednoelementową — podmienianie
+    go za plecami operatora psułoby dokładnie to, po co tam jest.
+    """
+    cfg = load_proxy_config(env) if cfg is None else cfg
+    for kandydat in proxies_for_token(token, cfg, env):
+        if not w_kwarantannie(conn, kandydat):
+            return kandydat
+    return None     # cała ranga w kwarantannie — wołający decyduje (APIFY_PROXY_REQUIRED)
+
+
 def _exit_ip(token: str | None, cfg: ProxyConfig, url: str, timeout: float) -> tuple[str, str]:
     """(adres wyjściowy, błąd) dla jednego tokenu; token=None -> wyjście bezpośrednie."""
     import httpx  # noqa: PLC0415

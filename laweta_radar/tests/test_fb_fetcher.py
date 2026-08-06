@@ -644,3 +644,271 @@ def test_ta_sama_tresc_z_roznych_grup_to_jedno_zlecenie():
     pięcioma alertami o tej samej awarii."""
     assert f.fb_id("Zepsułem się na S19") == f.fb_id("Zepsułem się na S19")
     assert f.fb_id("Zepsułem się na S19") != f.fb_id("Zepsułem się na A4")
+
+
+# ---------------------------------------------------------------------------
+# 9. Samoleczenie — _apify_run_group_samoleczaca (sekcja 4 zadania)
+#
+# Błąd sieci/proxy -> ten sam klucz, kolejne proxy (max 3 próby), padnięty
+# adres w kwarantannie. Klucz martwy/bez kredytu/rate limit NIE są tu obsłużone
+# — to decyzje KeyRotatora, ta funkcja łapie WYŁĄCZNIE błąd transportu.
+# ---------------------------------------------------------------------------
+class _SiecBlad(Exception):
+    """Nazwa niesie 'timeout'/'connect' -> classify_apify_error rozpozna jako
+    błąd sieci (patrz workers/apify_keys._is_network_error)."""
+
+
+class _HTTPBlad(Exception):
+    def __init__(self, code: int) -> None:
+        super().__init__(f"HTTP {code}")
+        self.response = type("R", (), {"status_code": code})()
+
+
+class _FakeConnDB:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_samoleczenie_happy_path_nie_dotyka_bazy(monkeypatch):
+    """Pierwsza próba udana — funkcja NIE otwiera bazy w ogóle (hot path)."""
+    wolania_bazy = []
+    monkeypatch.setattr(f, "_apify_run_group", lambda *a, **k: [{"ok": True}])
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: wolania_bazy.append(1) or None)
+    wynik = f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+    assert wynik == [{"ok": True}]
+    assert wolania_bazy == []
+
+
+def test_samoleczenie_blad_niesieciowy_leci_od_razu_wyzej(monkeypatch):
+    """401 (klucz martwy) to sprawa KeyRotatora — bez prób proxy, bez bazy."""
+    def _run(*a, **k):
+        raise _HTTPBlad(401)
+
+    wolania_bazy = []
+    monkeypatch.setattr(f, "_apify_run_group", _run)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: wolania_bazy.append(1) or None)
+    with pytest.raises(_HTTPBlad):
+        f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+    assert wolania_bazy == []
+
+
+def test_samoleczenie_bez_proxy_nie_probuje_ponownie(monkeypatch):
+    """Błąd sieci, ale klucz w ogóle nie ma proxy — nie ma czym 'przepiąć'."""
+    def _run(*a, **k):
+        raise _SiecBlad("connection timed out")
+
+    wolania_bazy = []
+    monkeypatch.setattr(f, "_apify_run_group", _run)
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: None)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: wolania_bazy.append(1) or None)
+    with pytest.raises(_SiecBlad):
+        f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+    assert wolania_bazy == []
+
+
+def test_samoleczenie_probuje_kolejnego_proxy_po_awarii_sieci(monkeypatch):
+    proby = []
+
+    def _run(url, limit, okno, sciezka, token, proxy=None):
+        proby.append(proxy)
+        if proxy is None:
+            raise _SiecBlad("connection reset")
+        return [{"ok": proxy}]
+
+    kwarantanna = []
+    monkeypatch.setattr(f, "_apify_run_group", _run)
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna",
+                        lambda conn, url, powod, klucz_hash=None: kwarantanna.append(url))
+    monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu",
+                        lambda token, conn: "proxy2")
+
+    wynik = f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+    assert wynik == [{"ok": "proxy2"}]
+    assert proby == [None, "proxy2"]        # pierwsza próba (lepka), potem proxy2
+    assert kwarantanna == ["proxy1"]         # PADNIĘTY adres oznaczony, nie proxy2
+
+
+def test_samoleczenie_wyczerpuje_pule_proxy_i_oddaje_ostatni_blad(monkeypatch):
+    def _run(url, limit, okno, sciezka, token, proxy=None):
+        raise _SiecBlad(f"padło {proxy}")
+
+    licznik = {"n": 1}
+
+    def _kolejny(token, conn):
+        licznik["n"] += 1
+        return f"proxy{licznik['n']}"        # zawsze INNY adres — bez tego pętla kończy się wcześniej
+
+    monkeypatch.setattr(f, "_apify_run_group", _run)
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna", lambda *a, **k: None)
+    monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu", _kolejny)
+
+    with pytest.raises(_SiecBlad):
+        f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+    assert licznik["n"] == 1 + (f._PROXY_PROBY_SAMOLECZENIA - 1)   # dokładnie tyle prób, ile deklaruje stała
+
+
+def test_samoleczenie_cala_ranga_w_kwarantannie_konczy_od_razu(monkeypatch):
+    """`proxy_zywy_dla_tokenu` oddaje None, gdy wszystko jest w kwarantannie —
+    nie ma sensu kręcić się dalej."""
+    monkeypatch.setattr(f, "_apify_run_group",
+                        lambda *a, **k: (_ for _ in ()).throw(_SiecBlad("timeout")))
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_proxy, "oznacz_kwarantanna", lambda *a, **k: None)
+    monkeypatch.setattr(f.apify_proxy, "proxy_zywy_dla_tokenu", lambda token, conn: None)
+
+    with pytest.raises(_SiecBlad):
+        f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+
+
+def test_samoleczenie_baza_pada_w_trakcie_ponowien_oddaje_oryginalny_blad(monkeypatch):
+    monkeypatch.setattr(f, "_apify_run_group",
+                        lambda *a, **k: (_ for _ in ()).throw(_SiecBlad("timeout")))
+    monkeypatch.setattr(f.apify_proxy, "proxy_for_token", lambda token: "proxy1")
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)   # baza akurat padła
+    with pytest.raises(_SiecBlad):
+        f._apify_run_group_samoleczaca("url", 10, 30, "B", "tok", log=lambda *a: None)
+
+
+# ---------------------------------------------------------------------------
+# 10. Alert przy wyczerpaniu całej puli (AllKeysExhausted)
+# ---------------------------------------------------------------------------
+def test_alert_pula_wyczerpana_wysyla_telegram_z_liczbami(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "klucze_zywe", lambda conn, tokeny: tokeny[:1])
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+
+    logi = []
+    f._alert_pula_wyczerpana(["t1", "t2", "t3"], log=logi.append)
+
+    assert len(wyslane) == 1
+    assert "3" in wyslane[0] and "1/3" in wyslane[0]
+    assert any("KRYTYCZNE" in linia for linia in logi)
+
+
+def test_alert_pula_wyczerpana_dziala_bez_bazy(monkeypatch):
+    """Diagnostyka to usprawnienie — alert MA pójść, nawet niepełny."""
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
+
+    f._alert_pula_wyczerpana(["t1", "t2"], log=lambda *a: None)
+    assert len(wyslane) == 1
+    assert "brak bazy" in wyslane[0]
+
+
+def test_alert_pula_wyczerpana_nie_wywala_gdy_telegram_pada(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    def _wybuchnij(tekst):
+        raise RuntimeError("sieć padła")
+
+    monkeypatch.setattr(telegram_notify, "wyslij", _wybuchnij)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
+    f._alert_pula_wyczerpana(["t1"], log=lambda *a: None)   # nie ma rzucić — test przechodzi
+
+
+# ---------------------------------------------------------------------------
+# 11. Wczesne ostrzeżenie o degradacji puli (_alert_jesli_zdegradowana)
+# ---------------------------------------------------------------------------
+def test_degradacja_bez_bazy_nic_nie_robi(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
+    assert wyslane == []
+
+
+def test_degradacja_cisza_gdy_pula_zdrowa(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
+    assert wyslane == []
+
+
+def test_degradacja_alertuje_gdy_mniej_niz_dwa_zywe_klucze(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+    logi = []
+    f._alert_jesli_zdegradowana(["t1"], ["t1", "t2", "t3"], log=logi.append)
+    assert len(wyslane) == 1
+    assert "żywych kluczy" in wyslane[0]
+    assert any("UWAGA" in linia for linia in logi)
+
+
+def test_degradacja_alertuje_gdy_martwy_klucz(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(
+        f.apify_keys, "wczytaj_stany",
+        lambda conn, tokeny: {"t3": {"status": f.apify_keys.STATUS_KLUCZ_MARTWY}})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+    # trzy żywe (>= próg), więc TYLKO klucz martwy ma wywołać alert
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
+    assert len(wyslane) == 1
+    assert "martwych" in wyslane[0]
+
+
+def test_degradacja_alertuje_gdy_mniej_proxy_niz_kluczy(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ("p1", "p2", "p3")})())
+    monkeypatch.setattr(f.apify_proxy, "wczytaj_stan_proxy",
+                        lambda conn, urls: {"p1": {"status": "kwarantanna"},
+                                            "p2": {"status": "kwarantanna"}})
+    # 3 proxy w puli, 2 w kwarantannie -> 1 żywe, mniej niż 3 klucze
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
+    assert len(wyslane) == 1
+    assert "żywych proxy" in wyslane[0]
+
+
+def test_degradacja_diagnostyka_pada_nie_wywala_runu(monkeypatch):
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+
+    def _wybuchnij(conn, tokeny):
+        raise RuntimeError("baza padła w środku zapytania")
+
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", _wybuchnij)
+    f._alert_jesli_zdegradowana(["t1"], ["t1", "t2"], log=lambda *a: None)   # nie ma rzucić
+    assert wyslane == []
