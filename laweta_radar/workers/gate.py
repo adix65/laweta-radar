@@ -900,6 +900,13 @@ OFERTA: list[tuple[str, int, str]] = [
     (r"volne (misto|miesto)", 0, "OFERTA"),
     (r"jedu (z|ze|do)", 0, "OFERTA"),
     (r"volny odtah", 0, "OFERTA"),
+    # „Volny vytazovak Kosice - Zilina tel. ..." — dokładnie ten sam wzorzec
+    # oferty co polska „wolna laweta", tylko z rzeczownikiem, który wszedł do
+    # punktacji (+3): bez tego wpisu taka oferta z „tel" i „surne" umiałaby
+    # dozbierać do progu. Bezpieczne w tę samą stronę co cała tabela: POPYT
+    # bije OFERTĘ, więc „Hladam volny vytazovak" nadal przechodzi.
+    (r"voln[ay] (odtahovk[a-z]*|vytazovak[a-z]*|vyt['’]?ahovak[a-z]*|"
+     r"plosin[a-z]*)", 0, "OFERTA"),
 ]
 
 
@@ -1158,9 +1165,21 @@ PRZEPUSZCZENIE_CS_SK: list[tuple[str, int, str]] = [
     # Alternatywy wypisane PŁASKO, bez grupy w grupie: „))" jest powtórzoną
     # interpunkcją, którą normalizacja zbija do „)" — a wzorzec musi być równy
     # własnej formie znormalizowanej (test_wzorce_obcojezyczne_sa_znormalizowane).
+    # „vyťazovák" / „vyťahovák" — potoczna słowacka nazwa lawety z wciągarką
+    # i słowo PODSTAWOWE grupy „Vyťazováky CZ/SK - odťah a preprava vozidel":
+    # „Hladam vytazovak Polsko Slovensko" dostawał zero punktów, bo słownik nie
+    # znał słowa, wokół którego kręci się cała grupa. Trzy pisownie, bo ludzie
+    # piszą „ť" na trzy sposoby: z haczkiem (normalizacja zbija do „t"), gołym
+    # „t" i jako „t" z apostrofem — prostym Z KLAWIATURY i typograficznym
+    # Z TELEFONU (autokorekta zamienia ' na ’, a normalizacja żadnego nie
+    # usuwa). Rodzina „odtahovka/odtahovac" NIE ma tu osobnych wpisów — pokrywa
+    # ją stojące obok „odtah[a-z]*", a martwy wzorzec jest gorszy niż jego brak.
+    # „plosina" (laweta z platformą) i „navijak" (wciągarka) — ten sam rynek,
+    # ta sama strona popytu, gdy stoją przy czasowniku szukania.
     (r"(potrebuji|potrebuju|potrebuje|potrebujem|potrebujeme|hledam|hledame|"
      r"hladam|hladame|zhanim|zhanime|zhanam|zhaname|shanim|shanime) "
-     r"(odtah[a-z]*|prepravu|prepravy|prevoz|prevozu|odvoz|odvozu|dopravu|"
+     r"(odtah[a-z]*|vytazovak[a-z]*|vyt['’]?ahovak[a-z]*|plosin[a-z]*|"
+     r"navijak[a-z]*|prepravu|prepravy|prevoz|prevozu|odvoz|odvozu|dopravu|"
      r"transport[a-z]*)", 0, "prosba wprost"),
     # To samo z bezokolicznikiem zamiast rzeczownika: „potrebujem prepravit",
     # „potrebuji prevezt", „potrebujem odviezt". Goły bezokolicznik przewozu
@@ -1206,11 +1225,17 @@ PRZEPUSZCZENIE_CS_SK: list[tuple[str, int, str]] = [
 ODRZUCENIE_CS_SK: list[tuple[str, int, str]] = [
     # „nabizim/ponukam" zawężone jak polskie „oferuje" — sama oferta pieniędzy
     # to klient, nie konkurencja.
-    (r"(nabizim|nabizime|ponukam|ponukame) (odtah[a-z]*|prepravu|prevoz|"
+    # Te same rzeczowniki sprzętowe co w warstwie 2 — po stronie PODAŻY.
+    # „Ponukam vytazovak 24/7" to autopromocja dokładnie tak samo jak
+    # „ponukam odtah"; bez tych alternatyw wisiała na punktacji zamiast
+    # odpaść nazwaną regułą.
+    (r"(nabizim|nabizime|ponukam|ponukame) (odtah[a-z]*|vytazovak[a-z]*|"
+     r"vyt['’]?ahovak[a-z]*|plosin[a-z]*|navijak[a-z]*|prepravu|prevoz|"
      r"sluzby|nase sluzby)", 0, "autopromocja"),
     (r"(vyhodne|levne|lacne|najlepsie) ceny", 0, "autopromocja"),
     (r"nonstop (odtah|servis)", 0, "autopromocja"),
-    (r"(prodam|predam) (odtahovku|prives|privesny vozik|navjes)",
+    (r"(prodam|predam) (odtahovku|vytazovak[a-z]*|vyt['’]?ahovak[a-z]*|"
+     r"plosin[a-z]*|navijak[a-z]*|prives|privesny vozik|navjes)",
      0, "sprzedaz sprzetu"),
     (r"(hledame|hladame) (ridice|vodica|vodicov)", 0, "ogloszenie o pracy"),
     (r"(prijmeme|primeme) (ridice|vodica)", 0, "ogloszenie o pracy"),
@@ -1242,6 +1267,14 @@ PUNKTACJA_CS_SK: list[tuple[str, int, str]] = [
 
     # --- AKCJA (+3) ---
     (r"odtah[a-z]*", 3, "AKCJA"),
+    # Rzeczowniki sprzętowe z tą samą wagą co „odtah": posty telegraficzne
+    # („Treba vytazovak Kosice - Presov, surne") nie mają czasownika szukania,
+    # więc warstwa 2 ich nie łapie — a bez punktów za samo słowo wylatywały
+    # z zerem. Pisownie „vytazovak/vytahovak/vyt'ahovak" — patrz nota
+    # w PRZEPUSZCZENIE_CS_SK.
+    (r"vytazovak[a-z]*|vyt['’]?ahovak[a-z]*", 3, "AKCJA"),
+    (r"plosin[a-z]*", 3, "AKCJA"),
+    (r"navijak[a-z]*", 3, "AKCJA"),
     (r"prevoz|prepravu?", 3, "AKCJA"),
     (r"odvez[a-z]*", 3, "AKCJA"),
     (r"nalozit|nalozenie", 3, "AKCJA"),
