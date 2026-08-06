@@ -827,7 +827,8 @@ POPYT: list[tuple[str, int, str]] = [
     (r"such(e|en|t)", 0, "POPYT"),
     (r"gesucht", 0, "POPYT"),
     (r"brauch(e|en|t)", 0, "POPYT"),
-    (r"benotig(e|t|en)", 0, "POPYT"),
+    # Obie pisownie umlautu — patrz nota przy „Rückfahrt" w OFERTA.
+    (r"ben(o|oe)tig(e|t|en)", 0, "POPYT"),
     (r"wer (kann|hat|holt|bringt|fahrt)", 0, "POPYT"),
     (r"bitte um", 0, "POPYT"),
     (r"panne|kaputt|defekt|totalschaden|unfall", 0, "POPYT"),
@@ -839,13 +840,16 @@ POPYT: list[tuple[str, int, str]] = [
     # --- CS / SK ---
     (r"hleda(m|me)|hlada(m|me)", 0, "POPYT"),
     (r"potrebuj(i|u|e|em|eme)", 0, "POPYT"),
+    # „zháním/sháním" (cs) i „zháňam" (sk) — te same czasowniki szukania,
+    # których warstwa 2 używa w parze z rzeczownikiem transportu.
+    (r"zhani(m|me)|zhana(m|me)|shani(m|me)", 0, "POPYT"),
     (r"prosim o", 0, "POPYT"),
-    (r"(kdo|kto) (pomuze|pomoze|privezie|priveze|odveze|odvezie|ma|jede|pojede)",
-     0, "POPYT"),
+    (r"(kdo|kto) (pomuze|pomoze|privezie|priveze|preveze|prevezie|odveze|"
+     r"odvezie|ma|jede|pojede)", 0, "POPYT"),
     (r"poruch[auy]", 0, "POPYT"),
     (r"nepojizdn[a-z]*|nepojazdn[a-z]*", 0, "POPYT"),
     (r"ne(startuje|nastartuje)", 0, "POPYT"),
-    (r"nehod[auy]|havari[aey]", 0, "POPYT"),
+    (r"nehod[aeuy]|havari[aey]", 0, "POPYT"),
     (r"(koupil jsem|kupil som)", 0, "POPYT"),
 ]
 
@@ -973,6 +977,16 @@ PRZEPUSZCZENIE_DE: list[tuple[str, int, str]] = [
     (r"suche (einen )?abschlepp[a-z]*", 0, "prosba wprost"),
     (r"brauche (einen |eine )?abschlepp[a-z]*", 0, "prosba wprost"),
     (r"brauche (einen )?transport", 0, "prosba wprost"),
+    # Czasownik potrzeby + „Transport" istniał tu tylko w wariancie „brauche".
+    # „Suche Transport für ..." i „Benötige Transport" spadały do punktacji
+    # i przy progu 5 wylatywały — ta sama dziura co w CS/SK, ten sam powód.
+    # Prawa granica słowa (dokładana przez `_skompiluj`) odcina „Transporte"
+    # i „Transportaufträge", czyli przewoźnika szukającego ładunków.
+    (r"suche (einen )?transport", 0, "prosba wprost"),
+    # OBIE PISOWNIE UMLAUTU — jak przy „Rückfahrt" w OFERTA: normalizacja zbija
+    # „benötige" do „benotige", ale NIE tyka zastępczego „benoetige".
+    (r"ben(o|oe)tig(e|en) (einen |eine )?(transport|abschlepp[a-z]*)",
+     0, "prosba wprost"),
     (r"wer kann (mein |mir |mein auto |mein fahrzeug )?abschleppen", 0, "prosba wprost"),
     (r"wer kann helfen", 0, "prosba wprost"),
     (r"kann (mir )?jemand helfen", 0, "prosba wprost"),
@@ -1131,16 +1145,38 @@ WYGASZENIE_CS_SK: list[tuple[str, int, str]] = [
 
 PRZEPUSZCZENIE_CS_SK: list[tuple[str, int, str]] = [
     # --- prośba wprost (formy, które się NIE zlewają po normalizacji) ---
-    (r"hledam odtah[a-z]*", 0, "prosba wprost"),
-    (r"hladam odtah[a-z]*", 0, "prosba wprost"),
-    (r"potrebuji odtah[a-z]*", 0, "prosba wprost"),
-    (r"potrebuju odtah[a-z]*", 0, "prosba wprost"),
-    (r"potrebujem odtah[a-z]*", 0, "prosba wprost"),
+    #
+    # CZASOWNIK POTRZEBY/SZUKANIA + RZECZOWNIK TRANSPORTU w jednym wpisie.
+    # Pierwsza wersja znała ten czasownik WYŁĄCZNIE w parze z „odtah" — więc
+    # „Potrebujem prepravu auta z Bratislavy do Kosic", czyli najczęstsza forma
+    # zlecenia na tym rynku, nie trafiała tu w nic i wisiała w punktacji na
+    # samym „prepravu" (+3): przy progu 3 przechodziła ledwo, przy 5 wylatywała.
+    # Para „potrzebuję/szukam + przewóz" jest po stronie popytu dokładnie tak
+    # samo jednoznaczna jak z „odtah" — reklama konkurencji zaczyna się od
+    # „nabizime/ponukame" (warstwa 3), nie od czasownika potrzeby.
+    #
+    # Alternatywy wypisane PŁASKO, bez grupy w grupie: „))" jest powtórzoną
+    # interpunkcją, którą normalizacja zbija do „)" — a wzorzec musi być równy
+    # własnej formie znormalizowanej (test_wzorce_obcojezyczne_sa_znormalizowane).
+    (r"(potrebuji|potrebuju|potrebuje|potrebujem|potrebujeme|hledam|hledame|"
+     r"hladam|hladame|zhanim|zhanime|zhanam|zhaname|shanim|shanime) "
+     r"(odtah[a-z]*|prepravu|prepravy|prevoz|prevozu|odvoz|odvozu|dopravu|"
+     r"transport[a-z]*)", 0, "prosba wprost"),
+    # To samo z bezokolicznikiem zamiast rzeczownika: „potrebujem prepravit",
+    # „potrebuji prevezt", „potrebujem odviezt". Goły bezokolicznik przewozu
+    # („prevezt|previezt") stoi niżej i łapie formy bez czasownika potrzeby.
+    (r"(potrebuji|potrebuju|potrebuje|potrebujem|potrebujeme) "
+     r"(prepravit|prevezt|previezt|odvezt|odviezt|dopravit)",
+     0, "prosba wprost"),
     (r"prosim o odtah", 0, "prosba wprost"),
     (r"kdo pomuze", 0, "prosba wprost"),
     (r"kto pomoze", 0, "prosba wprost"),
     (r"(kdo|kto) ma (volno|volny cas)", 0, "prosba wprost"),
-    (r"(kdo|kto) (privezie|priveze|odveze|odvezie)", 0, "prosba wprost"),
+    # „preveze/prevezie" obok „priveze": „hledam nekoho kdo preveze" /
+    # „hladam niekoho kto preveze" to pytanie o PRZEWÓZ, nie o przywóz,
+    # i bez tej pary spadało do punktacji.
+    (r"(kdo|kto) (privezie|priveze|preveze|prevezie|odveze|odvezie)",
+     0, "prosba wprost"),
     # --- czynność Z DOPEŁNIENIEM (po normalizacji wspólna dla obu języków) ---
     # Samo „odtahov*" tu NIE stoi z tego samego powodu co niemieckie
     # „abschleppen": warstwa 2 bije warstwę 3, więc nazwa usługi wpuszczałaby
@@ -1163,7 +1199,7 @@ PRZEPUSZCZENIE_CS_SK: list[tuple[str, int, str]] = [
     (r"nepojazdn[a-z]*", 0, "zdarzenie drogowe"),
     (r"zustal jsem stat", 0, "zdarzenie drogowe"),
     (r"zostal som stat", 0, "zdarzenie drogowe"),
-    (r"nehod[auy]", 0, "zdarzenie drogowe"),
+    (r"nehod[aeuy]", 0, "zdarzenie drogowe"),  # nehoda / „po nehodě" -> „po nehode"
     (r"havari[aey]", 0, "zdarzenie drogowe"),
 ]
 

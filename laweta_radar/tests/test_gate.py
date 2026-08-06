@@ -1108,6 +1108,69 @@ def test_wzorce_obcojezyczne_sa_znormalizowane():
             f"wzorzec nie jest w formie znormalizowanej: {wzorzec!r}")
 
 
+# ===========================================================================
+# REGRESJA — czasownik potrzeby + rzeczownik transportu (CS/SK i DE)
+#
+# „Potrebujem prepravu auta z Bratislavy do Kosic" to najczęstsza forma
+# zlecenia na tym rynku, a przechodziła WYŁĄCZNIE punktacją, na 3 punkty:
+# przy GATE_PROG=3 ledwo, przy jakimkolwiek podniesieniu progu — wcale.
+# Słownik znał czasownik potrzeby tylko w parze z „odtah".
+#
+# Wszystkie przypadki niżej sprawdzane przy JAWNYM prog=5, żeby werdykt nie
+# zależał od kalibracji progu — wzorcowe zlecenie ma być twardym
+# przepuszczeniem, nie przypadkiem na granicy punktacji.
+# ===========================================================================
+def test_cs_sk_potrzeba_z_rzeczownikiem_transportu_to_twarde_przepuszczenie():
+    for tresc in (
+        "Potrebujem prepravu auta z Bratislavy do Kosic",
+        "Potrebuji prepravu vozu z Prahy do Brna",
+        "Hladam prepravu vozidla do Polska",
+        "Zhanim odvoz auta po nehode",
+    ):
+        wynik = w(tresc, prog=5)
+        assert wynik.werdykt, f"miało przejść przy progu 5: {tresc!r}"
+        assert wynik.powod == "prosba wprost", (
+            f"miało przejść WARSTWĄ 2, nie punktacją: {tresc!r} -> {wynik.powod}")
+
+
+def test_cs_sk_potrzeba_z_bezokolicznikiem_lub_zdaniem_wzglednym():
+    for tresc in (
+        "Potrebujem prepravit auto do Zvolena",
+        "Potrebuji prevezt auto z Plzne",
+        "Potrebujem odviezt auto zo servisu",
+        "Hladam niekoho kto preveze auto do Polska",
+        "Hledam nekoho kdo preveze auto do Nemecka",
+    ):
+        assert przepuszcza(tresc, prog=5), f"miało przejść przy progu 5: {tresc!r}"
+
+
+def test_cs_sk_kontrola_oferty_nadal_odpadaja():
+    """Nowe wzorce wymagają czasownika potrzeby — autopromocja i oferta
+    przewoźnika mają odpadać dokładnie tak jak przed zmianą."""
+    assert not przepuszcza("Ponukam odtahovu sluzbu 24/7")
+    assert not przepuszcza("Volne miesto na odtahovke Praha - Wien")
+
+
+def test_de_potrzeba_z_transportem_to_twarde_przepuszczenie():
+    """Ta sama konstrukcja po niemiecku: przed zmianą twardym przepuszczeniem
+    był tylko wariant „brauche ... transport"; „suche Transport" wisiał na
+    punktacji, a „benoetige Transport" przy progu 5 wylatywał."""
+    for tresc in (
+        "Suche Transport fuer mein Auto nach Polen",
+        "Benoetige Transport von Hamburg nach Warschau",
+        "Benötige einen Transport für meinen PKW",
+        "Brauche einen Transport nach Polen",
+    ):
+        assert przepuszcza(tresc, prog=5), f"miało przejść przy progu 5: {tresc!r}"
+
+
+def test_de_suche_transport_nie_lapie_przewoznika_szukajacego_ladunkow():
+    """„Suche Transportaufträge" to przewoźnik szukający ładunków, nie klient —
+    prawa granica słowa po „transport" ma go tu NIE wpuścić."""
+    wynik = w("Suche Transportauftraege, LKW 3,5t, faire Preise", prog=5)
+    assert wynik.powod != "prosba wprost", wynik.powod
+
+
 def test_instrukcja_dla_klasyfikatora_niesie_kontrakt():
     """Klasyfikator dostaje ten tekst przez import, nie przez przepisanie.
 
