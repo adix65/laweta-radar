@@ -242,8 +242,8 @@ def test_dead_and_over_credit_keys_are_logged_differently() -> None:
     rot = KeyRotator(["k1", "k2", "k3"], state_path=None, sleep=_noop_sleep,
                      log=logi.append)
     assert rot.call(fn) == "ok:k3"
-    linia_k1 = next(l for l in logi if "#1" in l)
-    linia_k2 = next(l for l in logi if "#2" in l)
+    linia_k1 = next(linia for linia in logi if "#1" in linia)
+    linia_k2 = next(linia for linia in logi if "#2" in linia)
     assert "MARTWY" in linia_k1
     assert "wraca 1. dnia miesiąca" in linia_k2
 

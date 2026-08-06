@@ -382,6 +382,61 @@ def _alert_pula_wyczerpana(tokeny: list[str], log=print) -> None:
         log(f"[{KTO}] nie udało się wysłać alertu o wyczerpanej puli: {_jedna_linia(e)}")
 
 
+# Próg żywych kluczy, poniżej którego pula jest o JEDNĄ awarię od zera.
+PROG_MIN_ZYWYCH_KLUCZY = 2
+
+
+def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=print) -> None:
+    """WCZESNE ostrzeżenie (run jedzie dalej — część kluczy jeszcze działa),
+    nie awaria: operator ma się dowiedzieć, ZANIM pula spadnie do zera i
+    zadziała `_alert_pula_wyczerpana`. Sekcja 5 zadania „samolecząca się pula":
+
+        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY
+        żywych proxy < liczba kluczy (mniej wyjść niż kont — korelacja rośnie)
+        którykolwiek klucz oznaczony jako martwy (zwykle ban — wymaga człowieka)
+
+    Best-effort: bez bazy funkcja nic nie robi (nie ma czego sprawdzić) —
+    diagnostyka nie może zablokować runu, tak samo jak w `_alert_pula_wyczerpana`.
+    """
+    conn = _polacz_best_effort()
+    if conn is None:
+        return
+    try:
+        stany = apify_keys.wczytaj_stany(conn, tokeny)
+        martwe = [t for t, s in stany.items() if s["status"] == apify_keys.STATUS_KLUCZ_MARTWY]
+        cfg = apify_proxy.load_proxy_config()
+        zywe_proxy = None
+        if cfg.pool:
+            stan_proxy = apify_proxy.wczytaj_stan_proxy(conn, cfg.pool)
+            w_kwarantannie = sum(1 for s in stan_proxy.values() if s["status"] == "kwarantanna")
+            zywe_proxy = len(cfg.pool) - w_kwarantannie
+    except Exception as e:  # noqa: BLE001 — diagnostyka nie może zablokować runu
+        log(f"[{KTO}] nie udało się sprawdzić kondycji puli: {_jedna_linia(e)}")
+        return
+    finally:
+        conn.close()
+
+    powody = []
+    if len(tokeny_zywe) < PROG_MIN_ZYWYCH_KLUCZY:
+        powody.append(f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})")
+    if zywe_proxy is not None and zywe_proxy < len(tokeny):
+        powody.append(f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy")
+    if martwe:
+        powody.append(f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify")
+    if not powody:
+        return
+
+    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(powody)}.")
+    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in powody)
+            + "\n\nSprawdź /limity na Telegramie.")
+    try:
+        from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom
+
+        telegram_notify.wyslij(tekst)
+    except Exception as e:  # noqa: BLE001 — alert nie może dorzucić drugiego błędu
+        log(f"[{KTO}] nie udało się wysłać alertu o degradacji puli: {_jedna_linia(e)}")
+
+
 # ---------------------------------------------------------------------------
 # Wyciąganie pól z surowego itemu — warstwa amortyzująca zmiany actora.
 # Przeniesione 1:1 z repo źródłowego: brak pola to nie błąd, tylko None.
@@ -1425,6 +1480,7 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
                 f"({_jedna_linia(e)}) — rotuję po WSZYSTKICH kluczach.")
         finally:
             _conn_stan.close()
+    _alert_jesli_zdegradowana(tokeny_zywe, tokeny, log=log)
 
     def _zapisz_stan_klucza(token: str, stan: str, powod: str) -> None:
         # Sukces NIE wymaga zapisu: klucz bez wpisu w `zasoby_apify` jest już

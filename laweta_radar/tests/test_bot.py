@@ -488,6 +488,67 @@ def test_limity_pokazuje_pobrane_dzisiaj_i_budzet(monkeypatch):
     assert f"Pobrane dziś: 340 postów · budżet {bot.settings.POSTY_NA_DOBE}/dobę" in tekst
 
 
+# ---------------------------------------------------------------------------
+# /limity — sekcja proxy (widoczność puli: ile w puli, ile w kwarantannie,
+# które konto z którego wychodzi — host:port, NIGDY hasło)
+# ---------------------------------------------------------------------------
+def test_limity_sekcja_proxy_niekonfigurowane(monkeypatch):
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["t1"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    pusta_cfg = bot.apify_proxy.load_proxy_config({})
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: pusta_cfg)
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "nieskonfigurowane" in tekst
+
+
+def test_limity_sekcja_proxy_pokazuje_pule_i_przypisanie_bez_hasla(monkeypatch):
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu",
+                        lambda tokens, **k: [_konto_ok(nazwa="konto1")])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://user:tajnehaslo@a.example:8000,"
+                             "http://user:tajnehaslo@b.example:8000"})
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+
+    assert "Pula: 2 adresów" in tekst
+    assert "aktywnych 2" in tekst and "w kwarantannie 0" in tekst
+    przypisany = bot.apify_proxy.proxy_for_token("tok_a", cfg)
+    assert bot.apify_proxy.proxy_label(przypisany) in tekst
+    assert "tajnehaslo" not in tekst and "user:" not in tekst
+
+
+def test_limity_sekcja_proxy_oznacza_kwarantanne(monkeypatch):
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    cfg = bot.apify_proxy.load_proxy_config({"APIFY_PROXY_URLS": "http://u:p@a.example:8000"})
+    przypisany = bot.apify_proxy.proxy_for_token("tok_a", cfg)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy",
+                        lambda conn, urls: {przypisany: {"status": "kwarantanna"}})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "w kwarantannie 1" in tekst
+    assert "⚠ w kwarantannie" in tekst
+
+
+def test_limity_sekcja_proxy_bez_przypisania_pokazuje_ip_vpsa(monkeypatch):
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a", "tok_b"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu",
+                        lambda tokens, **k: [_konto_ok(), _konto_ok(nazwa="k2")])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_API_TOKEN1": "tok_a", "APIFY_PROXY1": "http://u:p@dedicated.example:8000"})
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda: cfg)
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "dedicated.example:8000" in tekst
+    assert "IP VPS-a (bez proxy)" in tekst
+    assert "pojedyncze przypisania" in tekst
+
+
 def test_limity_komenda_i_alias(monkeypatch):
     monkeypatch.setattr(bot, "_limity", lambda conn: "STAN PULI")
     assert bot.obsluz_komende(_Polaczenie(), "/limity") == "STAN PULI"

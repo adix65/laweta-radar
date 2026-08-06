@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from laweta_radar.config import groups as cfg_groups
 from laweta_radar.config import settings
 from laweta_radar.services import feedback, geo, powiadomienia, telegram_notify
-from laweta_radar.workers import apify_credits
+from laweta_radar.workers import apify_credits, apify_proxy
 from laweta_radar.workers.apify_keys import load_apify_tokens
 
 KTO = "bot"
@@ -354,6 +354,48 @@ def _pobrane_dzisiaj(conn) -> int:
     return ile or 0
 
 
+def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
+    """Widoczność puli proxy: ile w puli, ile aktywnych, ile w kwarantannie,
+    które konto z którego wychodzi — host:port, NIGDY hasło (`proxy_label`).
+
+    Stan czytamy z BAZY (`zasoby_apify_proxy`), nie odpalamy tu ŻADNEJ świeżej
+    weryfikacji sieciowej — /limity ma być szybkie i tanie (patrz cache w
+    `apify_credits.pula_stanu`), a cztery testy z docs/APIFY-PROXY.md robi
+    osobno pętla samoleczenia w fetcherze, w reakcji na realną awarię.
+    """
+    cfg = apify_proxy.load_proxy_config()
+    if not cfg.enabled:
+        return ["", "🌐 *Proxy*: nieskonfigurowane — konta wychodzą z IP VPS-a"]
+
+    linie = ["", "🌐 *Proxy*"]
+    w_kwarantannie: set[str] = set()
+    if cfg.pool:
+        try:
+            stan_proxy = apify_proxy.wczytaj_stan_proxy(conn, cfg.pool)
+        except Exception:  # noqa: BLE001 — sekcja proxy nie może wywalić /limity
+            stan_proxy = {}
+        w_kwarantannie = {u for u, s in stan_proxy.items() if s["status"] == "kwarantanna"}
+        linie.append(f"Pula: {len(cfg.pool)} adresów · aktywnych "
+                     f"{len(cfg.pool) - len(w_kwarantannie)} · "
+                     f"w kwarantannie {len(w_kwarantannie)}")
+    else:
+        linie.append("Pula: pojedyncze przypisania / brama z sesją (bez APIFY_PROXY_URLS)")
+
+    esc = telegram_notify._escape_md
+    for i, (token, stan) in enumerate(zip(tokeny, stany), 1):
+        etykieta = _etykieta_konta(i, stan)
+        try:
+            proxy = apify_proxy.proxy_for_token(token, cfg)
+        except apify_proxy.ApifyProxyError:
+            proxy = None
+        if proxy is None:
+            linie.append(esc(f"#{i} {etykieta} → IP VPS-a (bez proxy)"))
+            continue
+        znacznik = "  ⚠ w kwarantannie" if proxy in w_kwarantannie else ""
+        linie.append(esc(f"#{i} {etykieta} → {apify_proxy.proxy_label(proxy)}{znacznik}"))
+    return linie
+
+
 def _limity(conn) -> str:
     """Stan puli kont Apify — jedna wiadomość, czytelna na telefonie."""
     tokeny = load_apify_tokens()
@@ -408,6 +450,8 @@ def _limity(conn) -> str:
 
     dzisiaj = _pobrane_dzisiaj(conn)
     linie.append(f"Pobrane dziś: {dzisiaj} postów · budżet {settings.POSTY_NA_DOBE}/dobę")
+
+    linie.extend(_sekcja_proxy(conn, tokeny, stany))
 
     return "\n".join(linie)
 
