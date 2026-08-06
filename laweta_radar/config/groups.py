@@ -58,6 +58,16 @@ from __future__ import annotations
 # "grupa da się pobrać". Rozstrzyga to dopiero raport wydajności
 # (zlecenia / pobrane posty w oknie OKNO_WYDAJNOSCI_DNI) albo dwie minuty
 # człowieka zalogowanego na FB, który spojrzy na ostatnie posty.
+#
+# DRUGA RUNDA (run testowy actora): wpisy, których wyszukiwarka nie
+# rozstrzygnęła, przepuszczono przez actor razem z KONTROLNĄ grupą
+# nieistniejącą. Kontrolna wróciła BEZ TREŚCI — czyli pusty wynik odróżnia
+# grupy publiczne od prywatnych, pustych i nieistniejących, a nie jest
+# artefaktem testu. Grupa, która oddała posty z treścią, jest potwierdzona
+# jako publiczna, a pierwszy post mówi od razu, czy grupa jest ZGŁOSZENIOWA
+# (prośba o przewóz), czy OGŁOSZENIOWA (oferta wolnej lawety) — dokładnie
+# to, czego sygnał z wyszukiwarki nie mówił. Wyniki są dopisane przy
+# wpisach: kosztowały płatny run i mają nie zginąć przy kolejnych edycjach.
 FB_GRUPY: list[dict[str, str]] = [
     # ── PUBLICZNOŚĆ POTWIERDZONA (treść postów widoczna w wyszukiwarce) ──
     {"url": "https://www.facebook.com/groups/132548385153051/",
@@ -76,47 +86,62 @@ FB_GRUPY: list[dict[str, str]] = [
      "name": "Auto laweta Transport HO/BE/DE",
      "region": "zagranica", "status": "ok"},
 
-    # ── PUBLICZNOŚĆ NIEPOTWIERDZONA (w wynikach była sama nazwa grupy) ──
+    # ── W WYSZUKIWARCE BYŁA SAMA NAZWA — rozstrzygał run testowy actora,
+    #    wynik dopisany przy każdym wpisie ──
+    # Run testowy: 2 posty z treścią, pierwszy to PROŚBA o transport
+    # („Odbior quada 48607 ochtrup na Podkarpacie") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/1412593546181060/",
      "name": "Transport LAWETA Niemcy-Polska | Przerzuty DE/NL/BE",
-     "region": "zagranica", "status": "unverified"},
+     "region": "zagranica", "status": "ok"},
+    # Run testowy: posty z treścią, ale OGŁOSZENIOWA — pierwszy post to oferta
+    # („Wolna laweta Opole/Wroclaw"). Pobrać się da, zleceń nie dowiezie,
+    # więc celowo NIE dostaje "ok".
     {"url": "https://www.facebook.com/groups/478394099303683/",
      "name": "Laweciarze | Wolne lawety | Wolne ladunki",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: jeden post bez tekstu — niejednoznaczne, zostaje do
+    # ręcznego sprawdzenia na FB.
     {"url": "https://www.facebook.com/groups/625258040958010/",
      "name": "Gielda Lawet | Zlece przewoz",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: BEZ TREŚCI — prywatna albo pusta.
     {"url": "https://www.facebook.com/groups/gieldatransportu/",
      "name": "Laweciarze Gielda Transportu",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: posty z treścią, ale OGŁOSZENIOWA — pierwszy post to oferta
+    # („Wolna Laweta Tczew-Krakow"). Celowo NIE dostaje "ok".
     {"url": "https://www.facebook.com/groups/gieldatransportowa/",
      "name": "Polski Transport Gielda Transportowa",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: NIE NA TEMAT — sprzedaż aut, nie transport.
     {"url": "https://www.facebook.com/groups/2036193719947874/",
      "name": "Gielda Transportowa - TRANS Polska",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: jeden post bez tekstu — niejednoznaczne, zostaje do
+    # ręcznego sprawdzenia na FB.
     {"url": "https://www.facebook.com/groups/262962694265908/",
      "name": "Gielda Transportowa",
      "region": "krajowy", "status": "unverified"},
+    # Run testowy: BEZ TREŚCI — prywatna albo pusta.
     {"url": "https://www.facebook.com/groups/www.autopomoc.eu/",
      "name": "Bezplatna Gielda Ladunkow",
      "region": "krajowy", "status": "unverified"},
 
-    # ── DOPISANE Z WYSZUKIWARKI: ZNANE SĄ TYLKO NAZWA I OPIS ────────────────
+    # ── DOPISANE Z WYSZUKIWARKI: ZNANE BYŁY TYLKO NAZWA I OPIS ──────────────
     #
-    # Wszystkie dziewięć wchodzi jako "unverified", bo o żadnej nie wiadomo
-    # nawet tyle, co o wpisach wyżej: źródłem są SAME NAZWY I OPISY z wyników
-    # wyszukiwania, a stamtąd grupa prywatna wygląda identycznie jak publiczna.
-    # Fetcher ich nie tknie, dopóki człowiek nie otworzy każdej i nie przestawi
-    # statusu ręcznie — trzy pytania z nagłówka pliku, dwie minuty na grupę.
+    # Wszystkie dziewięć weszło jako "unverified", bo źródłem były SAME NAZWY
+    # I OPISY z wyników wyszukiwania, a stamtąd grupa prywatna wygląda
+    # identycznie jak publiczna. Rozstrzygnął run testowy actora (patrz
+    # komentarz nad listą): wpisy, z których przyszły posty z treścią będące
+    # PROŚBAMI o transport, dostały "ok"; reszta stoi dalej na "unverified"
+    # z powodem dopisanym przy wpisie.
     #
-    # DWIE Z NICH SĄ OPISYWANE JAKO OGŁOSZENIOWE: 115713589110289 („freie
-    # Platze") i 986826041656582. Przewoźnicy publikują tam WOLNE MIEJSCA na
-    # swoich lawetach, czyli w środku siedzi konkurencja, a nie klienci szukający
-    # transportu. Taka grupa kosztuje DOKŁADNIE TYLE SAMO za pobrany post co
-    # zgłoszeniowa i nie dowozi ani jednego zlecenia — a po samym statusie "ok"
-    # tego nie widać, bo "da się pobrać" i "warto pobierać" to dwa różne pytania.
-    # Nazwa też nie rozstrzyga: „Autotransport Börse" bywa jednym i drugim.
+    # PRZESTROGA Z TEGO RUNU: 115713589110289 po nazwie („freie Platze")
+    # wyglądała na OGŁOSZENIOWĄ — grupę wolnych miejsc, w której siedzi
+    # konkurencja, nie klienci — a pierwszy pobrany post to prośba o przewóz.
+    # Nazwa nie rozstrzyga niczego; rozstrzygają pobrane posty i raport
+    # wydajności. Druga podejrzewana o to samo, 986826041656582, wróciła
+    # z runu BEZ TREŚCI, więc pytanie o jej charakter pozostaje otwarte.
     #
     # ROZSTRZYGA RAPORT WYDAJNOŚCI (zlecenia / pobrane posty w oknie
     # OKNO_WYDAJNOSCI_DNI), nie przeczucie i nie nazwa — po TYGODNIU, bo krótsze
@@ -125,41 +150,54 @@ FB_GRUPY: list[dict[str, str]] = [
     # tu normalną czynnością operacyjną, a nie przyznaniem się do błędu:
     # zostawiona na "ok" pali budżet po cichu, bo każdy przebieg to jej osobne
     # wywołanie, a jedynym śladem jest rachunek na koniec miesiąca.
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („Szukam transportu
+    # samochodu z Niemiec, okolice Dortmund") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/carcarrier",
      "name": "Car Carrier (europejska)",
-     "region": "zagranica", "status": "unverified"},
+     "region": "zagranica", "status": "ok"},
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („suche Autotransport,
+    # Auto faehrt, 2,2t") — wbrew nazwie zgłoszeniowa, patrz PRZESTROGA wyżej.
     {"url": "https://www.facebook.com/groups/115713589110289",
      "name": "Autotransport - freie Platze (DE, ~2,8 tys.)",
-     "region": "zagranica", "status": "unverified"},
+     "region": "zagranica", "status": "ok"},
+    # Run testowy: BEZ TREŚCI — prywatna albo pusta.
     {"url": "https://www.facebook.com/groups/986826041656582",
      "name": "Autotransport Borse Europa (DE)",
      "region": "zagranica", "status": "unverified"},
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („hladam vytazovak
+    # Polsko Slovensko") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/vytazovaky",
      "name": "Vytazovaky CZ/SK - odtah a preprava vozidel",
-     "region": "zagranica", "status": "unverified"},
+     "region": "zagranica", "status": "ok"},
     {"url": "https://www.facebook.com/groups/124130551433438",
      "name": "Trh preprav CZ/SK",
      "region": "zagranica", "status": "unverified"},
+    # Run testowy: BEZ TREŚCI — prywatna albo pusta.
     {"url": "https://www.facebook.com/groups/412859025748614",
      "name": "Auftragsborse fur Abschleppauftrage (DE)",
      "region": "zagranica", "status": "unverified"},
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („ich bin auf der
+    # Suche nach einer Transportmoeglichkeit") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/transport.gmbh",
      "name": "TransportBorse Europa (DE)",
-     "region": "zagranica", "status": "unverified"},
+     "region": "zagranica", "status": "ok"},
 
-    # NAZWA DO UZUPEŁNIENIA PRZY WERYFIKACJI — źródło podało same adresy.
-    # Placeholder nie jest kosmetyką do odłożenia na potem: `name` idzie do
-    # promptu klasyfikatora jako kontekst i na etykietę w alercie, więc póki tu
-    # stoi „do ustalenia", model nie dostaje żadnej podpowiedzi o treści grupy,
-    # operator nie wie, skąd przyszło zlecenie, a raport wydajności rozlicza
-    # pozycję, której nikt nie potrafi nazwać. Nazwę przepisz z FB przy tych
-    # samych dwóch minutach, w których sprawdzasz publiczność.
+    # NAZWY UZUPEŁNIONE PRZY WERYFIKACJI RUNEM TESTOWYM — źródło podało same
+    # adresy, więc do runu oba wpisy stały z placeholderem „do ustalenia".
+    # Placeholder nie mógł zostać przy statusie "ok": `name` idzie do promptu
+    # klasyfikatora jako kontekst i na etykietę w alercie, więc bez nazwy model
+    # nie dostaje podpowiedzi o treści grupy, operator nie wie, skąd przyszło
+    # zlecenie, a raport wydajności rozlicza pozycję bez nazwy.
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („shanim prepravu
+    # Avie z Breznice") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/508320149820356",
-     "name": "Grupa transportowa (do ustalenia)",
-     "region": "zagranica", "status": "unverified"},
+     "name": "Preprava CZ (zleceniowa)",
+     "region": "zagranica", "status": "ok"},
+    # Run testowy: 2 posty z treścią, pierwszy to prośba („potrebujem previezt
+    # geotextilia") — publiczna, zgłoszeniowa.
     {"url": "https://www.facebook.com/groups/246094456933898",
-     "name": "Grupa transportowa (do ustalenia)",
-     "region": "zagranica", "status": "unverified"},
+     "name": "Preprava SK (zleceniowa)",
+     "region": "zagranica", "status": "ok"},
 ]
 
 # ── Parametry pobierania per grupa ──────────────────────────────────────────
