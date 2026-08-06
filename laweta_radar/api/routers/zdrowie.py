@@ -111,7 +111,11 @@ def _pula_apify(glebokie: bool) -> dict:
     wynik["kluczy"] = len(tokeny)
     wynik["zrodlo_kluczy"] = settings.WSPOLNE_APIFY_SKAD
     try:
-        cfg = apify_proxy.load_proxy_config()
+        # tokens=tokeny włącza wyrównanie PO hashu (patrz
+        # `apify_proxy._wyrownaj_przypisania`) — sprawdzanie salda niżej idzie
+        # PRZEZ PROXY TEGO KLUCZA (client_for_token), więc bez wyrównania kilka
+        # kont mogłoby tu naprawdę wyjść jednym adresem.
+        cfg = apify_proxy.load_proxy_config(tokens=tokeny)
         wynik["proxy"] = {
             "skonfigurowane": cfg.enabled,
             "wymagane": cfg.required,
