@@ -496,6 +496,85 @@ def test_kolumna_kategorii_jest_w_insercie():
 
 
 # ---------------------------------------------------------------------------
+# KIERUNEK — oferta przewoźnika nie kosztuje tokena i nie budzi telefonu,
+# ale zostaje w bazie z kompletem tego, co o niej wiemy.
+# ---------------------------------------------------------------------------
+OFERTA = "Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207"
+
+
+def test_oferta_nie_dochodzi_do_modelu_w_trybie_aktywnym(monkeypatch):
+    """Bramka odrzuca ofertę PRZED modelem — post z kompletem cech zlecenia,
+    za który nie płacimy ani jednego tokena."""
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "aktywny")
+    decyzja = f.decyzja_o_poscie(_post(OFERTA), PROG,
+                                 klasyfikuj=_klasyfikator_ktory_wybucha)
+    assert decyzja.zrodlo == "gate"
+    assert decyzja.pytano_model is False
+    assert decyzja.czy_zlecenie is False
+    assert decyzja.status == "smiec"
+    assert decyzja.kierunek == "oferta"
+    assert decyzja.powod == "oferta przewoznika"
+
+
+def test_w_cieniu_oferta_idzie_do_modelu_ale_z_kierunkiem_z_bramki(monkeypatch):
+    """Cień NIC nie blokuje, także ofert — i to jest stan produkcji dzisiaj.
+    Odczyt bramki jedzie wtedy do bazy razem z werdyktem modelu i to on jest
+    ostatnią linią obrony, gdy model ofertę przeoczy."""
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "cien")
+    decyzja = f.decyzja_o_poscie(
+        _post(OFERTA), PROG, klasyfikuj=lambda *a: {"czy_zlecenie": True})
+    assert decyzja.pytano_model is True
+    assert decyzja.gate_werdykt is False
+    assert decyzja.gate_powod == "oferta przewoznika"
+    assert decyzja.kierunek == "oferta"
+
+
+def test_kierunek_z_modelu_bije_kierunek_z_bramki():
+    """Model czyta zdanie, bramka dopasowuje wzorzec — przy rozbieżności rację
+    ma model. Bramka na tym poście milczy (żadnej frazy oferty), więc jedynym
+    źródłem prawdy jest odczyt modelu."""
+    post = _post("Grudziadz - Warszawa - Siedlce 10.08, 25T, tel 607284682")
+    decyzja = f.decyzja_o_poscie(
+        post, PROG, klasyfikuj=lambda *a: {"czy_zlecenie": False, "kierunek": "oferta"})
+    assert decyzja.kierunek == "oferta"
+    assert decyzja.czy_zlecenie is False
+
+
+def test_niejasne_z_modelu_nie_kasuje_odczytu_bramki():
+    """„Niejasne" znaczy „nie umiem powiedzieć", a nie „bramka się myli".
+    Nadpisanie nim odczytu bramki gubiłoby jedyną informację, jaką mamy."""
+    post = _post("Jade w piatek z Warszawy do Wroclawia, mam wolne miejsce")
+    decyzja = f.decyzja_o_poscie(
+        post, PROG, klasyfikuj=lambda *a: {"czy_zlecenie": True, "kierunek": "niejasne"})
+    assert decyzja.kierunek == "oferta"
+
+
+def test_kierunek_jedzie_do_powiadomienia():
+    """Ostatnia linia obrony: bramka rozpoznała ofertę, model orzekł „zlecenie".
+    Bez tego pola powiadomienie obudziłoby operatora cudzą lawetą."""
+    post = _post("Jade w piatek z Warszawy do Wroclawia, mam wolne miejsce")
+    decyzja = f.decyzja_o_poscie(
+        post, PROG, klasyfikuj=lambda *a: {"czy_zlecenie": True})
+    zlecenie = f.zlecenie_do_alertu("fb-1", post, decyzja,
+                                    f.Zapis(bez_ekstrakcji=False, wiersz={}))
+    assert zlecenie["kierunek"] == "oferta"
+
+
+def test_kolumna_kierunku_jest_w_insercie():
+    """Kierunek jedzie tym samym INSERT-em co werdykt bramki — i to jest cały
+    powód, dla którego odrzucona oferta w ogóle zostaje w bazie."""
+    assert ("kierunek", "0011_kierunek.sql") in f.KOLUMNY_SWIADKOWIE
+
+
+def test_zwykle_zlecenie_nie_dostaje_kierunku_oferta():
+    zlecenie = f.decyzja_o_poscie(
+        _post("Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala"),
+        PROG, klasyfikuj=lambda *a: {"czy_zlecenie": True})
+    assert zlecenie.kierunek == "zlecenie"
+    assert zlecenie.czy_zlecenie is True
+
+
+# ---------------------------------------------------------------------------
 # 7. Wyciąganie pól — amortyzator zmian actora
 # ---------------------------------------------------------------------------
 def test_first_str_bierze_pierwsza_niepusta():

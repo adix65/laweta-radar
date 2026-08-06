@@ -45,7 +45,7 @@ STATUSY = ("nowe", "dzwonie", "wygrane", "przegrane", "smiec")
 # nie ma powodu wozić pełnej treści posta dla stu rekordów.
 POLA_LISTY = ("fb_id", "grupa_nazwa", "grupa_url", "post_url", "opublikowany_at",
               "pobrany_at", "status", "status_at", "stale", "gate_jezyk",
-              "kategoria_ladunku",
+              "kategoria_ladunku", "kierunek",
               "typ", "odbior_raw", "odbior_kod", "odbior_miasto",
               "dostawa_raw", "dostawa_kod", "dostawa_miasto",
               "pojazd_opis", "pojazd_kategoria", "stan_toczy_sie",
@@ -299,6 +299,7 @@ def _sprawdz_migracje(conn) -> None:
         ({"odbior_miasto", "pojazd_opis", "pewnosc"}, "0004_klasyfikacja.sql"),
         ({"notatka", "cena_koncowa", "status_at"}, "0005_panel.sql"),
         ({"kategoria_ladunku"}, "0010_kategoria_ladunku.sql"),
+        ({"kierunek"}, "0011_kierunek.sql"),
     ):
         brak = potrzebne - kolumny
         if brak:

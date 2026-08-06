@@ -168,7 +168,12 @@ def test_prosba_o_polecenie_to_pelnoprawny_lead():
 def test_transport_planowany_jest_glownym_produktem():
     assert przepuszcza("Kupiłem auto z komisu pod Hanowerem, szukam kogoś na powrót")
     assert przepuszcza("Sprowadzam auto z Holandii w przyszłym tygodniu")
-    assert przepuszcza("Mam wolne miejsce na lawecie, doładunek z Włoch")
+    # „SZUKAM wolnego miejsca", nie „MAM wolne miejsce". Ten przypadek brzmiał
+    # tu wcześniej „Mam wolne miejsce na lawecie, doładunek z Włoch" — czyli był
+    # ofertą przewoźnika zapisaną jako zlecenie, i dokładnie taki post budził
+    # w produkcji telefon. Odwrócenie czasownika jest sednem poprawki: fraza
+    # została ta sama, zmieniła się strona rynku (patrz KORPUS_OFERTY).
+    assert przepuszcza("Szukam wolnego miejsca na lawecie, doładunek z Włoch")
     assert przepuszcza("Zlecę transport, dwa auta z Austrii do Podkarpacia")
 
 
@@ -481,6 +486,130 @@ def test_zwierzeta_nie_lapia_czestych_slow_z_postow_o_lawetach():
         assert g.kategoria_ladunku(tresc) != g.KAT_ZWIERZE, tresc
 
 
+# ===========================================================================
+# KIERUNEK ZGŁOSZENIA — kto kogo szuka
+#
+# Oferta przewoźnika ma KOMPLET cech zlecenia: trasę, datę i telefon. Punktacja
+# nie ma jej jak odróżnić, bo mierzy obecność słów, a nie stronę rynku. Oba
+# posty niżej przeszły w produkcji jako zlecenia i obudziły telefon.
+#
+# Test na rozstrzyganie czasownikiem (`test_czasownik_rozstrzyga...`) jest tu
+# NAJWAŻNIEJSZY: ta sama fraza po obu stronach rynku znaczy co innego, więc
+# pomyłka w tę drugą stronę kasuje realne zlecenie o doładunek.
+# ===========================================================================
+OFERTY_Z_PRODUKCJI = [
+    "Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207",
+    "Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce "
+    "Woj Maz 25T 9,5m Tel. 607284682",
+]
+
+
+def test_oferty_z_produkcji_odpadaja_na_bramce():
+    for tresc in OFERTY_Z_PRODUKCJI:
+        wynik = w(tresc)
+        assert wynik.werdykt is False, tresc
+        assert wynik.powod == "oferta przewoznika", (tresc, wynik.powod)
+
+
+def test_oferty_z_produkcji_dostaja_kierunek():
+    """Werdykt mówi „nie pytamy modelu", kierunek mówi CZEMU — i to on zostaje
+    w bazie, bo cudzy kurs na naszej trasie bywa okazją na doładunek."""
+    for tresc in OFERTY_Z_PRODUKCJI:
+        assert w(tresc).kierunek == g.KIERUNEK_OFERTA, tresc
+
+
+def test_oferty_zostawiaja_slad_w_trafieniach():
+    wynik = w(OFERTY_Z_PRODUKCJI[0])
+    assert any(t.startswith("OFERTA:") for t in wynik.trafienia), wynik.trafienia
+
+
+def test_oferta_odpada_przy_dowolnie_niskim_progu():
+    """To NIE jest odrzucenie punktowe. Próg zero przepuszcza wszystko, co doszło
+    do warstwy 4 — oferta nie dochodzi, bo kierunek rozstrzyga się wcześniej."""
+    for tresc in OFERTY_Z_PRODUKCJI:
+        assert w(tresc, prog=0).werdykt is False, tresc
+
+
+def test_czasownik_rozstrzyga_a_nie_sama_fraza():
+    """Sedno poprawki: „wolne miejsce" po obu stronach rynku, dwa różne werdykty."""
+    zlecenie = w("Szukam wolnego miejsca na lawecie z Kolonii do Krakowa")
+    assert zlecenie.werdykt is True
+    assert zlecenie.kierunek == g.KIERUNEK_ZLECENIE
+
+    oferta = w("Mam wolne miejsce na lawecie z Kolonii do Krakowa")
+    assert oferta.werdykt is False
+    assert oferta.kierunek == g.KIERUNEK_OFERTA
+
+
+def test_slownik_ofert_z_zadania_w_komplecie():
+    """Każda fraza z listy zgłoszenia — sprawdzana na gołym poście, bez żadnego
+    innego sygnału, bo to jedyny sposób, żeby zobaczyć, że wzorzec w ogóle trafia."""
+    for fraza in ("wolna laweta", "wolny transport", "wolne miejsce", "wolne miejsca",
+                  "mam wolne", "mam miejsce", "zostalo miejsce", "jedno miejsce wolne",
+                  "jade z Krosna", "jade do Krosna", "jade na trasie", "wracam z Berlina",
+                  "wracam do Krosna", "powrot z Berlina", "powrot do Krosna",
+                  "trasa dnia", "kursuje", "podejme ladunek", "podejme transport",
+                  "przyjme ladunek", "zabiore po drodze", "moge zabrac",
+                  "moge dolozyc", "doladunek wolny",
+                  # DE / CS — te same frazy, ten sam werdykt
+                  "freier platz", "habe platz", "fahre am Freitag", "rueckfahrt",
+                  "leerfahrt", "volne misto", "jedu z Prahy", "volny odtah"):
+        tresc = f"{fraza} Elblag - Lublin 25T, tel 501606207"
+        assert g.kierunek(tresc) == g.KIERUNEK_OFERTA, fraza
+        assert w(tresc).werdykt is False, fraza
+
+
+def test_popyt_bije_oferte_bo_pomylka_w_te_strone_kosztuje_kurs():
+    """Post z frazą oferty, który MIMO TO jest zleceniem. Każdy z nich zginąłby,
+    gdyby oferta rozstrzygała sama z siebie — a to najdroższy błąd tego modułu."""
+    for tresc in (
+        # awaria złapana w drodze: „jadę do" i zepsute auto w jednym zdaniu
+        "Jade do Warszawy, auto stanelo na A4 i nie odpala, potrzebna laweta",
+        "Wracam z Niemiec i zepsula mi sie skrzynia pod Poznaniem",
+        # klient pytający o czyjś powrót
+        "Kto wraca z Holandii? Mam osobowke do zabrania",
+        # kupno auta z frazą trasy
+        "Kupilem auto w Kolonii, jade do Krosna, kto przywiezie?",
+        # niemiecka awaria z frazą oferty
+        "Fahre am Freitag nach Polen, aber mein Auto springt nicht an, suche Hilfe",
+    ):
+        assert przepuszcza(tresc), tresc
+        assert w(tresc).kierunek != g.KIERUNEK_OFERTA, tresc
+
+
+def test_pytanie_jest_sygnalem_popytu():
+    """Przewoźnik ogłaszający wolne miejsce nie pyta — podaje trasę i telefon.
+    Bez tej reguły odpadałby produkcyjny „Wolne miejsce w ten piątek?", czyli
+    post bez ani jednego czasownika, którego nie ratuje żaden wzorzec popytu."""
+    assert przepuszcza("Wolne miejsce w ten piatek?")
+    assert w("Wolne miejsce w ten piatek?").kierunek != g.KIERUNEK_OFERTA
+    # ...i to samo zdanie bez znaku zapytania jest już ogłoszeniem.
+    assert not przepuszcza("Wolne miejsce w ten piatek")
+
+
+def test_kierunek_niejasny_gdy_padly_oba_sygnaly():
+    """Bramka nie udaje, że wie. „Niejasne" niczego nie odrzuca i niczego nie
+    wycisza — post idzie do modelu, który przeczyta zdanie."""
+    wynik = w("Jade do Berlina w piatek, szukam lawety dla golfa")
+    assert wynik.kierunek == g.KIERUNEK_NIEJASNY
+    assert wynik.werdykt is True
+
+
+def test_kierunek_niejasny_dla_zwyklego_zlecenia_bez_frazy_oferty():
+    """„Zlecenie" wymaga sygnału popytu; jego brak to „niejasne", nie „oferta"."""
+    assert g.kierunek("Do przywiezienia Citroen Berlingo z 18556 do 63-505") \
+        == g.KIERUNEK_ZLECENIE
+    assert g.kierunek("Golf 4, 38-400 Krosno") == g.KIERUNEK_NIEJASNY
+
+
+def test_kierunek_nie_rusza_korpusu_smieci_ani_zlecen():
+    """Nowy mechanizm ma odrzucać OFERTY, a nie przestawiać werdykty, które
+    działały. Korpus zleceń pilnuje tego osobno; tu chodzi o to, że żaden post
+    z korpusu śmieci nie zaczyna nagle przechodzić."""
+    for tresc in KORPUS_SMIECI:
+        assert not przepuszcza(tresc) or g.kierunek(tresc) != g.KIERUNEK_OFERTA, tresc
+
+
 def test_kategoria_pojazdu_i_inne():
     assert g.kategoria_ladunku("Potrzebuje lawety, golf nie odpala") == g.KAT_POJAZD
     assert g.kategoria_ladunku("Dzien dobry wszystkim, pozdrawiam") == g.KAT_INNE
@@ -587,14 +716,15 @@ def test_wszystkie_wzorce_sa_poprawnymi_regexami():
     """Literówka w słowniku ma paść tutaj, a nie przy pierwszym poście o 3 w nocy."""
     for nazwa, tabela in (("WYGASZENIE", g.WYGASZENIE), ("PRZEPUSZCZENIE", g.PRZEPUSZCZENIE),
                           ("ODRZUCENIE", g.ODRZUCENIE), ("PUNKTACJA", g.PUNKTACJA),
-                          ("HAMULCE", g.HAMULCE)):
+                          ("HAMULCE", g.HAMULCE), ("POPYT", g.POPYT), ("OFERTA", g.OFERTA)):
         for wzorzec, _, _ in tabela:
             assert g._skompiluj(wzorzec), f"{nazwa}: {wzorzec}"
 
 
 def test_wzorce_sa_zapisane_w_formie_znormalizowanej():
     """Wzorzec z ogonkiem albo wielką literą NIGDY nie trafi — normalizacja go zbija."""
-    tabele = (g.WYGASZENIE + g.PRZEPUSZCZENIE + g.ODRZUCENIE + g.PUNKTACJA + g.HAMULCE)
+    tabele = (g.WYGASZENIE + g.PRZEPUSZCZENIE + g.ODRZUCENIE + g.PUNKTACJA + g.HAMULCE
+              + g.POPYT + g.OFERTA)
     for wzorzec, _, _ in tabele:
         litery = [c for c in wzorzec if c.isalpha()]
         assert all(c.islower() and c.isascii() for c in litery), wzorzec
@@ -648,7 +778,11 @@ KORPUS_ZLECENIA = [
     "Zlecę przewóz dwóch aut z Belgii, płatne przelewem, faktura VAT",
     "Kto jedzie do Holandii w okolicach 20-go? Mam osobówkę do zabrania",
     "Szukam miejsca na lawecie dla Golfa IV, trasa Kolonia - Krosno",
-    "Mam wolne miejsce na lawecie, wracam pusty z Włoch w sobotę",
+    # Ta pozycja brzmiała wcześniej „Mam wolne miejsce na lawecie, wracam pusty
+    # z Włoch w sobotę" — czyli była OFERTĄ przewoźnika w korpusie zleceń.
+    # Przeniesiona do KORPUS_OFERTY; tutaj zostaje ta sama sytuacja widziana
+    # od strony klienta, bo to ona jest zleceniem.
+    "Szukam wolnego miejsca na lawecie, powrót z Włoch w sobotę",
     "Sprowadzam auto z aukcji w Niemczech, ile za transport do Jasła?",
     "Trzy auta z Austrii do Podkarpacia, termin elastyczny, proszę o wycenę na PW",
     "Znalazłem ładnego passata w Belgii, kto go przywiezie?",

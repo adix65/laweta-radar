@@ -104,6 +104,10 @@ _POPRAWNE_TYP = ("holowanie", "transport", "odpalenie", "wyciaganie", "pomoc_dro
 _POPRAWNE_KATEGORIE = ("osobowy", "dostawczy", "motocykl", "ciezarowy", "maszyna", "inne")
 _POPRAWNE_PILNOSC = ("teraz", "dzis", "jutro", "elastycznie")
 _POPRAWNE_KONTAKT = ("telefon", "pw", "komentarz", "brak")
+# Wartości bierzemy z bramki, a nie przepisujemy — to jedno pole i jeden słownik
+# wartości, tylko odczytany dwa razy: raz wzorcem, raz zdaniem.
+_POPRAWNE_KIERUNEK = (gate.KIERUNEK_ZLECENIE, gate.KIERUNEK_OFERTA,
+                      gate.KIERUNEK_NIEJASNY)
 
 # Domyślne przy wartości spoza zbioru. Każda jest NAJMNIEJ ZOBOWIĄZUJĄCA
 # z możliwych: "inne" nie sugeruje sprzętu, "elastycznie" nie budzi w nocy,
@@ -112,6 +116,10 @@ _DOMYSLNY_TYP = "inne"
 _DOMYSLNA_KATEGORIA = "inne"
 _DOMYSLNA_PILNOSC = "elastycznie"
 _DOMYSLNY_KONTAKT = "brak"
+# „niejasne" jest tu najmniej zobowiązujące w OBIE strony: nie odbiera zlecenia
+# operatorowi i nie wycisza alertu, a przy braku pola zostawia w mocy to, co
+# odczytała bramka (patrz `fb_fetcher.decyzja_o_poscie`).
+_DOMYSLNY_KIERUNEK = gate.KIERUNEK_NIEJASNY
 
 # Numer telefonu po odsianiu wszystkiego poza cyframi. Dolna granica to polska
 # dziewiątka, górna — maksimum z E.164. Przedział jest szeroki ŚWIADOMIE, bo
@@ -165,6 +173,7 @@ tym kształcie (każde pole obowiązkowe):
 
 {
   "czy_zlecenie": true,
+  "kierunek": "zlecenie|oferta|niejasne",
   "typ": "holowanie|transport|odpalenie|wyciaganie|pomoc_drogowa|inne",
   "odbior":  {"raw": "Krosno, Bieszczadzka 12", "kod": "38-400", "miasto": "Krosno"},
   "dostawa": {"raw": "Rzeszów, warsztat", "kod": null, "miasto": "Rzeszów"},
@@ -178,6 +187,16 @@ tym kształcie (każde pole obowiązkowe):
 }
 
 ZASADY EKSTRAKCJI:
+
+  KIERUNEK. Najpierw ustal, PO KTÓREJ STRONIE RYNKU stoi autor, bo od tego zależy
+  wszystko inne. Pytanie jest jedno: czy autor CHCE COŚ PRZEWIEŹĆ, czy OFERUJE
+  PRZEWIEZIENIE.
+  - "zlecenie" = autor szuka kogoś, kto przewiezie JEGO pojazd. To jest nasz klient.
+  - "oferta"   = autor oferuje WŁASNY transport: podaje trasę i termin, którymi
+    i tak jedzie, dorzuca ładowność albo długość naczepy i zaprasza do kontaktu.
+    To konkurencja, nie klient.
+  - "niejasne" = z treści naprawdę nie wynika, po której stronie stoi.
+  Przy "oferta" zawsze czy_zlecenie=false.
 
   ODBIÓR i DOSTAWA. Post rzadko mówi wprost "z X do Y". Częściej: "spod Biedronki
   na Podkarpackiej do warsztatu w Rzeszowie". Wyciągnij co się da do `raw`, a `kod`
@@ -250,18 +269,31 @@ CZEGO NIE UZNAJEMY ZA ZLECENIE (czy_zlecenie=false):
   - relacja z wypadku bez prośby o pomoc
   - sprzedaż pojazdu, nawet uszkodzonego, bez prośby o transport
   - post sprzed dawna wrzucony ponownie ("wczoraj mi się zdarzyło...")
+  - POST, W KTÓRYM AUTOR OFERUJE SWÓJ TRANSPORT. Rozpoznasz go po tym, że podaje
+    własną trasę i termin, którymi i tak jedzie, oraz zaprasza do kontaktu —
+    zamiast prosić, żeby ktoś przewiózł JEGO pojazd. Taki post dostaje
+    czy_zlecenie=false i kierunek="oferta". Przykłady:
+      "Czwartek 06.08 wolna laweta Elbląg-Lublin tel. 501606207"
+      "Wolny transport 10.08 na trasie Grudziądz - Warszawa - Siedlce 25T 9,5m"
+      "Jadę w piątek z Warszawy do Wrocławia, mam wolne miejsce"
+    Te posty MAJĄ komplet cech zlecenia: trasę, datę i numer telefonu. Nie daj
+    się na to nabrać — sygnał rozstrzygający jest jeden: czy autor CHCE COŚ
+    PRZEWIEŹĆ (zlecenie), czy OFERUJE PRZEWIEZIENIE (oferta konkurencji).
   ALE: "polecicie kogoś?" / "znacie kogoś z lawetą?" TO JEST ZLECENIE. Autor
   szuka wykonawcy — to najczystszy możliwy sygnał kupna.
+  I ALE DRUGIE: "szukam wolnego miejsca na lawecie" TO JEST ZLECENIE, choć mówi
+  o tym samym wolnym miejscu co oferta wyżej. Rozstrzyga czasownik: SZUKAM
+  miejsca (klient) kontra MAM miejsce (przewoźnik).
 
 Posty są pisane na telefonie: bez ogonków, z literówkami, wielkimi literami
 i skrótami drogowymi ("dk28", "s19", "mop"). Traktuj je jak zwykły polski tekst.
 
-PRZYKŁADY. Cztery pary "post -> wynik". To WZORZEC CZYTANIA TREŚCI, a nie posty
+PRZYKŁADY. Pięć par "post -> wynik". To WZORZEC CZYTANIA TREŚCI, a nie posty
 do analizy: nie przepisuj z nich żadnych wartości. Post do analizy przychodzi
 zawsze w wiadomości użytkownika, w znaczniku <post>.
 
 POST: Szukam lawety z Holandii Venlo do Małopolskie Gorlice
-WYNIK: {"czy_zlecenie": true, "typ": "transport",
+WYNIK: {"czy_zlecenie": true, "kierunek": "zlecenie", "typ": "transport",
   "odbior": {"raw": "Holandia, Venlo", "kod": null, "miasto": "Venlo"},
   "dostawa": {"raw": "małopolskie, Gorlice", "kod": null, "miasto": "Gorlice"},
   "pojazd": {"opis": null, "kategoria": "inne"},
@@ -275,7 +307,7 @@ więc wchodzi do `odbior.miasto`. Przy dostawie stoi region i miejscowość — 
 
 POST: Dzien dobry, Szukam transportu dla Renault Trafic z kodu 54-100 do 38-400
 Krosno, auto nie odpala. Prosze o wycene na priv
-WYNIK: {"czy_zlecenie": true, "typ": "transport",
+WYNIK: {"czy_zlecenie": true, "kierunek": "zlecenie", "typ": "transport",
   "odbior": {"raw": "54-100", "kod": "54-100", "miasto": null},
   "dostawa": {"raw": "38-400 Krosno", "kod": "38-400", "miasto": "Krosno"},
   "pojazd": {"opis": "Renault Trafic", "kategoria": "dostawczy"},
@@ -291,7 +323,7 @@ zgadywanie.
 
 POST: Przewiezie ktos mikrosamochodu Aixam z Debicy do Rzeszowa? Nie odpala,
 moze byc w tym tygodniu. 601 234 567
-WYNIK: {"czy_zlecenie": true, "typ": "transport",
+WYNIK: {"czy_zlecenie": true, "kierunek": "zlecenie", "typ": "transport",
   "odbior": {"raw": "Dębica", "kod": null, "miasto": "Dębica"},
   "dostawa": {"raw": "Rzeszów", "kod": null, "miasto": "Rzeszów"},
   "pojazd": {"opis": "mikrosamochód Aixam", "kategoria": "osobowy"},
@@ -304,7 +336,7 @@ DLACZEGO: komplet danych jest w treści, więc komplet pól ma być wypełniony.
 Nazwy miejscowości idą w mianowniku, marka razem z określeniem pojazdu.
 
 POST: Zdechl mi akumulator na parkingu pod biedronka, ktos podjedzie odpalic?
-WYNIK: {"czy_zlecenie": true, "typ": "odpalenie",
+WYNIK: {"czy_zlecenie": true, "kierunek": "zlecenie", "typ": "odpalenie",
   "odbior": {"raw": "parking pod Biedronką", "kod": null, "miasto": null},
   "dostawa": {"raw": null, "kod": null, "miasto": null},
   "pojazd": {"opis": null, "kategoria": "inne"},
@@ -316,6 +348,23 @@ WYNIK: {"czy_zlecenie": true, "typ": "odpalenie",
 DLACZEGO: tu null jest POPRAWNĄ odpowiedzią. Żadna miejscowość, żaden kod
 i żadna marka w treści nie padły — nie wolno ich dopisać z kontekstu ani z nazwy
 grupy. To jest różnica między "nie ma" a "jest, tylko trzeba przeczytać uważniej".
+
+POST: Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce Woj Maz
+25T 9,5m Tel. 607284682
+WYNIK: {"czy_zlecenie": false, "kierunek": "oferta", "typ": "transport",
+  "odbior": {"raw": "Grudziądz", "kod": null, "miasto": "Grudziądz"},
+  "dostawa": {"raw": "Siedlce, mazowieckie", "kod": null, "miasto": "Siedlce"},
+  "pojazd": {"opis": null, "kategoria": "inne"},
+  "stan": {"toczy_sie": true, "ma_kola": true, "po_wypadku": false, "uwagi": null},
+  "pilnosc": "elastycznie", "kontakt": {"typ": "telefon", "wartosc": "607284682"},
+  "cena_sugerowana": null, "pewnosc": 85,
+  "powod": "przewoznik oferuje wolne miejsce na wlasnej trasie"}
+DLACZEGO: post ma trasę, datę i telefon, więc wygląda dokładnie jak zlecenie —
+i nim nie jest. Autor nie prosi, żeby ktoś przewiózł jego pojazd; ogłasza własny
+kurs i ładowność. Stąd kierunek="oferta" i czy_zlecenie=false. Pola wypełniamy
+mimo to i normalnie: dane z takiego posta zostają, cichnie tylko alert.
+`pewnosc` odnosi się do odczytania treści, więc jest WYSOKA — post jest
+jednoznaczny, tylko po drugiej stronie rynku.
 """
 
 
@@ -535,11 +584,31 @@ def zwaliduj(dane: dict[str, Any]) -> dict[str, Any]:
 
     Wydzielone z `klasyfikuj`, bo to jedyna część, którą da się przetestować
     bez sieci — i jedyna, w której realnie pojawiają się błędy.
+
+    KIERUNEK "oferta" WYMUSZA `czy_zlecenie=false` TUTAJ, W KODZIE, a nie
+    w promptcie. Prompt mówi modelowi, żeby ustawił oba pola zgodnie — i model
+    zwykle to robi, ale „zwykle" nie jest kontrolą. Sprzeczna para
+    (kierunek="oferta", czy_zlecenie=true) trafiłaby na telefon operatora jako
+    zlecenie, czyli dokładnie tak, jak przed tą poprawką. Instrukcja w promptcie
+    nie jest zabezpieczeniem; zabezpieczeniem jest linijka, która zadziała także
+    wtedy, gdy model odpowie byle jak albo da się przejąć treścią posta.
+
+    ODWROTNIE NIE DOMYKAMY: `czy_zlecenie=false` przy kierunku "zlecenie" jest
+    zwykłym „to nie jest zlecenie" (reklama, sprzedaż auta, relacja z wypadku)
+    i nie ma powodu przerabiać go na ofertę.
     """
     pojazd = dane.get("pojazd") if isinstance(dane.get("pojazd"), dict) else {}
     stan = dane.get("stan") if isinstance(dane.get("stan"), dict) else {}
+    kierunek = _ze_zbioru(dane.get("kierunek"), _POPRAWNE_KIERUNEK,
+                          _DOMYSLNY_KIERUNEK, "kierunek")
+    czy_zlecenie = _bool(dane.get("czy_zlecenie"), False)
+    if kierunek == gate.KIERUNEK_OFERTA and czy_zlecenie:
+        _log("kierunek='oferta' przy czy_zlecenie=true — autor oferuje własny "
+             "transport, więc czy_zlecenie=false")
+        czy_zlecenie = False
     return {
-        "czy_zlecenie": _bool(dane.get("czy_zlecenie"), False),
+        "czy_zlecenie": czy_zlecenie,
+        "kierunek": kierunek,
         "typ": _ze_zbioru(dane.get("typ"), _POPRAWNE_TYP, _DOMYSLNY_TYP, "typ"),
         "odbior": _miejsce(dane.get("odbior")),
         "dostawa": _miejsce(dane.get("dostawa")),
@@ -747,6 +816,7 @@ KOLUMNY_EKSTRAKCJI = (
 SQL_ZAPIS = """
 UPDATE posty SET
     czy_zlecenie     = %(czy_zlecenie)s,
+    kierunek         = %(kierunek)s,
     typ              = %(typ)s,
     odbior_raw       = %(odbior_raw)s,
     odbior_kod       = %(odbior_kod)s,
@@ -789,6 +859,12 @@ def wiersz_do_zapisu(wynik: dict, fb_id: str, model: str | None = None) -> dict[
     return {
         "fb_id": fb_id,
         "czy_zlecenie": wynik["czy_zlecenie"],
+        # Kierunek jedzie razem z werdyktem, bo to jego uzasadnienie: pary
+        # (false, "oferta") i (false, "zlecenie") wyglądają w tabeli tak samo,
+        # a znaczą co innego — pierwsza to konkurencja na naszej trasie, druga
+        # to reklama albo sprzedaż auta. Bez tej kolumny nie da się odpowiedzieć,
+        # ile kursów przejechało obok z wolnym miejscem.
+        "kierunek": wynik["kierunek"],
         "typ": wynik["typ"],
         "odbior_raw": wynik["odbior"]["raw"],
         "odbior_kod": wynik["odbior"]["kod"],

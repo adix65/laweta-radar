@@ -14,7 +14,9 @@ posta.
 > podnająć albo pojechać po jedno, bo stawka dobra.
 >
 > System odrzuca **wyłącznie** posty, które w ogóle nie są zleceniami: reklamę
-> konkurencji, sprzedaż sprzętu, ogłoszenia o pracę i posty wygaszone przez autora.
+> konkurencji (także w formie z giełd — „wolna laweta Elbląg-Lublin, tel…", czyli
+> przewoźnika oferującego własne wolne miejsce), sprzedaż sprzętu, ogłoszenia
+> o pracę i posty wygaszone przez autora.
 > Ta lista jest zamknięta i nie wolno jej rozszerzać o oceny biznesowe. Wszystko
 > poza tym — wagi, kilometry, sugestie kompletów — jest **informacją na ekranie,
 > nigdy filtrem**. Etykieta „ok. 3,8 t" pomaga. Ukrycie zlecenia, bo kod policzył
@@ -51,10 +53,12 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
   wspólny z drugim systemem.
 - **gate** — darmowy filtr słowny **przed** modelem, po polsku, niemiecku, czesku
   i słowacku. Bez niego płacilibyśmy Claude'owi za każdy post o sprzedaży felg.
-  Odrzuca wyłącznie cztery kategorie wymienione wyżej i nic poza nimi; bez
+  Odrzuca wyłącznie kategorie wymienione wyżej i nic poza nimi; bez
   wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK. Obok werdyktu
   wystawia **kategorię ładunku** (`pojazd` / `zwierze` / `inne`) — transport koni
-  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz.
+  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz
+  — oraz **kierunek** (`zlecenie` / `oferta` / `niejasne`): „wolna laweta
+  Elbląg-Lublin, tel…" ma komplet cech zlecenia i jest ogłoszeniem konkurencji.
 - **classifier** — model decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie — **zawsze po polsku**, także z posta
   niemieckiego czy czeskiego. Domyślnie Haiku, ale provider jest wymienny jedną
@@ -112,9 +116,11 @@ python -m laweta_radar.scripts.pomiar_actora --grupa <URL> --grupa <URL2> --grup
 #    -> docs/POMIAR-ACTORA.md
 
 # 2. WYSZUKIWARKA GRUP (raz na start, potem raz w miesiącu)
-python -m laweta_radar.scripts.znajdz_grupy --schema   # jakie pola actor przyjmuje
-python -m laweta_radar.scripts.znajdz_grupy --sucho    # plan i koszt, bez wydawania
-python -m laweta_radar.scripts.znajdz_grupy            # seria (pyta o potwierdzenie)
+#    WYMAGA SESJI FB — FB_COOKIES_PATH w .env (patrz niżej)
+python -m laweta_radar.scripts.znajdz_grupy --schema        # jakie pola actor przyjmuje
+python -m laweta_radar.scripts.znajdz_grupy --sucho         # plan, wejście actora, koszt
+python -m laweta_radar.scripts.znajdz_grupy --fraza "giełda lawet"  # PRÓBA: jedna fraza
+python -m laweta_radar.scripts.znajdz_grupy                 # seria (pyta o potwierdzenie)
 #    -> data/kandydaci_grupy.csv  ->  KROK RĘCZNY  ->  --raport  ->  config/groups.py
 ```
 
@@ -137,9 +143,25 @@ pominąć**: człowiek otwiera każdy URL i wpisuje w kolumnie `publiczna` TAK/N
 Apify czyta wyłącznie grupy publiczne, a z zewnątrz tego nie widać. Powtórne
 uruchomienie **scala** wynik z istniejącym CSV — praca ręczna nie ginie.
 
+**Bez sesji Facebooka ta wyszukiwarka nie znajdzie nic.** Wyszukiwarka grup
+pokazuje niezalogowanemu ścianę logowania, a nie wyniki — actor ma pole `cookies`
+dokładnie po to. Run bez sesji kosztuje tyle samo co udany i zwraca zero grup albo
+śmieci, więc:
+
+- ścieżkę do pliku JSON z ciasteczkami (eksport z rozszerzenia przeglądarki)
+  podajesz w `FB_COOKIES_PATH`, a **plik trzymasz poza repo** — to żywa sesja
+  Facebooka. W logu widać wyłącznie liczbę wczytanych ciasteczek, nigdy treść;
+- brak pliku **nie jest błędem**: skrypt ostrzega przed serią i pyta
+  o potwierdzenie, bo decyzja „i tak sprawdzę" należy do człowieka;
+- zanim pójdzie komplet 28 fraz za ~2,5 USD, sprawdź jedną:
+  `--fraza "giełda lawet"` odpala **jedno** wywołanie i wypisuje surowy wynik.
+  To jedyny sposób odróżnić martwą sesję od zmienionych nazw pól — zła nazwa
+  pola nie zwraca błędu, tylko pusty run za pełną cenę.
+
 Oba narzędzia liczą i pokazują przewidywany koszt **przed** serią i czekają na
 potwierdzenie; oba mają twardy sufit i odstęp między wywołaniami, bez
-zrównoleglania.
+zrównoleglania. `--sucho` wypisuje **gotowe wejście actora** (z zamaskowanymi
+ciasteczkami), żeby dało się je porównać ze schematem z `--schema` gołym okiem.
 
 ## Budżet liczy się w POSTACH, nie w runach
 
@@ -252,6 +274,55 @@ python -m laweta_radar.services.powiadomienia --probka    # wyślij przykład
 python -m laweta_radar.services.powiadomienia --noc       # podsumowanie ranne
 ```
 
+### Podgląd trasy jako obrazek
+
+Gdy **oba** punkty trasy udało się zgeokodować, alert idzie jako **zdjęcie**
+z mapą, a powyższa treść jako podpis pod nim. Przyciski, progi, dedup i limity
+bez zmian — zmienia się jedna rzecz: metoda Bot API.
+
+Po co: „Żulte → Jędrzejów · 1180 km" mówi wszystko o długości kursu i nic o tym,
+**gdzie** ta trasa leży, a przy decyzji „brać czy nie" liczy się rzut oka na jej
+kształt. Dotąd odpowiedź na to pytanie wymagała wyjścia z Telegrama.
+
+Trasa jest niebieska, odbiór zielony, dostawa czerwona, a punkt o źródle
+`miasto_niepewne` — **pomarańczowy**: ostrzeżenie z podpisu („⚠ Dębica?
+(niepewne)") musi być widoczne w tym samym rzucie oka co kształt trasy, inaczej
+obrazek wygląda na pewniejszy niż tekst pod nim.
+
+**Kiedy obrazka NIE MA i to jest ważniejsze niż sam obrazek** — w każdym z tych
+przypadków leci zwykły `sendMessage` z pełną treścią:
+
+- którykolwiek punkt nierozpoznany (mapa z jednym punktem myli bardziej,
+  niż pomaga),
+- brak paczki `staticmap` — jest **poza requirements.txt**, jak `pywebpush`;
+  moduł mówi to RAZ w logu,
+- wyjątek przy generowaniu albo przekroczone **5 s** (budżet liczony zegarem
+  ściennym, w osobnym wątku),
+- treść nie mieści się w podpisie (limit **1024** znaków, czterokrotnie niższy
+  niż limit wiadomości) bez skrócenia cytatu poniżej progu czytelności. Tniemy
+  **wyłącznie cytat** — trasa, telefon i kilometry to rzeczy, po których zapada
+  decyzja,
+- `MAPY_W_ALERTACH=0`.
+
+Powiadomienie **musi** dojść; obrazek jest dodatkiem i nigdy nie może być
+powodem, dla którego zlecenie nie dotarło do kierowcy.
+
+Kafelki bierzemy z OpenStreetMap — utrzymuje je projekt społeczny z darowizn,
+więc wychodzimy z własnym `User-Agent` (anonimowy ruch bywa blokowany hurtem)
+i **cache'ujemy** obrazki na dysku: klucz to para współrzędnych zaokrąglona do
+3 miejsc po przecinku, czyli ten sam kurs crossowany do pięciu grup pobiera
+kafelki RAZ. Wpisy starsze niż 7 dni kasują się same.
+
+Styl kafelków jest zweryfikowany ręcznie na trasie Żulte (BE) → Jędrzejów (PL):
+przy zoomie dobranym do trasy widać nazwy krajów i główne miasta. Sprawdzone
+i **odrzucone**: carto-positron, carto-voyager, opentopo oraz domalowywanie
+granic z Natural Earth — nie poprawiają czytelności, a dokładają zależności.
+
+```bash
+pip install staticmap                                    # opcjonalnie, na VPS-ie
+python -m laweta_radar.services.mapa Krosno Rzeszow       # czy kafelki dochodzą
+```
+
 ### Progi sterują brzęczeniem, nigdy widocznością
 
 **Żaden próg nie usuwa zlecenia z bazy ani z panelu.** To jest zasada naczelna
@@ -264,6 +335,7 @@ podobnie.
 | `CISZA_NOCNA` (22-6) | nocne zlecenia idą jednym podsumowaniem rano | nie gubi ich |
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
 | `ALERT_ZWIERZETA` (0) | transport zwierząt czeka w panelu ze znacznikiem, bez alertu | nie odrzuca go i nie przestaje go zbierać |
+| `ALERT_OFERTY` (0) | oferta przewoźnika (cudze wolne miejsce) leży w bazie bez alertu | nie przestaje jej zbierać ani zapisywać |
 
 **BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
 działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
@@ -456,6 +528,7 @@ laweta_radar/
   services/
     telegram_notify.py # transport alertów (sam _send/_escape/_truncate + wyslij/wywolaj)
     powiadomienia.py   # TREŚĆ alertu, progi wysyłki, antyspam, cisza nocna
+    mapa.py            # podgląd trasy jako obrazek pod alertem + cache kafelków
     geo.py             # dystans od bazy, linki do map, pewność lokalizacji
     feedback.py        # zapis oceny operatora — wspólny dla API i bota
     bandit.py          # Thompson Sampling — rozdział budżetu runów Apify
@@ -488,6 +561,7 @@ laweta_radar/
       0008_push.sql        # subskrypcje web push
       0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
       0010_kategoria_ladunku.sql # co jedzie: pojazd / zwierzę / inne (NIE filtr)
+      0011_kierunek.sql    # kto kogo szuka: zlecenie / oferta / niejasne
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
@@ -690,7 +764,9 @@ padają zgłoszenia, czy same reklamy lawet (szczegóły w komentarzu nad `FB_GR
    wyszukiwarki dowiódł, że da się je pobrać, nie że warto. Kolejnych kandydatów
    nie wpisuj z pamięci — zbuduj listę wyszukiwarką:
    `python -m laweta_radar.scripts.znajdz_grupy` (patrz sekcja
-   „Zanim powstanie fetcher").
+   „Zanim powstanie fetcher"). Wymaga sesji FB w `FB_COOKIES_PATH` — bez niej
+   wyszukiwarka odda actorowi ścianę logowania, a run zostanie policzony
+   normalnie.
 
 3. zmierz actora, zanim zbudujesz wokół niego fetcher:
    `python laweta_radar/scripts/pomiar_actora.py --sucho` (plan i koszt, bez sieci),
@@ -789,6 +865,65 @@ python -m laweta_radar.workers.gate "transport busem jednego konia z Gajewnik"
 # ŁADUNEK: zwierze   (idzie do panelu ze znacznikiem i NIŻEJ na liście…)
 ```
 
+#### Oferty przewoźników: ta sama treść, przeciwna strona rynku
+
+Na giełdach transportowych **obie strony rynku piszą posty o tym samym kształcie**
+— trasa, data, numer telefonu. Te dwa przeszły przez bramkę i klasyfikator jako
+zlecenia i obudziły telefon:
+
+```
+Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207
+Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce 25T 9,5m
+```
+
+To nie klienci, tylko **konkurencja z wolnym miejscem**. Punktacja nie ma ich jak
+odróżnić, bo mierzy obecność słów, a nie stronę rynku, po której stoi autor.
+Różnica jest w kierunku:
+
+| | |
+|---|---|
+| **zlecenie** | „szukam kogoś, kto przewiezie **moje** auto" — nasz klient |
+| **oferta** | „jadę tamtędy i mam wolne miejsce, dzwońcie" — konkurencja |
+
+Rozstrzyga **czasownik przy frazie, nie sama fraza**: „**szukam** wolnego miejsca
+na lawecie" to zlecenie, „**mam** wolne miejsce na lawecie" to oferta. Dlatego
+kierunek liczy się **przed** czterema warstwami (frazy dwuznaczne — „wolne
+miejsce", „Rückfahrt" — leżą w warstwie 2, która bije odrzucenie) i **odrzuca
+wyłącznie przy zerowym sygnale popytu**. Wystarczy jedno „szukam", „potrzebuję",
+„awaria", „nie odpala" albo choćby znak zapytania w treści, żeby post przeszedł:
+pomyłka w tę drugą stronę kosztuje kurs, a przepuszczona oferta kosztuje ułamek
+grosza i zatrzymuje się na klasyfikatorze, który ma własne pole `kierunek`.
+
+Kolumna `kierunek` (`zlecenie` / `oferta` / `niejasne`) wychodzi z bramki albo
+z klasyfikatora — model bije bramkę, ale tylko gdy cokolwiek rozstrzygnął.
+
+| gdzie | co robi |
+|---|---|
+| bramka | odrzuca ofertę **przed** modelem — zero zapłaconych tokenów |
+| baza | wiersz powstaje normalnie, z całą treścią, `czy_zlecenie=false`, `status='smiec'` |
+| Telegram | alert idzie **tylko** przy `ALERT_OFERTY=1`; przy `0` (domyślnie) cisza |
+
+Dane zbierają się **niezależnie** od tej zmiennej i to jest tu cały sens: cudzy
+kurs na trasie, którą operator i tak jedzie, bywa okazją na doładunek albo na
+podnajęcie. Skasowany post nie odpowie już na żadne pytanie.
+
+```sql
+SELECT count(*) FROM posty WHERE kierunek = 'oferta';
+-- kto wozi na naszych kierunkach:
+SELECT odbior_miasto, dostawa_miasto, count(*) FROM posty
+ WHERE kierunek = 'oferta' GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+```bash
+python -m laweta_radar.workers.gate "Czwartek 06.08 wolna laweta Elblag-Lublin"
+# WERDYKT BRAMKI: ODRZUCAM  (oferta przewoznika)
+# KIERUNEK: oferta   (…zapisujemy do bazy, ale bez alertu)
+
+python -m laweta_radar.workers.gate "Szukam wolnego miejsca na lawecie z Kolonii"
+# WERDYKT BRAMKI: PRZEPUSZCZAM  (zgloszenie z gieldy)
+# KIERUNEK: zlecenie
+```
+
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
 „BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
@@ -818,6 +953,12 @@ w formie oryginalnej, bo idą wprost do geokodera (`docs/WIELOJEZYCZNOSC.md`).
 rozumowania — Haiku robi je równie dobrze za ułamek ceny, a liczy się też czas:
 każda sekunda opóźnienia to przewaga konkurencji.
 
+Obok `czy_zlecenie` model zwraca `kierunek` (`zlecenie` / `oferta` / `niejasne`)
+— po której stronie rynku stoi autor. Przy `"oferta"` **kod** wymusza
+`czy_zlecenie=false`, a nie prompt: instrukcja nie jest kontrolą bezpieczeństwa,
+kontrolą jest linijka, która zadziała także wtedy, gdy model odpowie byle jak
+albo da się przejąć treścią posta. Szczegóły: „Oferty przewoźników" wyżej.
+
 #### Dwie różne pustki w polu
 
 Produkcja na małym modelu (gpt-5.4-nano) pokazała wzorzec, który w bazie wygląda
@@ -836,10 +977,11 @@ wymusić:
    nazwa miejscowości, **każdy** ciąg wyglądający na kod i **każda** marka
    z treści mają trafić do swojego pola — a zakaz zgadywania zostaje nietknięty,
    bo to on broni przed wysłaniem człowieka 80 km w złą stronę. Na końcu promptu
-   stoją cztery pary „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta
-   — kiedy zostawić null. Na modelach tej klasy few-shot działa mocniej niż sama
-   instrukcja, a bez tej czwartej pary zestaw uczyłby wypełniania pól za wszelką
-   cenę, czyli halucynacji geo.
+   stoi pięć par „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta —
+   kiedy zostawić null, piąta — kiedy komplet pól jest wypełniony, a mimo to
+   **nie jest to zlecenie** (oferta przewoźnika). Na modelach tej klasy few-shot
+   działa mocniej niż sama instrukcja, a bez czwartej pary zestaw uczyłby
+   wypełniania pól za wszelką cenę, czyli halucynacji geo.
 2. **Fallback regexowy działa POZA modelem.** Po klasyfikacji treść idzie przez
    `geo.znajdz_kody()` i uzupełnia `odbior_kod`/`dostawa_kod`, **wyłącznie gdy
    pole jest puste** — model ma pierwszeństwo, bo czyta zdanie, a regex kształt
@@ -1166,6 +1308,8 @@ pm2 restart laweta-api laweta-bot
 | przez jakie IP realnie wychodzimy | `python -m laweta_radar.workers.apify_proxy --check` |
 | ile kredytu zostało na koncie #N | `python -m laweta_radar.workers.apify_credits --klucz N` |
 | jakie pola przyjmuje actor wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --schema` |
+| co dokładnie poleci do actora wyszukiwarki | `python -m laweta_radar.scripts.znajdz_grupy --sucho` (wejście, ciasteczka zamaskowane) |
+| czy sesja FB działa, zanim zapłacę za komplet | `python -m laweta_radar.scripts.znajdz_grupy --fraza "giełda lawet"` |
 | ile kosztowałby pomiar / seria wyszukiwania | dowolny z dwóch skryptów z `--sucho` |
 | co i za ile pobierze najbliższy przebieg | `python -m laweta_radar.workers.fb_fetcher --sucho` |
 | na której ścieżce (A/B) stoi fetcher | pierwsza linia wyjścia `--sucho` |
@@ -1178,6 +1322,8 @@ pm2 restart laweta-api laweta-bot
 | jak wygląda alert, bez wysyłania | `python -m laweta_radar.services.powiadomienia --podglad` |
 | czemu to zlecenie pokazuje 900 km | `python -m laweta_radar.services.geo "nazwa z posta"` |
 | czemu ten alert nie przyszedł | log fetchera — `[powiadomienia] <fb_id>: pomijam (...)` |
+| czemu ten post uznaliśmy za ofertę konkurencji | `python -m laweta_radar.workers.gate "treść"` — linia `KIERUNEK` |
+| ile cudzych kursów szło naszymi trasami | `SELECT count(*) FROM posty WHERE kierunek = 'oferta'` |
 | zlecenia są, alertów zero | log fetchera — linia `UWAGA: N zleceń i ANI JEDNEGO wysłanego alertu` |
 | zlecenie bez typu, miasta i telefonu | log fetchera — `OSTRZEŻENIE: post <fb_id> ma w bazie werdykt modelu i ZERO pól z ekstrakcji` |
 | jak odzyskać stare zlecenia bez ekstrakcji | `python laweta_radar/scripts/uzupelnij_klasyfikacje.py --sucho` |

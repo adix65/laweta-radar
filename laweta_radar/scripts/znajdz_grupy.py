@@ -29,28 +29,49 @@ CSV po URL-u: `publiczna`, `status` i dopisana ręcznie `notatka` zostają nietk
 dochodzą tylko nowe grupy. Gdyby nadpisywał plik, comiesięczne odświeżenie kasowałoby
 godziny klikania po Facebooku — i po drugim razie nikt by go już nie odpalił.
 
+CIASTECZKA — BEZ NICH CAŁE NARZĘDZIE JEST BEZUŻYTECZNE. Wyszukiwarka grup FB
+    oddaje NIEZALOGOWANEMU ścianę logowania, a nie wyniki; actor ma pole `cookies`
+    dokładnie z tego powodu. Run bez sesji kosztuje tyle samo co udany i zwraca
+    zero grup albo śmieci — dlatego brak pliku jest OSTRZEŻENIEM PRZED serią,
+    a nie błędem PO niej.
+
+    Ścieżka: `FB_COOKIES_PATH` w laweta_radar/.env (nie we wspólnym — stamtąd
+    przychodzą wyłącznie klucze i proxy Apify). Sam plik trzymasz POZA repo,
+    w formacie eksportu z rozszerzenia przeglądarki. W logu widać WYŁĄCZNIE
+    liczbę wczytanych ciasteczek — nigdy ich treść, bo to żywa sesja Facebooka.
+
+ZANIM POJDZIE KOMPLET FRAZ ZA ~2,5 USD — jedno wywołanie na jednej frazie:
+    python -m laweta_radar.scripts.znajdz_grupy --fraza "giełda lawet"
+Wypisuje SUROWY wynik actora. To jedyny sposób sprawdzić, czy sesja i nazwy pól
+działają, zanim zapłaci się za komplet: zła nazwa pola nie zwraca błędu, tylko
+pusty run za pełną cenę.
+
 WZORZEC: `workers/apify_fb_search_fetcher.py` z repo źródłowego (obsługa fraz,
 rotacja kluczy, dedup, bezpieczniki). Różnica: tamten szuka POSTÓW, ten szuka GRUP.
 
 UŻYCIE:
     export PYTHONPATH=$PWD
     python -m laweta_radar.scripts.znajdz_grupy --schema     # NAJPIERW: pola actora
-    python -m laweta_radar.scripts.znajdz_grupy --sucho      # plan i koszt, bez wydawania
+    python -m laweta_radar.scripts.znajdz_grupy --sucho      # plan, wejście, koszt
+    python -m laweta_radar.scripts.znajdz_grupy --fraza "X"  # POTEM: jedna fraza na próbę
     python -m laweta_radar.scripts.znajdz_grupy              # seria (pyta o potwierdzenie)
     python -m laweta_radar.scripts.znajdz_grupy --raport     # po uzupełnieniu `publiczna`
 
     --jezyk pl,de        # tylko wybrane bloki językowe
     --min-czlonkow 300   # niższy próg (domyślnie 500)
     --klucz 3            # konkretny klucz Apify
+    --limit 5            # ile wyników na frazę (próba: domyślnie 5)
 """
 from __future__ import annotations
 
 import csv
+import json
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 try:                               # pakiet widoczny: -m, import pakietowy, testy
     from laweta_radar.scripts._sciezka import dodaj_repo_do_sciezki
@@ -60,6 +81,7 @@ except ImportError:                # uruchomienie po ścieżce do pliku
 dodaj_repo_do_sciezki()
 
 from laweta_radar.config import frazy_grup as cfg  # noqa: E402
+from laweta_radar.config import settings  # noqa: E402
 from laweta_radar.workers import apify_proxy, apify_run  # noqa: E402
 from laweta_radar.workers.apify_keys import (  # noqa: E402
     AllKeysExhausted,
@@ -79,6 +101,20 @@ KOLUMNY_RECZNE = ("publiczna", "status", "notatka")
 
 ODSTEP_S = 5.0          # przerwa między frazami; bez zrównoleglania
 TIMEOUT_RUNU_S = 300
+
+# Ile wyników bierze PRÓBA (`--fraza`), gdy nie podano `--limit`. Próba ma
+# odpowiedzieć „czy sesja i nazwy pól działają", a nie zebrać dane — pięć wyników
+# odpowiada na to tak samo jak trzydzieści i kosztuje sześć razy mniej.
+LIMIT_PROBY = 5
+
+# Ciasteczka, po których poznajemy, że plik jest ZALOGOWANĄ SESJĄ Facebooka,
+# a nie eksportem z przypadkowej karty. Sprawdzamy NAZWY, nigdy wartości.
+CIASTECZKA_SESJI = ("c_user", "xs")
+
+# Czyje ciasteczka mają prawo pojechać do actora. Eksport z rozszerzenia bywa
+# eksportem CAŁEJ przeglądarki, a plik idzie w całości do CUDZEGO actora —
+# jedzie więc wyłącznie to, co dotyczy Facebooka.
+DOMENY_CIASTECZEK = ("facebook.com",)
 
 # Gdzie item niesie poszczególne dane. Actory ze Store zmieniają nazwy pól między
 # wersjami — kolejność w krotce jest kolejnością prób, pierwsze trafienie wygrywa.
@@ -173,6 +209,111 @@ def parsuj_czlonkow(wartosc) -> int:
     if zakotwiczone:
         return zakotwiczone[0]
     return max(wszystkie) if wszystkie else 0
+
+
+def url_frazy(fraza: str) -> str:
+    """Fraza -> adres wyszukiwarki grup FB. Tak, i tylko tak, trafia do actora.
+
+    Actor NIE MA pola na frazę (patrz `SCHEMAT_SPRAWDZONY` w config/frazy_grup.py):
+    przyjmuje `startUrls`, więc szukanie wyraża się adresem wyszukiwarki.
+
+    Kodowanie procentowe siedzi TUTAJ, a nie u wołającego, bo pominąć je można
+    tylko raz i nikt tego nie zauważy: frazy mają spacje i znaki narodowe
+    („giełda lawet", „odtahová služba", „Autotransport Börse"), a niezakodowane
+    rozwalają adres. Actor dostaje wtedy URL, który nie jest wyszukiwaniem —
+    i płacimy pełną cenę za run bez wyników.
+
+    `safe=""` — kodujemy także `/`, `?` i `&`. W treści frazy nie są separatorami
+    adresu, a niezakodowane byłyby przez FB przeczytane właśnie jako separatory.
+    """
+    return cfg.URL_WYSZUKIWARKI.format(q=quote((fraza or "").strip(), safe=""))
+
+
+def _ciasteczko_facebooka(ciasteczko: dict) -> bool:
+    """Czy to ciasteczko dotyczy Facebooka. Brak domeny = zostaje (część
+    eksportów jej nie zapisuje, a odsianie ich zabrałoby całą sesję)."""
+    domena = str(ciasteczko.get("domain") or "").strip().lower()
+    return not domena or any(d in domena for d in DOMENY_CIASTECZEK)
+
+
+def wczytaj_ciasteczka(sciezka) -> tuple[list[dict], str]:
+    """(ciasteczka, jedna linia dla człowieka). NIE RZUCA i NIE POKAZUJE wartości.
+
+    Nie rzuca, bo brak sesji ma zatrzymać człowieka PRZED serią — pytaniem
+    o potwierdzenie, a nie tracebackiem w środku opłaconego przebiegu. Cała
+    diagnostyka jedzie w drugim elemencie krotki.
+
+    Z pliku wychodzą wyłącznie LICZBY. Wartość ciasteczka `xs` to zalogowana
+    sesja Facebooka — raz wpisana w log zostaje tam na zawsze, także w kopii,
+    którą ktoś wklei do zgłoszenia albo wyśle dalej.
+
+    Dwa formaty eksportu dają ten sam wynik: goła lista albo `{"cookies": [...]}`.
+    """
+    if not str(sciezka or "").strip():
+        return [], "BRAK — nie ustawiono FB_COOKIES_PATH w .env"
+    plik = Path(str(sciezka)).expanduser()
+    if not plik.is_file():
+        return [], f"BRAK — nie ma pliku {plik}"
+    try:
+        dane = json.loads(plik.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        # Treść błędu bywa fragmentem pliku, a plik jest sesją — do logu idzie
+        # sam typ wyjątku, nigdy `str(e)`.
+        return [], f"BRAK — {plik}: nie odczytałem ({type(e).__name__})"
+    if isinstance(dane, dict):
+        dane = dane.get("cookies")
+    if not isinstance(dane, list):
+        return [], (f"BRAK — {plik}: oczekiwałem listy ciasteczek albo "
+                    f"{{\"cookies\": [...]}}")
+
+    nazwane = [c for c in dane
+               if isinstance(c, dict) and str(c.get("name") or "").strip()]
+    ciasteczka = [c for c in nazwane if _ciasteczko_facebooka(c)]
+    obce = len(nazwane) - len(ciasteczka)
+    if not ciasteczka:
+        return [], f"BRAK — {plik}: ani jedno ciasteczko nie dotyczy Facebooka"
+
+    czesci = [f"{len(ciasteczka)} z {plik}"]
+    if obce:
+        czesci.append(f"{obce} spoza Facebooka POMINIĘTO")
+    nazwy = {str(c.get("name") or "").strip() for c in ciasteczka}
+    if not all(n in nazwy for n in CIASTECZKA_SESJI):
+        czesci.append(f"UWAGA: brakuje {'/'.join(CIASTECZKA_SESJI)} — to chyba "
+                      f"nie jest zalogowana sesja")
+    return ciasteczka, "; ".join(czesci)
+
+
+def zamaskuj_wejscie(wejscie: dict) -> dict:
+    """Kopia wejścia nadająca się do wypisania: ciasteczka zastąpione LICZBĄ.
+
+    Pole ZOSTAJE, zmienia się tylko wartość. `--sucho` ma pozwolić porównać
+    wejście ze schematem actora pole po polu, a wycięty klucz wygląda w takim
+    porównaniu dokładnie jak pole, którego nie wysyłamy.
+    """
+    podglad = dict(wejscie)
+    ciasteczka = podglad.get(cfg.POLE_CIASTECZEK)
+    if isinstance(ciasteczka, list):
+        podglad[cfg.POLE_CIASTECZEK] = (f"<{len(ciasteczka)} ciasteczek — "
+                                        f"wartości ukryte>")
+    return podglad
+
+
+def podglad_wejscia(wejscie: dict) -> str:
+    """Wejście actora jako JSON do wklejenia obok schematu. Bez sekretów."""
+    return json.dumps(zamaskuj_wejscie(wejscie), ensure_ascii=False, indent=2)
+
+
+def jezyk_frazy(fraza: str) -> str:
+    """Blok językowy, z którego pochodzi fraza. „?" dla frazy spoza listy.
+
+    Potrzebne w trybie `--fraza`: kolumna `jezyk` bierze się z tego, która fraza
+    znalazła grupę, a przy frazie wpisanej z ręki nie ma innego źródła.
+    """
+    szukana = (fraza or "").strip().casefold()
+    for jezyk, znana in cfg.frazy():
+        if znana.casefold() == szukana:
+            return jezyk
+    return "?"
 
 
 def normalizuj_url(url: str) -> str:
@@ -394,10 +535,32 @@ def blok_do_groups_py(wiersze: list[dict]) -> tuple[str, dict[str, int]]:
 # ===========================================================================
 # CZĘŚĆ SIECIOWA
 # ===========================================================================
-def _wejscie(fraza: str, limit: int) -> dict:
-    """Wejście actora. Nazwy pól są DANYMI (`config/frazy_grup.py`), bo zmieniają
-    się między wersjami actora — sprawdzasz je przez `--schema`, nie przez grep."""
-    return {cfg.POLE_FRAZY: fraza, cfg.POLE_LIMITU: limit}
+def _wejscie(fraza: str, limit: int, ciasteczka: list[dict] | None = None) -> dict:
+    """Wejście actora dla JEDNEJ frazy — komplet pól, które wysyłamy.
+
+    Nazwy pól są DANYMI (`config/frazy_grup.py`), bo zmieniają się między
+    wersjami actora — sprawdzasz je przez `--schema`, nie przez grep.
+
+    FRAZA JEDZIE JAKO ADRES w `startUrls`, bo actor nie ma pola na samą frazę
+    (patrz `SCHEMAT_SPRAWDZONY`). Lista obiektów `{"url": ...}` to konwencja list
+    żądań w Apify — ta sama, co w fetcherze i w pomiarze actora.
+
+    Ciasteczka doklejamy TYLKO gdy są. Pusta lista znaczy dla actora to samo, co
+    brak pola (sesja niezalogowana), ale w podglądzie `--sucho` wyglądałaby jak
+    sesja, której nie ma — a to jedyna rzecz, którą ten podgląd ma rozstrzygać.
+    """
+    wejscie: dict = {
+        cfg.POLE_STARTOWE: [{"url": url_frazy(fraza)}],
+        cfg.POLE_LIMITU: limit,
+        # Odstęp przewijania wyszukiwarki. Nie jest pokrętłem wydajności:
+        # zbyt agresywny wygląda dla FB jak bot i psuje SESJĘ, czyli koszt
+        # pomyłki płacą wszystkie następne runy, nie ten.
+        cfg.POLE_MIN_ODSTEPU: settings.FB_SEARCH_MIN_DELAY_S,
+        cfg.POLE_MAX_ODSTEPU: settings.FB_SEARCH_MAX_DELAY_S,
+    }
+    if ciasteczka:
+        wejscie[cfg.POLE_CIASTECZEK] = list(ciasteczka)
+    return wejscie
 
 
 @dataclass
@@ -406,9 +569,14 @@ class _Seria:
     itemow: int = 0
     koszt_usd: float = 0.0
     bledy: list[str] = field(default_factory=list)
+    # Itemy tak, jak przyszły z actora — do `--fraza`. Przy próbie to jedyna
+    # rzecz, która odpowiada na pytanie „czym różni się to, co dostaliśmy, od
+    # tego, czego szukają POLA_URL".
+    surowe: list[dict] = field(default_factory=list)
 
 
-def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log) -> _Seria:
+def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log,
+            ciasteczka: list[dict] | None = None) -> _Seria:
     """Jedno wywołanie na frazę — bo tylko tak wiadomo, KTÓRA fraza znalazła grupę.
 
     Kolumna `fraza_zrodlowa` jest w CSV nie dla ozdoby: z niej bierze się `jezyk`
@@ -423,7 +591,7 @@ def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log) -
         log(f"\n[{KTO}] [{jezyk}] „{fraza}” ({i + 1}/{len(pary)})")
         try:
             run = rotator.call(lambda token: apify_run.uruchom(
-                token, cfg.ACTOR, _wejscie(fraza, limit),
+                token, cfg.ACTOR, _wejscie(fraza, limit, ciasteczka),
                 timeout_s=TIMEOUT_RUNU_S, max_czekania_s=TIMEOUT_RUNU_S * 1.5,
                 max_itemow=limit, log=log))
         except AllKeysExhausted as e:
@@ -439,6 +607,7 @@ def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log) -
             continue
         seria.itemow += run.ile_itemow
         seria.koszt_usd += run.koszt_usd or 0.0
+        seria.surowe.extend(run.itemy)
         if run.blad:
             seria.bledy.append(f"{fraza}: {run.blad}")
 
@@ -447,6 +616,19 @@ def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log) -
         seria.kandydaci.extend(znalezione)
         log(f"[{KTO}] [{jezyk}] „{fraza}”: {len(znalezione)} grup "
             f"z {run.ile_itemow} itemów")
+
+        if i == 0 and not run.ile_itemow:
+            # Pierwsza fraza to najmocniejsza fraza z listy. Zero itemów oznacza
+            # najczęściej ścianę logowania — a wtedy KAŻDE kolejne wywołanie
+            # zwróci to samo zero i zostanie policzone tak samo jak udane.
+            # Jedno stracone wywołanie zamiast dwudziestu ośmiu.
+            log(f"[{KTO}] PRZERYWAM: pierwsza fraza zwróciła ZERO wyników. "
+                f"Najczęstsza przyczyna to brak sesji — wyszukiwarka grup FB "
+                f"pokazuje niezalogowanemu ścianę logowania. Sprawdź "
+                f"FB_COOKIES_PATH w .env, potem jedną frazę: --fraza „{fraza}”.")
+            seria.bledy.append("pierwsza fraza bez wyników — sprawdź sesję "
+                               "(ciasteczka)")
+            break
 
         if i == 0 and run.ile_itemow and not znalezione:
             # Itemy są, ale ani jeden nie ma adresu grupy: actor zmienił nazwy pól
@@ -464,8 +646,11 @@ def _szukaj(rotator: KeyRotator, pary: list[tuple[str, str]], limit: int, log) -
 # ===========================================================================
 def _parsuj(argv: list[str]) -> dict:
     opcje = {"jezyki": None, "min_czlonkow": cfg.MIN_CZLONKOW, "klucz": 1,
-             "limit": cfg.WYNIKOW_NA_FRAZE, "csv": CSV_PATH,
-             "raport": False, "schema": False, "sucho": False, "tak": False}
+             "limit": cfg.WYNIKOW_NA_FRAZE, "csv": CSV_PATH, "fraza": "",
+             "raport": False, "schema": False, "sucho": False, "tak": False,
+             # Czy `--limit` padł JAWNIE. Próba `--fraza` bez tego schodzi na
+             # `LIMIT_PROBY` — pyta o działanie sesji, a nie o dane.
+             "limit_jawny": False}
     i = 1
     while i < len(argv):
         a, nast = argv[i], (argv[i + 1] if i + 1 < len(argv) else "")
@@ -480,6 +665,10 @@ def _parsuj(argv: list[str]) -> dict:
             i += 2
         elif a == "--limit" and nast.isdigit():
             opcje["limit"] = int(nast)
+            opcje["limit_jawny"] = True
+            i += 2
+        elif a in ("--fraza", "--fraze") and nast:
+            opcje["fraza"] = nast.strip()
             i += 2
         elif a == "--csv" and nast:
             opcje["csv"] = Path(nast)
@@ -550,16 +739,23 @@ def _tryb_schema(token: str) -> int:
         typ = (opis or {}).get("type", "?")
         tytul = (opis or {}).get("title", "")
         print(f"    {nazwa:<28} {typ:<10} {tytul}")
-    print()
-    for stala, wartosc in (("POLE_FRAZY", cfg.POLE_FRAZY),
-                           ("POLE_LIMITU", cfg.POLE_LIMITU)):
-        znak = "OK  " if wartosc in wlasciwosci else "BRAK"
-        print(f"[{KTO}] {znak} {stala} = „{wartosc}”")
-    if apify_run.nieznane_pola(_wejscie("test", 1), schemat):
+
+    # Porównujemy KOMPLET pól, które realnie wysyłamy — z ciasteczkiem-atrapą,
+    # żeby `cookies` też przeszło przez sprawdzenie, gdy sesji akurat nie ma.
+    wzor = _wejscie("próba", 1, [{"name": "atrapa", "value": "atrapa"}])
+    print(f"\n[{KTO}] Wysyłamy {len(wzor)} pól (config/frazy_grup.py, schemat "
+          f"sprawdzony {cfg.SCHEMAT_SPRAWDZONY}):")
+    for pole in wzor:
+        znak = "OK  " if pole in wlasciwosci else "BRAK"
+        print(f"[{KTO}] {znak} {pole}")
+    if apify_run.nieznane_pola(wzor, schemat):
         print(f"[{KTO}] Popraw stałe w laweta_radar/config/frazy_grup.py ZANIM "
               f"odpalisz serię — zła nazwa pola nie zwraca błędu, tylko run bez "
               f"filtra, za pełną cenę.", file=sys.stderr)
         return 1
+    print(f"[{KTO}] Komplet pól zgadza się ze schematem. Jeśli coś tu poprawiasz, "
+          f"podmień też datę przy SCHEMAT_SPRAWDZONY — to ona mówi następnemu "
+          f"człowiekowi, kiedy ktokolwiek ostatni raz to widział.")
     return 0
 
 
@@ -576,11 +772,52 @@ def _sprawdz_schemat(token: str, log=print) -> None:
     except Exception as e:  # noqa: BLE001 — to jest podpowiedź, nie bramka
         log(f"[{KTO}] (nie sprawdziłem schematu actora: {type(e).__name__})")
         return
-    brakujace = apify_run.nieznane_pola(_wejscie("test", 1), schemat)
+    brakujace = apify_run.nieznane_pola(
+        _wejscie("próba", 1, [{"name": "atrapa", "value": "atrapa"}]), schemat)
     if brakujace:
         log(f"[{KTO}] UWAGA: actor NIE deklaruje pól {brakujace}. Zła nazwa pola "
             f"nie zwraca błędu — zwraca run bez filtra, za pełną cenę. Sprawdź "
             f"`--schema` i popraw laweta_radar/config/frazy_grup.py.")
+
+
+def _wynik_proby(seria: _Seria, byly_ciasteczka: bool) -> int:
+    """Surowy wynik jednej frazy + WERDYKT: czy komplet ma sens.
+
+    Próba istnieje po to, żeby rozstrzygnąć jedną rzecz — czy sesja i nazwy pól
+    działają. Sam JSON tego nie mówi: zero itemów i itemy bez adresów grup
+    wyglądają w logu podobnie, a znaczą co innego i co innego się po nich robi.
+    """
+    print(f"\n[{KTO}] ===== SUROWY WYNIK ({len(seria.surowe)} itemów, koszt "
+          f"{seria.koszt_usd:.4f} USD) =====")
+    print(json.dumps(seria.surowe, ensure_ascii=False, indent=2))
+    for blad in seria.bledy[:5]:
+        print(f"[{KTO}] błąd: {blad}")
+
+    print(f"\n[{KTO}] ===== WERDYKT =====")
+    if not seria.surowe:
+        print(f"[{KTO}] ZERO itemów. Najczęstsza przyczyna to brak sesji: "
+              f"wyszukiwarka grup FB oddaje niezalogowanemu ścianę logowania.")
+        trop = ("Ciasteczka BYŁY wysłane — sesja jest nieważna albo wygasła; "
+                "wyeksportuj ją z przeglądarki ponownie." if byly_ciasteczka else
+                "Ciasteczek NIE BYŁO — ustaw FB_COOKIES_PATH w .env.")
+        print(f"[{KTO}] {trop}")
+        print(f"[{KTO}] Drugi trop, gdy sesja na pewno działa: nazwy pól "
+              f"WEJŚCIA — `--schema`.")
+        return 0
+    if not seria.kandydaci:
+        print(f"[{KTO}] Itemy są, ale w żadnym nie ma adresu grupy — actor "
+              f"zmienił nazwy pól WYJŚCIA. Popraw POLA_URL w tym pliku "
+              f"(porównaj z JSON-em wyżej).")
+        return 0
+    print(f"[{KTO}] OK: {len(seria.kandydaci)} grup rozpoznanych z "
+          f"{len(seria.surowe)} itemów — sesja i nazwy pól działają.")
+    for k in seria.kandydaci[:5]:
+        print(f"[{KTO}]   {k.czlonkowie:>8} członków  {k.url}")
+    print(f"[{KTO}] Możesz odpalić komplet: "
+          f"python -m laweta_radar.scripts.znajdz_grupy")
+    print(f"[{KTO}] Próba NIC nie zapisała do CSV — to było sprawdzenie, "
+          f"nie zbieranie.")
+    return 0
 
 
 def _main(argv: list[str]) -> int:
@@ -597,7 +834,16 @@ def _main(argv: list[str]) -> int:
     if opcje["raport"]:
         return _tryb_raport(Path(opcje["csv"]))
 
-    pary = cfg.frazy(opcje["jezyki"])
+    # --fraza: JEDNO wywołanie na jednej frazie, żeby sprawdzić sesję i nazwy pól,
+    # zanim pójdzie komplet za ~2,5 USD. Bez jawnego `--limit` schodzimy na
+    # `LIMIT_PROBY` — próba odpowiada na pytanie „czy działa", a nie „ile jest".
+    proba = bool(opcje["fraza"])
+    if proba:
+        pary = [(jezyk_frazy(opcje["fraza"]), opcje["fraza"])]
+        if not opcje["limit_jawny"]:
+            opcje["limit"] = LIMIT_PROBY
+    else:
+        pary = cfg.frazy(opcje["jezyki"])
     if not pary:
         print(f"[{KTO}] Pusta lista fraz — kończę bez działania.\n"
               f"[{KTO}] Uzupełnij FRAZY w laweta_radar/config/frazy_grup.py "
@@ -624,32 +870,72 @@ def _main(argv: list[str]) -> int:
     if opcje["schema"]:
         return _tryb_schema(tokeny[opcje["klucz"] - 1])
 
+    # --- Sesja FB: bez niej wyszukiwarka nie ma czego pokazać ---------------
+    ciasteczka, stan_ciastek = wczytaj_ciasteczka(settings.FB_COOKIES_PATH)
+
     # --- Koszt PRZED serią -------------------------------------------------
     itemow_max = len(pary) * opcje["limit"]
     szacunek = itemow_max * cfg.CENA_KATALOGOWA_USD_ZA_WYNIK
     jezyki = sorted({j for j, _ in pary})
-    print(f"\n[{KTO}] PLAN WYSZUKIWANIA")
-    print(f"[{KTO}]   {len(pary)} fraz ({', '.join(jezyki)}) = {len(pary)} wywołań")
-    print(f"[{KTO}]   po {opcje['limit']} wyników = NAJWYŻEJ {itemow_max} wyników")
+    print(f"\n[{KTO}] PLAN {'PRÓBY' if proba else 'WYSZUKIWANIA'}")
+    if proba:
+        print(f"[{KTO}]   1 fraza [{pary[0][0]}] „{pary[0][1]}” = 1 wywołanie, "
+              f"najwyżej {opcje['limit']} wyników")
+    else:
+        print(f"[{KTO}]   {len(pary)} fraz ({', '.join(jezyki)}) = "
+              f"{len(pary)} wywołań")
+        print(f"[{KTO}]   po {opcje['limit']} wyników = NAJWYŻEJ "
+              f"{itemow_max} wyników")
     print(f"[{KTO}]   ≈ {szacunek:.2f} USD (cena katalogowa "
           f"{cfg.CENA_KATALOGOWA_USD_ZA_WYNIK} USD/wynik — SPRAWDŹ na stronie actora)")
-    print(f"[{KTO}]   próg członków: {opcje['min_czlonkow']}, klucz Apify: "
-          f"#{opcje['klucz']}")
-    print(f"[{KTO}]   CSV: {opcje['csv']}"
-          + (" (istnieje — praca ręczna zostanie ZACHOWANA)"
-             if Path(opcje["csv"]).is_file() else " (nowy)"))
+    print(f"[{KTO}]   klucz Apify: #{opcje['klucz']}"
+          + ("" if proba else f", próg członków: {opcje['min_czlonkow']}"))
+    print(f"[{KTO}]   ciasteczka FB: {stan_ciastek}")
+    print(f"[{KTO}]   odstęp przewijania: {settings.FB_SEARCH_MIN_DELAY_S}"
+          f"-{settings.FB_SEARCH_MAX_DELAY_S} s")
+    print(f"[{KTO}]   CSV: " + ("próba NIC nie zapisuje" if proba else
+          f"{opcje['csv']}" + (" (istnieje — praca ręczna zostanie ZACHOWANA)"
+                               if Path(opcje["csv"]).is_file() else " (nowy)")))
+
+    # Wejście actora WPROST na ekran — po to, żeby dało się je porównać
+    # ze schematem (`--schema`) gołym okiem, a nie przez czytanie tego pliku.
+    # Ciasteczka są zamaskowane: pokazujemy liczbę, nigdy wartości.
+    print(f"\n[{KTO}] WEJŚCIE ACTORA (pierwsza fraza — „{pary[0][1]}”):")
+    print(podglad_wejscia(_wejscie(pary[0][1], opcje["limit"], ciasteczka)))
     _sprawdz_schemat(tokeny[opcje["klucz"] - 1])
+
+    if not ciasteczka:
+        # OSTRZEŻENIE, nie błąd: plik z sesją bywa gdzie indziej, a decyzja
+        # „i tak sprawdzę" należy do człowieka. Ma tylko wiedzieć, za co płaci.
+        print(f"\n[{KTO}] OSTRZEŻENIE: LECIMY BEZ SESJI FACEBOOKA")
+        print(f"[{KTO}]   Wyszukiwarka grup pokazuje NIEZALOGOWANEMU ścianę "
+              f"logowania, a nie wyniki.")
+        print(f"[{KTO}]   Ten przebieg najprawdopodobniej zwróci zero grup albo "
+              f"śmieci — i zostanie policzony tak samo jak udany (≈ "
+              f"{szacunek:.2f} USD).")
+        print(f"[{KTO}]   Ustaw FB_COOKIES_PATH w .env (plik JSON z eksportu "
+              f"rozszerzenia, trzymany POZA repo).")
+        if not proba:
+            print(f"[{KTO}]   Taniej niż komplet: --fraza „{pary[0][1]}” "
+                  f"(jedno wywołanie, {LIMIT_PROBY} wyników).")
+
     if opcje["sucho"]:
-        print(f"[{KTO}] --sucho: nic nie odpalam.")
+        print(f"\n[{KTO}] --sucho: nic nie odpalam.")
         return 0
     if not opcje["tak"]:
+        # Pytanie NAZYWA to, co się potwierdza. „Odpalić?" po ostrzeżeniu wyżej
+        # człowiek odklika odruchowo — i dowie się o braku sesji z rachunku.
+        pytanie = ("Odpalić MIMO BRAKU CIASTECZEK? wpisz TAK: " if not ciasteczka
+                   else "Odpalić? wpisz TAK: ")
         try:
-            odp = input(f"[{KTO}] Odpalić? wpisz TAK: ").strip()
+            odp = input(f"[{KTO}] {pytanie}").strip()
         except (EOFError, KeyboardInterrupt):
             odp = ""
         if odp != "TAK":
             print(f"[{KTO}] Przerwane — nic nie wydano.")
             return 0
+    elif not ciasteczka:
+        print(f"[{KTO}] --tak: pytanie o brak ciasteczek POMINIĘTE świadomie.")
 
     # --- Seria -------------------------------------------------------------
     # `state_path=None`: to jest narzędzie odpalane raz w miesiącu na wskazanym
@@ -659,7 +945,10 @@ def _main(argv: list[str]) -> int:
         tokeny, state_path=None, start_index=opcje["klucz"] - 1,
         transient_key_switches=2 if apify_proxy.is_enabled() else 0,
     )
-    seria = _szukaj(rotator, pary, opcje["limit"], print)
+    seria = _szukaj(rotator, pary, opcje["limit"], print, ciasteczka)
+
+    if proba:
+        return _wynik_proby(seria, bool(ciasteczka))
 
     lista, stat = odsiej(seria.kandydaci, opcje["min_czlonkow"])
     sciezka = Path(opcje["csv"])

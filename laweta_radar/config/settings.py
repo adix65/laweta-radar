@@ -257,6 +257,30 @@ POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
 SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 
 # ---------------------------------------------------------------------------
+# WYSZUKIWARKA GRUP (scripts/znajdz_grupy.py) — narzędzie ręczne, nie pipeline.
+#
+# CIASTECZKA. Wyszukiwarka grup FB dla NIEZALOGOWANEGO oddaje ścianę logowania,
+# a nie wyniki — actor ma pole `cookies` właśnie dlatego. Run bez sesji kosztuje
+# tyle samo co udany i zwraca zero grup albo śmieci, więc brak tej ścieżki jest
+# OSTRZEŻENIEM przed serią, nie awarią po niej.
+#
+# Plik trzymaj POZA repo (np. ~/.secrets/fb_cookies.json, chmod 600). To jest
+# żywa sesja Facebooka: kto ma plik, ten jest zalogowany jako operator — i idzie
+# on w całości do cudzego actora, więc trzymaj tam WYŁĄCZNIE ciasteczka FB.
+# Wartości nie trafiają do żadnego logu; skrypt wypisuje tylko ich liczbę.
+FB_COOKIES_PATH = _txt("FB_COOKIES_PATH")
+
+# Odstęp actora między przewinięciami wyszukiwarki, w SEKUNDACH (pola `minDelay`
+# i `maxDelay`). To nie jest pokrętło wydajności: zbyt agresywne przewijanie
+# wygląda po stronie FB jak bot i psuje SESJĘ z pliku wyżej — czyli koszt pomyłki
+# płaci się nie tym runem, tylko wszystkimi następnymi.
+#
+# Para odwrócona (min > max) NIE zatrzymuje przebiegu — sufit dociąga się do
+# dolnej granicy, a realnie użyte wartości widać w planie przed serią.
+FB_SEARCH_MIN_DELAY_S = max(0, _int("FB_SEARCH_MIN_DELAY_S", 1))
+FB_SEARCH_MAX_DELAY_S = max(FB_SEARCH_MIN_DELAY_S, _int("FB_SEARCH_MAX_DELAY_S", 3))
+
+# ---------------------------------------------------------------------------
 # BRAMKA (workers/gate.py) — darmowy prefiltr słownikowy przed modelem.
 #
 # GATE_PROG: suma wag, od której post idzie do AI. Piątka jest CELOWO niska.
@@ -289,6 +313,22 @@ GATE_TRYB = _txt("GATE_TRYB", "cien")
 # doszła przyczepa do koni albo chęć podnajmowania takich kursów dalej, dane
 # już są zebrane; twarde odrzucenie kasowałoby je bezpowrotnie i bez śladu.
 ALERT_ZWIERZETA = _int("ALERT_ZWIERZETA", 0)
+
+# OFERTY PRZEWOŹNIKÓW — czy o cudzym wolnym miejscu ma brzęczeć telefon.
+#
+# Na giełdach transportowych obie strony rynku piszą posty o tym samym
+# kształcie: trasa, data, telefon. „Czwartek 06.08 wolna laweta Elbląg-Lublin
+# tel. 501606207" to nie klient, tylko konkurencja z wolnym miejscem — a bez
+# tego rozróżnienia budziła telefon jak każde zlecenie.
+#
+# 0 (domyślnie) = post z `kierunek='oferta'` NIE generuje powiadomienia.
+# 1             = alertuje ze znacznikiem, jak każde inne zlecenie.
+#
+# TO NIE JEST PRZEŁĄCZNIK ZBIERANIA. Oferty lądują w bazie niezależnie od tej
+# wartości, z kompletem pól i kolumną `kierunek` — cudzy kurs na trasie, którą
+# operator i tak jedzie, bywa okazją na doładunek albo na podnajęcie, a tego nie
+# widać w danych, których się nie zapisało. Wyciszamy telefon, nie rejestr.
+ALERT_OFERTY = _int("ALERT_OFERTY", 0)
 
 # ---------------------------------------------------------------------------
 # POWIADOMIENIA (services/powiadomienia.py) — progi sterują WYŁĄCZNIE tym, czy
@@ -328,6 +368,29 @@ MAX_POWIADOMIEN_H = _int("MAX_POWIADOMIEN_H", 15)
 # fb_id (hash liczymy z treści, a treść bywa minimalnie inna), więc dedup po
 # identyfikatorze go nie złapie.
 DEDUP_OKNO_H = _int("DEDUP_OKNO_H", 6)
+
+# ---------------------------------------------------------------------------
+# PODGLĄD TRASY W ALERCIE (services/mapa.py) — obrazek zamiast samych nazw miast.
+#
+# 1 (domyślnie) = gdy OBA punkty trasy udało się zgeokodować, alert idzie jako
+#                 zdjęcie z mapą, a dotychczasowa treść jako podpis. Przyciski
+#                 bez zmian.
+# 0             = alerty tekstowe, dokładnie jak przed tą funkcją.
+#
+# WŁĄCZONE NIE ZNACZY „NA PEWNO BĘDZIE OBRAZEK". Rysowanie wymaga paczki
+# `staticmap`, która jest OPCJONALNA (jak `pywebpush`, patrz requirements.txt) —
+# bez niej moduł mówi to raz w logu i alerty lecą tekstem. Tak samo kończy się
+# nierozpoznany punkt, wyjątek przy generowaniu i przekroczenie 5 s: obrazek
+# jest dodatkiem i nigdy nie może być powodem, dla którego zlecenie nie dotarło.
+MAPY_W_ALERTACH = _int("MAPY_W_ALERTACH", 1)
+
+# Rozmiar obrazka w pikselach. 700x450 mieści się na ekranie telefonu bez
+# przewijania i przy typowej trasie pokazuje nazwy krajów oraz główne miasta.
+# Wartości spoza zakresu 200-1600 moduł przycina i mówi o tym w logu: MAPA_W
+# z literówki to kilkaset pobranych kafelków na jeden alert, czyli dokładnie to
+# zachowanie, przez które OpenStreetMap blokuje IP.
+MAPA_W = _int("MAPA_W", 700)
+MAPA_H = _int("MAPA_H", 450)
 
 # ---------------------------------------------------------------------------
 # API panelu — JEDEN użytkownik, jeden token w nagłówku. Świadomie bez ról,
@@ -620,7 +683,15 @@ def opis_srodowiska() -> str:
          # koniu" jest pytaniem, na które inaczej nie ma odpowiedzi bez czytania
          # kodu. Zlecenie JEST w panelu niezależnie od tej wartości.
          f", alert_zwierzeta={'tak' if ALERT_ZWIERZETA else 'nie (tylko panel)'}"
-         f", llm={provider}/{model_llm}"
+         # Ta sama zasada co wyżej: „czemu nie przyszedł alert o tej lawecie
+         # z Elbląga" ma mieć odpowiedź w linii startowej. Dane o ofertach są
+         # w bazie niezależnie od tej wartości.
+         f", alert_oferty={'tak' if ALERT_OFERTY else 'nie (tylko baza)'}"
+         # „Czemu alert przyszedł bez mapy" ma mieć odpowiedź w linii startowej,
+         # a nie dopiero w kodzie: albo wyłączone w .env, albo brak `staticmap`
+         # (to drugie mówi raz services/mapa.py, przy pierwszym alercie).
+         + (f", mapy={MAPA_W}x{MAPA_H}" if MAPY_W_ALERTACH else ", mapy=nie")
+         + f", llm={provider}/{model_llm}"
          + (f"(json={OPENAI_JSON_MODE})" if provider == "openai" else "")
          # Literówka w LLM_PROVIDER degraduje po cichu do domyślnego — ma być
          # WIDOCZNA, bo inaczej operator czyta linię startową i widzi providera,

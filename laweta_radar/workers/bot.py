@@ -117,9 +117,51 @@ def obsluz_callback(conn, callback: dict) -> None:
 
     if message_id is None:
         return
+    _dopisz_i_zdejmij_przyciski(wiadomosc, dopisek)
+
+
+def _dopisz_i_zdejmij_przyciski(wiadomosc: dict, dopisek: str) -> None:
+    """Dopisek pod alertem i ZDJĘCIE przycisków — osobno dla tekstu i dla zdjęcia.
+
+    ALERT Z MAPĄ TRASY NIE MA POLA `text`, tylko `caption` (patrz
+    services/powiadomienia._wyslij_alert). `editMessageText` odpowiada na taką
+    wiadomość błędem „there is no text in the message to edit", więc przyciski
+    zostałyby na ekranie — a alert, który po kliknięciu wygląda identycznie,
+    uczy klikać jeszcze raz. Przy „Śmieć" drugie kliknięcie to zlecenie
+    wyrzucone przez pomyłkę, więc to nie jest kosmetyka.
+
+    Metodę wybieramy po TYM, CO PRZYSZŁO W CALLBACKU, a nie po pamiętanym
+    sposobie wysyłki: bot chodzi w osobnym procesie niż fetcher i o wysyłce wie
+    tylko tyle, ile widzi w zdarzeniu.
+    """
+    chat_id = (wiadomosc.get("chat") or {}).get("id")
+    message_id = wiadomosc.get("message_id")
+    # Rozstrzyga BRAK POLA `text`, a nie obecność `photo`: `editMessageText`
+    # wymaga tekstu i odrzuca każdą wiadomość, która go nie ma. Alert z mapą
+    # przychodzi z `caption`, ale reguła jest szersza niż jeden nasz przypadek.
+    ze_zdjeciem = wiadomosc.get("text") is None
+
+    if ze_zdjeciem:
+        ogon = f"\n\n— {dopisek}"
+        stary = wiadomosc.get("caption") or ""
+        # Podpis pod zdjęciem ma limit 1024 znaków i alert potrafi go dotykać
+        # (powiadomienia.podpis_pod_zdjeciem przycina treść dokładnie do niego).
+        # Doklejony dopisek przekroczyłby limit, Telegram odrzuciłby edycję,
+        # a przyciski zostałyby na ekranie — czyli dokładnie ten skutek, przed
+        # którym ta funkcja broni.
+        nadmiar = len(stary) + len(ogon) - telegram_notify.MAX_CAPTION
+        if nadmiar > 0:
+            stary = stary[:-nadmiar].rstrip()
+        telegram_notify.wywolaj("editMessageCaption", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": f"{stary}{ogon}",
+        })
+        return
+
     stary = wiadomosc.get("text") or ""
     telegram_notify.wywolaj("editMessageText", {
-        "chat_id": (wiadomosc.get("chat") or {}).get("id"),
+        "chat_id": chat_id,
         "message_id": message_id,
         "text": f"{stary}\n\n— {dopisek}",
         "disable_web_page_preview": True,

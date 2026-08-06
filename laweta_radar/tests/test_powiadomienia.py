@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from laweta_radar.services import geo, powiadomienia as pw
+from laweta_radar.tests import atrapa_staticmap
 
 TERAZ = datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc)
 
@@ -396,6 +397,65 @@ def test_zwykle_zlecenie_bez_znacznika_zwierzat():
     assert "ZWIERZ" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).upper()
 
 
+# ---------------------------------------------------------------------------
+# OFERTY PRZEWOŹNIKÓW — cisza, ale NIE zniknięcie
+#
+# Bramka takie posty odrzuca, a klasyfikator wystawia im `czy_zlecenie=false`,
+# więc do tego modułu normalnie NIE DOCHODZĄ. Ten warunek pracuje w jednym
+# przypadku: bramka rozpoznała ofertę, a model mimo to orzekł „zlecenie".
+# Wtedy — i tylko wtedy — tutaj rozstrzyga się, czy operator zostanie obudzony
+# cudzą lawetą jadącą trasą, którą i tak jedzie.
+# ---------------------------------------------------------------------------
+OFERTA = dict(ZLECENIE, kierunek="oferta",
+              tresc="Czwartek 06.08 wolna laweta Elblag-Lublin tel. 501606207")
+
+
+def test_oferta_domyslnie_nie_brzeczy(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    d = _ocen(OFERTA)
+    assert d.wysylac is False
+    assert d.kod == "oferta"
+    # Ten fragment powodu jest kontraktem, nie ozdobą — odróżnia „wyciszone"
+    # od „zgubione", gdy ktoś pyta, gdzie się podział post.
+    assert "bazie" in d.powod
+
+
+def test_oferta_z_wlaczonym_alertem_idzie_normalnie(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 1)
+    assert _ocen(OFERTA).wysylac is True
+
+
+def test_oferta_nie_rusza_pozostalych_zlecen(monkeypatch):
+    """Reguła ma dotyczyć WYŁĄCZNIE kierunku 'oferta'. Brak pola (wiersze sprzed
+    migracji 0011) i 'niejasne' zachowują się identycznie jak dotąd."""
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    assert _ocen(ZLECENIE).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek="zlecenie")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek="niejasne")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek=None)).wysylac is True
+
+
+def test_oferta_po_dedupie(monkeypatch):
+    """Kolejność jak przy zwierzętach: post już wysłany zostaje duplikatem —
+    inaczej zniknąłby powód, dla którego nie poszedł drugi raz."""
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    assert _ocen(OFERTA, juz_wyslane=True).kod == "duplikat"
+
+
+def test_oferta_ma_widoczny_znacznik_w_tresci_alertu():
+    """Przy ALERT_OFERTY=1 wiadomość dociera — i wygląda dokładnie jak zlecenie:
+    ma trasę, datę i telefon. Bez znacznika operator dzwoni do konkurencji,
+    żeby zaproponować jej kurs."""
+    tresc = pw.zbuduj_tresc(OFERTA, teraz=TERAZ)
+    assert "OFERTA PRZEWOŹNIKA" in tresc
+    # Nad cytatem, czyli w części czytanej najpierw.
+    assert tresc.index("OFERTA PRZEWOŹNIKA") < tresc.index("wolna laweta")
+
+
+def test_zwykle_zlecenie_bez_znacznika_oferty():
+    assert "OFERTA PRZEWOŹNIKA" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+
+
 @pytest.mark.parametrize("godzina,cisza", [(23, True), (2, True), (5, True),
                                            (6, False), (12, False), (21, False),
                                            (22, True)])
@@ -488,3 +548,218 @@ def test_przyciski_bez_trasy_gdy_nie_znamy_miejsca():
     for wiersz in pw.zbuduj_przyciski({"fb_id": "x", "post_url": "https://fb/1"}):
         for przycisk in wiersz:
             assert przycisk.get("url") or przycisk.get("callback_data")
+
+
+# ---------------------------------------------------------------------------
+# PODGLĄD TRASY — alert jako ZDJĘCIE
+#
+# Zmienia się JEDNA rzecz: metoda Bot API. Treść, przyciski, progi, dedup
+# i limity zostają dokładnie takie, jakie były — a każda ścieżka, na której coś
+# z obrazkiem nie wychodzi, kończy się zwykłym `sendMessage`. Obrazek jest
+# dodatkiem i nigdy nie może być powodem, dla którego zlecenie nie dotarło
+# do kierowcy, więc połowa tych testów sprawdza właśnie ścieżki awaryjne.
+# ---------------------------------------------------------------------------
+class _PolaczenieAtrapa:
+    """Tyle bazy, ile `_powiadom` realnie dotyka po zdjęciu dedupu z drogi."""
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def wysylka(monkeypatch, tmp_path):
+    """Cała droga zlecenie -> Telegram, bez bazy i bez sieci.
+
+    Dedup, pauza, zapis i push są podmienione, bo mają własne testy; w grze
+    zostaje PRAWDZIWE `services/mapa.py` (z atrapą samego renderu), żeby decyzja
+    „zdjęcie czy tekst" zapadała w kodzie produkcyjnym, a nie w atrapie.
+    """
+    atrapa_staticmap.zainstaluj(monkeypatch)
+    monkeypatch.setattr(pw.mapa.settings, "MAPY_W_ALERTACH", 1)
+    monkeypatch.setattr(pw.mapa.settings, "BASE_DIR", tmp_path)
+
+    monkeypatch.setattr(pw.telegram_notify, "skonfigurowany", lambda: True)
+    monkeypatch.setattr(pw, "_polacz", lambda: _PolaczenieAtrapa())
+    monkeypatch.setattr(pw, "_stan_dedupu", lambda *a: (False, None, 0))
+    monkeypatch.setattr(pw, "pauza_aktywna", lambda conn: False)
+    monkeypatch.setattr(pw, "_zapisz", lambda *a, **kw: None)
+    monkeypatch.setattr(pw, "_wyslij_push", lambda *a, **kw: None)
+
+    wyslane: list[dict] = []
+
+    def _tekst(tresc, przyciski=None, parse_mode="Markdown"):
+        wyslane.append({"metoda": "sendMessage", "tresc": tresc,
+                        "przyciski": przyciski})
+        return 11
+
+    def _zdjecie(sciezka, podpis, przyciski=None, parse_mode="Markdown"):
+        wyslane.append({"metoda": "sendPhoto", "tresc": podpis,
+                        "przyciski": przyciski, "plik": str(sciezka)})
+        return 22
+
+    monkeypatch.setattr(pw.telegram_notify, "wyslij", _tekst)
+    monkeypatch.setattr(pw.telegram_notify, "wyslij_zdjecie", _zdjecie)
+    return wyslane
+
+
+BEZ_CELU = dict(ZLECENIE, dostawa_miasto="Zmyslone Miasto", dostawa_kod="")
+
+
+def test_dwa_punkty_ida_jako_zdjecie_z_pelna_trescia_i_przyciskami(wysylka):
+    """Cel tej funkcji w jednym teście: gdy OBA punkty są znane, operator widzi
+    kształt trasy bez wychodzenia z Telegrama — a wszystko, co widział dotąd,
+    zostaje na swoim miejscu."""
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    (alert,) = wysylka
+
+    assert alert["metoda"] == "sendPhoto"
+    assert alert["plik"].endswith(".png")
+    # Podpis to DOKŁADNIE ta treść, którą system wysyłał tekstem.
+    assert alert["tresc"] == pw.zbuduj_tresc(ZLECENIE)
+    assert "TERAZ" in alert["tresc"] and "km" in alert["tresc"]
+    assert "golf stanal i nie odpala" in alert["tresc"]
+    assert "555 111 222" in alert["tresc"]
+    # Komplet przycisków, bez żadnych zmian.
+    assert alert["przyciski"] == pw.zbuduj_przyciski(ZLECENIE)
+    etykiety = [p["text"] for w in alert["przyciski"] for p in w]
+    assert any("Trasa" in e for e in etykiety)
+    assert any("post" in e for e in etykiety)
+    assert any("Śmieć" in e for e in etykiety)
+    assert any("Biorę" in e for e in etykiety)
+
+
+def test_jeden_punkt_to_zwykla_wiadomosc(wysylka):
+    """Mapa z jednym punktem myli bardziej, niż pomaga: nie pokazuje kształtu
+    trasy, tylko sugeruje, że trasa jest znana."""
+    assert pw.powiadom_o_zleceniu(BEZ_CELU) is True
+    (alert,) = wysylka
+    assert alert["metoda"] == "sendMessage"
+    assert atrapa_staticmap.RENDERY == []
+    # Alert dalej mówi, czego nie wie — to nie zmienia się wraz z metodą wysyłki.
+    assert "nierozpoznane" in alert["tresc"]
+
+
+def test_wyjatek_przy_generowaniu_nie_gubi_alertu(wysylka, capsys):
+    """POWIADOMIENIE MUSI DOJŚĆ. Zerwana sieć przy kafelkach kończy się
+    alertem tekstowym, a nie zleceniem, które nie dotarło do kierowcy."""
+    atrapa_staticmap.BLAD = RuntimeError("could not download tile")
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    (alert,) = wysylka
+    assert alert["metoda"] == "sendMessage"
+    assert alert["tresc"] == pw.zbuduj_tresc(ZLECENIE)
+    assert "mapa pominięta" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("co_pada", ["podglad_trasy", "wyslij_zdjecie"])
+def test_wyjatek_gdziekolwiek_na_sciezce_obrazka_nie_gubi_alertu(
+        wysylka, monkeypatch, capsys, co_pada):
+    """Druga warstwa tej samej gwarancji: oba moduły obiecują nie rzucać, ale
+    obietnica dotyczy ich dzisiejszego kodu — a alert broni się sam. Ostatnia
+    instrukcja `_wyslij_alert` ma się wykonać ZAWSZE."""
+    def _pada(*a, **kw):
+        raise OSError("dysk pełny")
+
+    if co_pada == "podglad_trasy":
+        monkeypatch.setattr(pw.mapa, "podglad_trasy", _pada)
+    else:
+        monkeypatch.setattr(pw.telegram_notify, "wyslij_zdjecie", _pada)
+
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    assert wysylka[0]["metoda"] == "sendMessage"
+    assert wysylka[0]["tresc"] == pw.zbuduj_tresc(ZLECENIE)
+    assert "obrazek pominięty" in capsys.readouterr().err
+
+
+def test_odrzucone_zdjecie_wraca_do_tekstu(wysylka, monkeypatch, capsys):
+    """Telegram potrafi odrzucić samo zdjęcie (za duże, 429). Alert leci wtedy
+    drugi raz jako tekst — lepiej bez obrazka niż wcale."""
+    monkeypatch.setattr(pw.telegram_notify, "wyslij_zdjecie", lambda *a, **kw: None)
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    (alert,) = wysylka
+    assert alert["metoda"] == "sendMessage"
+    assert "sendPhoto nie przeszło" in capsys.readouterr().err
+
+
+def test_ta_sama_trasa_w_drugim_poscie_nie_pobiera_kafelkow(wysylka):
+    """Ten sam kurs krąży po kilku grupach. Kafelki utrzymuje projekt społeczny
+    z darowizn — drugi alert ma wziąć obrazek z dysku, nie z sieci."""
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    assert pw.powiadom_o_zleceniu(dict(ZLECENIE, fb_id="inny-post")) is True
+
+    assert [a["metoda"] for a in wysylka] == ["sendPhoto", "sendPhoto"]
+    assert wysylka[0]["plik"] == wysylka[1]["plik"]
+    assert len(atrapa_staticmap.RENDERY) == 1
+
+
+def test_wylaczone_mapy_to_alert_dokladnie_jak_dotad(wysylka, monkeypatch):
+    monkeypatch.setattr(pw.mapa.settings, "MAPY_W_ALERTACH", 0)
+    assert pw.powiadom_o_zleceniu(ZLECENIE) is True
+    assert wysylka[0]["metoda"] == "sendMessage"
+    assert atrapa_staticmap.RENDERY == []
+
+
+def test_niepewna_lokalizacja_zostaje_ostrzezeniem_w_podpisie(wysylka, tmp_path):
+    """Obrazek nie znosi ostrzeżenia — dokłada mu pomarańczowy marker. Alert
+    z pewnie wyglądającą mapą i zgadywanym punktem byłby gorszy niż tekst."""
+    plik = tmp_path / "wieloznaczne.csv"
+    plik.write_text("kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+                    "PL,36-001,Nowa Wies,podkarpackie,50.1,22.1\n"
+                    "PL,05-870,Nowa Wies,mazowieckie,52.2,20.6\n"
+                    "PL,35-001,Rzeszow,podkarpackie,50.0412,21.9991\n", encoding="utf-8")
+    geo.zaladuj(plik)
+
+    niepewne = dict(ZLECENIE, odbior_kod="", odbior_miasto="Nowa Wies")
+    assert pw.powiadom_o_zleceniu(niepewne) is True
+    (alert,) = wysylka
+    assert alert["metoda"] == "sendPhoto"
+    assert "Nowa Wies?" in alert["tresc"] and "niepewne" in alert["tresc"]
+    marker_odbioru = atrapa_staticmap.RENDERY[0]["markery"][0]
+    assert marker_odbioru.color == "#ff8800"
+
+
+# ---------------------------------------------------------------------------
+# Podpis pod zdjęciem ma limit 1024 znaków — czterokrotnie niższy niż wiadomość
+# ---------------------------------------------------------------------------
+def test_krotka_tresc_idzie_w_podpisie_bez_zmian():
+    tresc = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+    assert pw.podpis_pod_zdjeciem(tresc) == tresc
+
+
+def test_za_dluga_tresc_traci_CYTAT_a_nie_trase_i_telefon():
+    """Trasa, telefon i kilometry to rzeczy, po których zapada decyzja. Cytat
+    jest kontrolą tego, czy model się nie pomylił, i jako jedyny znosi
+    skrócenie."""
+    dlugi = dict(ZLECENIE, tresc="lawetaXY " * 60)
+    tresc = pw.zbuduj_tresc(dlugi, teraz=TERAZ)
+    podpis = pw.podpis_pod_zdjeciem(tresc, limit=len(tresc) - 40)
+
+    assert podpis is not None
+    assert len(podpis) <= len(tresc) - 40
+    assert podpis.splitlines()[0] == tresc.splitlines()[0]     # liczby nietknięte
+    assert "555 111 222" in podpis
+    assert "Krosno" in podpis and "Rzeszow" in podpis
+    assert "…" in podpis
+
+
+def test_podpis_nie_do_uratowania_oddaje_none():
+    """Zejście z cytatem poniżej progu czytelności nie ratuje obrazka, tylko psuje
+    alert — wołający wysyła wtedy pełną treść tekstem."""
+    tresc = pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+    assert pw.podpis_pod_zdjeciem(tresc, limit=120) is None
+
+
+def test_podpis_bez_cytatu_i_za_dlugi_oddaje_none():
+    """Nie ma czego przyciąć — reszta linii jest w alercie po coś."""
+    bez_cytatu = pw.zbuduj_tresc(dict(ZLECENIE, tresc=""), teraz=TERAZ)
+    assert pw.podpis_pod_zdjeciem(bez_cytatu, limit=50) is None
+
+
+def test_przyciecie_nie_zostawia_wiszacego_escape_u():
+    """`\\*` rozcięte w środku zjadłoby następny znak podpisu — Telegram czyta
+    backslash jako escape, a nie jako tekst."""
+    tresc = pw.zbuduj_tresc(dict(ZLECENIE, tresc="a" * 40 + " *****" * 20),
+                            teraz=TERAZ)
+    podpis = pw.podpis_pod_zdjeciem(tresc, limit=len(tresc) - 5)
+    if podpis is not None:
+        cytat = [w for w in podpis.splitlines() if w.startswith('"')][0]
+        assert not cytat[:-2].endswith("\\")
