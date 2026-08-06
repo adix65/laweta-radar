@@ -397,6 +397,65 @@ def test_zwykle_zlecenie_bez_znacznika_zwierzat():
     assert "ZWIERZ" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ).upper()
 
 
+# ---------------------------------------------------------------------------
+# OFERTY PRZEWOŹNIKÓW — cisza, ale NIE zniknięcie
+#
+# Bramka takie posty odrzuca, a klasyfikator wystawia im `czy_zlecenie=false`,
+# więc do tego modułu normalnie NIE DOCHODZĄ. Ten warunek pracuje w jednym
+# przypadku: bramka rozpoznała ofertę, a model mimo to orzekł „zlecenie".
+# Wtedy — i tylko wtedy — tutaj rozstrzyga się, czy operator zostanie obudzony
+# cudzą lawetą jadącą trasą, którą i tak jedzie.
+# ---------------------------------------------------------------------------
+OFERTA = dict(ZLECENIE, kierunek="oferta",
+              tresc="Czwartek 06.08 wolna laweta Elblag-Lublin tel. 501606207")
+
+
+def test_oferta_domyslnie_nie_brzeczy(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    d = _ocen(OFERTA)
+    assert d.wysylac is False
+    assert d.kod == "oferta"
+    # Ten fragment powodu jest kontraktem, nie ozdobą — odróżnia „wyciszone"
+    # od „zgubione", gdy ktoś pyta, gdzie się podział post.
+    assert "bazie" in d.powod
+
+
+def test_oferta_z_wlaczonym_alertem_idzie_normalnie(monkeypatch):
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 1)
+    assert _ocen(OFERTA).wysylac is True
+
+
+def test_oferta_nie_rusza_pozostalych_zlecen(monkeypatch):
+    """Reguła ma dotyczyć WYŁĄCZNIE kierunku 'oferta'. Brak pola (wiersze sprzed
+    migracji 0011) i 'niejasne' zachowują się identycznie jak dotąd."""
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    assert _ocen(ZLECENIE).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek="zlecenie")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek="niejasne")).wysylac is True
+    assert _ocen(dict(ZLECENIE, kierunek=None)).wysylac is True
+
+
+def test_oferta_po_dedupie(monkeypatch):
+    """Kolejność jak przy zwierzętach: post już wysłany zostaje duplikatem —
+    inaczej zniknąłby powód, dla którego nie poszedł drugi raz."""
+    monkeypatch.setattr(pw.settings, "ALERT_OFERTY", 0)
+    assert _ocen(OFERTA, juz_wyslane=True).kod == "duplikat"
+
+
+def test_oferta_ma_widoczny_znacznik_w_tresci_alertu():
+    """Przy ALERT_OFERTY=1 wiadomość dociera — i wygląda dokładnie jak zlecenie:
+    ma trasę, datę i telefon. Bez znacznika operator dzwoni do konkurencji,
+    żeby zaproponować jej kurs."""
+    tresc = pw.zbuduj_tresc(OFERTA, teraz=TERAZ)
+    assert "OFERTA PRZEWOŹNIKA" in tresc
+    # Nad cytatem, czyli w części czytanej najpierw.
+    assert tresc.index("OFERTA PRZEWOŹNIKA") < tresc.index("wolna laweta")
+
+
+def test_zwykle_zlecenie_bez_znacznika_oferty():
+    assert "OFERTA PRZEWOŹNIKA" not in pw.zbuduj_tresc(ZLECENIE, teraz=TERAZ)
+
+
 @pytest.mark.parametrize("godzina,cisza", [(23, True), (2, True), (5, True),
                                            (6, False), (12, False), (21, False),
                                            (22, True)])

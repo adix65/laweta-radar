@@ -109,7 +109,7 @@ class _FalszywePolaczenie:
 
 KOMPLET_KOLUMN = {"odbior_miasto", "pojazd_opis", "pewnosc",
                   "notatka", "cena_koncowa", "status_at",
-                  "kategoria_ladunku"}
+                  "kategoria_ladunku", "kierunek"}
 
 
 @pytest.fixture(autouse=True)
@@ -419,6 +419,27 @@ def test_kategoria_ladunku_dojezdza_do_panelu(monkeypatch):
                                          odbior_miasto="Krosno")])
     dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
     assert dane["zlecenia"][0]["kategoria_ladunku"] == "zwierze"
+
+
+def test_kierunek_dojezdza_do_panelu(monkeypatch):
+    """Nazwa jest ta sama w SQL-u, w API i w TypeScripcie (panel/lib/typy.ts),
+    więc „skąd to się bierze" sprawdza się grepem, a nie czytaniem mapowania."""
+    _podepnij_baze(monkeypatch, [_wiersz("golf", kierunek="zlecenie",
+                                         odbior_miasto="Krosno")])
+    dane = klient.get("/zlecenia", headers={"X-Token": TOKEN}).json()
+    assert dane["zlecenia"][0]["kierunek"] == "zlecenie"
+
+
+def test_kierunek_nie_jest_filtrem_listy(monkeypatch):
+    """Oferty nie znikają z listy PRZEZ TĘ KOLUMNĘ — nie ma jej w WHERE. Nie ma
+    ich tam, bo mają `czy_zlecenie=false`, czyli dokładnie z tego samego powodu
+    co reklama konkurencji. Warunek na `kierunek` byłby drugą, cichszą ścieżką
+    ukrywania rekordów, a takich to repo nie ma."""
+    polaczenie = _podepnij_baze(monkeypatch, WIERSZE)
+    klient.get("/zlecenia", headers={"X-Token": TOKEN})
+    sql, _ = polaczenie.kursor.zapytania[0]
+    warunek = sql.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+    assert "kierunek" not in warunek
 
 
 # ---------------------------------------------------------------------------

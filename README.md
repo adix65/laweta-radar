@@ -14,7 +14,9 @@ posta.
 > podnająć albo pojechać po jedno, bo stawka dobra.
 >
 > System odrzuca **wyłącznie** posty, które w ogóle nie są zleceniami: reklamę
-> konkurencji, sprzedaż sprzętu, ogłoszenia o pracę i posty wygaszone przez autora.
+> konkurencji (także w formie z giełd — „wolna laweta Elbląg-Lublin, tel…", czyli
+> przewoźnika oferującego własne wolne miejsce), sprzedaż sprzętu, ogłoszenia
+> o pracę i posty wygaszone przez autora.
 > Ta lista jest zamknięta i nie wolno jej rozszerzać o oceny biznesowe. Wszystko
 > poza tym — wagi, kilometry, sugestie kompletów — jest **informacją na ekranie,
 > nigdy filtrem**. Etykieta „ok. 3,8 t" pomaga. Ukrycie zlecenia, bo kod policzył
@@ -51,10 +53,12 @@ Każdy krok istnieje po to, żeby następny dostał mniej roboty:
   wspólny z drugim systemem.
 - **gate** — darmowy filtr słowny **przed** modelem, po polsku, niemiecku, czesku
   i słowacku. Bez niego płacilibyśmy Claude'owi za każdy post o sprzedaży felg.
-  Odrzuca wyłącznie cztery kategorie wymienione wyżej i nic poza nimi; bez
+  Odrzuca wyłącznie kategorie wymienione wyżej i nic poza nimi; bez
   wielojęzyczności gubiłby w całości zlecenia z grup DE/CZ/SK. Obok werdyktu
   wystawia **kategorię ładunku** (`pojazd` / `zwierze` / `inne`) — transport koni
-  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz.
+  nie jest śmieciem, tylko kursem spoza oferty, więc dostaje znacznik, a nie kosz
+  — oraz **kierunek** (`zlecenie` / `oferta` / `niejasne`): „wolna laweta
+  Elbląg-Lublin, tel…" ma komplet cech zlecenia i jest ogłoszeniem konkurencji.
 - **classifier** — model decyduje, czy to realne zlecenie, i wyciąga z posta to,
   co operator musi wiedzieć, zanim kliknie — **zawsze po polsku**, także z posta
   niemieckiego czy czeskiego. Domyślnie Haiku, ale provider jest wymienny jedną
@@ -331,6 +335,7 @@ podobnie.
 | `CISZA_NOCNA` (22-6) | nocne zlecenia idą jednym podsumowaniem rano | nie gubi ich |
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
 | `ALERT_ZWIERZETA` (0) | transport zwierząt czeka w panelu ze znacznikiem, bez alertu | nie odrzuca go i nie przestaje go zbierać |
+| `ALERT_OFERTY` (0) | oferta przewoźnika (cudze wolne miejsce) leży w bazie bez alertu | nie przestaje jej zbierać ani zapisywać |
 
 **BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
 działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
@@ -556,6 +561,7 @@ laweta_radar/
       0008_push.sql        # subskrypcje web push
       0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
       0010_kategoria_ladunku.sql # co jedzie: pojazd / zwierzę / inne (NIE filtr)
+      0011_kierunek.sql    # kto kogo szuka: zlecenie / oferta / niejasne
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
@@ -859,6 +865,65 @@ python -m laweta_radar.workers.gate "transport busem jednego konia z Gajewnik"
 # ŁADUNEK: zwierze   (idzie do panelu ze znacznikiem i NIŻEJ na liście…)
 ```
 
+#### Oferty przewoźników: ta sama treść, przeciwna strona rynku
+
+Na giełdach transportowych **obie strony rynku piszą posty o tym samym kształcie**
+— trasa, data, numer telefonu. Te dwa przeszły przez bramkę i klasyfikator jako
+zlecenia i obudziły telefon:
+
+```
+Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207
+Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce 25T 9,5m
+```
+
+To nie klienci, tylko **konkurencja z wolnym miejscem**. Punktacja nie ma ich jak
+odróżnić, bo mierzy obecność słów, a nie stronę rynku, po której stoi autor.
+Różnica jest w kierunku:
+
+| | |
+|---|---|
+| **zlecenie** | „szukam kogoś, kto przewiezie **moje** auto" — nasz klient |
+| **oferta** | „jadę tamtędy i mam wolne miejsce, dzwońcie" — konkurencja |
+
+Rozstrzyga **czasownik przy frazie, nie sama fraza**: „**szukam** wolnego miejsca
+na lawecie" to zlecenie, „**mam** wolne miejsce na lawecie" to oferta. Dlatego
+kierunek liczy się **przed** czterema warstwami (frazy dwuznaczne — „wolne
+miejsce", „Rückfahrt" — leżą w warstwie 2, która bije odrzucenie) i **odrzuca
+wyłącznie przy zerowym sygnale popytu**. Wystarczy jedno „szukam", „potrzebuję",
+„awaria", „nie odpala" albo choćby znak zapytania w treści, żeby post przeszedł:
+pomyłka w tę drugą stronę kosztuje kurs, a przepuszczona oferta kosztuje ułamek
+grosza i zatrzymuje się na klasyfikatorze, który ma własne pole `kierunek`.
+
+Kolumna `kierunek` (`zlecenie` / `oferta` / `niejasne`) wychodzi z bramki albo
+z klasyfikatora — model bije bramkę, ale tylko gdy cokolwiek rozstrzygnął.
+
+| gdzie | co robi |
+|---|---|
+| bramka | odrzuca ofertę **przed** modelem — zero zapłaconych tokenów |
+| baza | wiersz powstaje normalnie, z całą treścią, `czy_zlecenie=false`, `status='smiec'` |
+| Telegram | alert idzie **tylko** przy `ALERT_OFERTY=1`; przy `0` (domyślnie) cisza |
+
+Dane zbierają się **niezależnie** od tej zmiennej i to jest tu cały sens: cudzy
+kurs na trasie, którą operator i tak jedzie, bywa okazją na doładunek albo na
+podnajęcie. Skasowany post nie odpowie już na żadne pytanie.
+
+```sql
+SELECT count(*) FROM posty WHERE kierunek = 'oferta';
+-- kto wozi na naszych kierunkach:
+SELECT odbior_miasto, dostawa_miasto, count(*) FROM posty
+ WHERE kierunek = 'oferta' GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+```bash
+python -m laweta_radar.workers.gate "Czwartek 06.08 wolna laweta Elblag-Lublin"
+# WERDYKT BRAMKI: ODRZUCAM  (oferta przewoznika)
+# KIERUNEK: oferta   (…zapisujemy do bazy, ale bez alertu)
+
+python -m laweta_radar.workers.gate "Szukam wolnego miejsca na lawecie z Kolonii"
+# WERDYKT BRAMKI: PRZEPUSZCZAM  (zgloszenie z gieldy)
+# KIERUNEK: zlecenie
+```
+
 Proxy jest już skonfigurowane po stronie wspólnego `.env` — sprawdź tylko, czy
 przypisanie doszło: `python -m laweta_radar.workers.apify_proxy`. Jeśli pokazuje
 „BRAK proxy", nie ruszaj z pulą kont, dopóki tego nie naprawisz
@@ -888,6 +953,12 @@ w formie oryginalnej, bo idą wprost do geokodera (`docs/WIELOJEZYCZNOSC.md`).
 rozumowania — Haiku robi je równie dobrze za ułamek ceny, a liczy się też czas:
 każda sekunda opóźnienia to przewaga konkurencji.
 
+Obok `czy_zlecenie` model zwraca `kierunek` (`zlecenie` / `oferta` / `niejasne`)
+— po której stronie rynku stoi autor. Przy `"oferta"` **kod** wymusza
+`czy_zlecenie=false`, a nie prompt: instrukcja nie jest kontrolą bezpieczeństwa,
+kontrolą jest linijka, która zadziała także wtedy, gdy model odpowie byle jak
+albo da się przejąć treścią posta. Szczegóły: „Oferty przewoźników" wyżej.
+
 #### Dwie różne pustki w polu
 
 Produkcja na małym modelu (gpt-5.4-nano) pokazała wzorzec, który w bazie wygląda
@@ -906,10 +977,11 @@ wymusić:
    nazwa miejscowości, **każdy** ciąg wyglądający na kod i **każda** marka
    z treści mają trafić do swojego pola — a zakaz zgadywania zostaje nietknięty,
    bo to on broni przed wysłaniem człowieka 80 km w złą stronę. Na końcu promptu
-   stoją cztery pary „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta
-   — kiedy zostawić null. Na modelach tej klasy few-shot działa mocniej niż sama
-   instrukcja, a bez tej czwartej pary zestaw uczyłby wypełniania pól za wszelką
-   cenę, czyli halucynacji geo.
+   stoi pięć par „post → oczekiwany JSON": trzy uczą, co wyciągnąć, czwarta —
+   kiedy zostawić null, piąta — kiedy komplet pól jest wypełniony, a mimo to
+   **nie jest to zlecenie** (oferta przewoźnika). Na modelach tej klasy few-shot
+   działa mocniej niż sama instrukcja, a bez czwartej pary zestaw uczyłby
+   wypełniania pól za wszelką cenę, czyli halucynacji geo.
 2. **Fallback regexowy działa POZA modelem.** Po klasyfikacji treść idzie przez
    `geo.znajdz_kody()` i uzupełnia `odbior_kod`/`dostawa_kod`, **wyłącznie gdy
    pole jest puste** — model ma pierwszeństwo, bo czyta zdanie, a regex kształt
@@ -1250,6 +1322,8 @@ pm2 restart laweta-api laweta-bot
 | jak wygląda alert, bez wysyłania | `python -m laweta_radar.services.powiadomienia --podglad` |
 | czemu to zlecenie pokazuje 900 km | `python -m laweta_radar.services.geo "nazwa z posta"` |
 | czemu ten alert nie przyszedł | log fetchera — `[powiadomienia] <fb_id>: pomijam (...)` |
+| czemu ten post uznaliśmy za ofertę konkurencji | `python -m laweta_radar.workers.gate "treść"` — linia `KIERUNEK` |
+| ile cudzych kursów szło naszymi trasami | `SELECT count(*) FROM posty WHERE kierunek = 'oferta'` |
 | zlecenia są, alertów zero | log fetchera — linia `UWAGA: N zleceń i ANI JEDNEGO wysłanego alertu` |
 | zlecenie bez typu, miasta i telefonu | log fetchera — `OSTRZEŻENIE: post <fb_id> ma w bazie werdykt modelu i ZERO pól z ekstrakcji` |
 | jak odzyskać stare zlecenia bez ekstrakcji | `python laweta_radar/scripts/uzupelnij_klasyfikacje.py --sucho` |

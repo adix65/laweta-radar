@@ -17,8 +17,10 @@ Nie celujemy w "5% przepuszczonych". Celujemy w ZERO fałszywych odrzuceń, a
 odsetek niech wyjdzie, ile wyjdzie (realistycznie 20-35% i to jest w porządku).
 
 To jest też jedyne miejsce w systemie, które w ogóle coś odrzuca — i odrzuca
-wyłącznie posty, które NIE SĄ ZLECENIAMI: reklamę konkurencji, sprzedaż sprzętu,
-ogłoszenia o pracę i posty wygaszone przez autora. Ta lista jest zamknięta.
+wyłącznie posty, które NIE SĄ ZLECENIAMI: reklamę konkurencji (w formie
+tradycyjnej — „laweta 24/7, konkurencyjne ceny" — i w formie z giełd, czyli
+przewoźnika ogłaszającego własne wolne miejsce), sprzedaż sprzętu, ogłoszenia
+o pracę i posty wygaszone przez autora. Ta lista jest zamknięta.
 Ocen biznesowych ("za daleko", "za ciężkie", "za tanio") bramka NIE robi i nie
 wolno jej ich dopisać — o tym decyduje kierowca, patrząc na ekran.
 
@@ -29,6 +31,17 @@ CZTERY WARSTWY, W TEJ KOLEJNOŚCI. Kolejność jest merytoryczna, nie porządkow
   2. PRZEPUSZCZENIE  — sygnał POTRZEBY bije sygnał odrzucenia
   3. ODRZUCENIE      — tylko wzorce jednoznaczne
   4. PUNKTACJA       — reszta; próg kalibrowany jedną liczbą w .env
+
+PRZED tymi czterema warstwami stoi KIERUNEK ZGŁOSZENIA ("zlecenie" / "oferta" /
+"niejasne") — jedyna rzecz w tym module, która rozstrzyga PONAD kolejnością
+warstw. Odpowiada na pytanie, które ma komplet cech zlecenia po obu stronach:
+czy autor SZUKA kogoś, kto przewiezie (zlecenie), czy OFERUJE własne wolne
+miejsce (oferta konkurencji). "Czwartek 06.08 wolna laweta Elbląg-Lublin
+tel. 501606207" ma trasę, datę i telefon — i nie jest zleceniem ani przez
+sekundę. Dlaczego PRZED warstwami, a nie w warstwie 3: warstwa 2 zna frazę
+„wolne miejsce" jako zgłoszenie z giełdy i przepuściłaby ofertę, zanim
+odrzucenie doszłoby do głosu. Szczegóły i mechanizm zabezpieczający (POPYT bije
+OFERTĘ) — przy tabelach `POPYT` i `OFERTA`.
 
 OBOK werdyktu bramka zwraca KATEGORIĘ ŁADUNKU ("pojazd" / "zwierze" / "inne").
 To NIE jest piąta warstwa i nie ma prawa nią zostać: kategoria niczego nie
@@ -267,6 +280,13 @@ PRZEPUSZCZENIE: list[tuple[str, int, str]] = [
     (r"(szukam|poszukuje) wolnego( [a-z]+)? miejsca", 0, "zgloszenie z gieldy"),
     (r"(szukam|poszukuje) miejsca (w transporcie|na transport|na aucie|"
      r"w aucie|na lawete)", 0, "zgloszenie z gieldy"),
+    # DWA NASTĘPNE WZORCE SĄ DWUZNACZNE I DLATEGO WARUNKOWE. „Szukam wolnego
+    # miejsca" to zlecenie, „mam wolne miejsce" to oferta przewoźnika — ta sama
+    # fraza, przeciwne strony rynku. Rozstrzyga czasownik, więc rozstrzyga to
+    # KIERUNEK (tabele `POPYT` i `OFERTA`), sprawdzany PRZED tymi warstwami.
+    # Te wpisy nie są martwe: fraza z sygnałem popytu dochodzi tutaj i działa
+    # jak dotąd, a sama — bez czasownika — nie dochodzi, bo została odrzucona
+    # jako oferta.
     (r"wolne miejsc[ae]", 0, "zgloszenie z gieldy"),
     (r"jest wolne miejsce", 0, "zgloszenie z gieldy"),
     # „kto wraca z Niemiec", „kto jedzie w kierunku Wrocławia" — pytanie
@@ -302,6 +322,7 @@ PRZEPUSZCZENIE: list[tuple[str, int, str]] = [
     (r"przetransportowa(c|nie|nia|niu)", 0, "transport planowany"),
     (r"na lawecie", 0, "transport planowany"),
     (r"laweta na ", 0, "transport planowany"),
+    # Warunkowy tak samo jak „wolne miejsce" wyżej — patrz nota przy tamtym.
     (r"wolne miejsce na lawecie", 0, "transport planowany"),
     (r"szukam miejsca na lawecie", 0, "transport planowany"),
     (r"doladunek", 0, "transport planowany"),
@@ -700,6 +721,185 @@ KAT_INNE = "inne"
 
 
 # ===========================================================================
+# KIERUNEK ZGŁOSZENIA — kto kogo szuka
+#
+# Na giełdach transportowych obie strony rynku piszą posty o TYM SAMYM
+# KSZTAŁCIE: trasa, data, telefon. Różnią się jednym — kierunkiem.
+#
+#     ZLECENIE:  „szukam kogoś, kto przewiezie MOJE auto"      -> nasz klient
+#     OFERTA:    „jadę tamtędy i mam wolne miejsce, dzwońcie"  -> konkurencja
+#
+# Dwa posty, które to zgłoszenie wywołały, przeszły przez wszystko i obudziły
+# telefon:
+#     „Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207"
+#     „Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce 25T 9,5m"
+# Pierwszy nie miał nawet dość punktów, żeby przejść (bramka stała w cieniu,
+# więc niczego nie blokowała). Drugi miał: „transport" +3, „tel" +1, numer +1 —
+# równo próg. Punktacja nie ma jak ich odróżnić od zlecenia, bo mierzy OBECNOŚĆ
+# słów, a nie stronę rynku, po której stoi autor.
+#
+# DLACZEGO OSOBNY MECHANIZM, A NIE KOLEJNE WPISY W WARSTWIE 3. Bo warstwa 2 bije
+# warstwę 3, a to właśnie w warstwie 2 leżą frazy dwuznaczne („wolne miejsce",
+# „Rückfahrt"). Oferta wpadałaby więc w przepuszczenie, zanim odrzucenie
+# doszłoby do głosu. Kierunek rozstrzyga się PRZED czterema warstwami,
+# w `gate()`, i jest — jak kategoria ładunku — WSPÓLNY DLA WSZYSTKICH JĘZYKÓW:
+# „mam wolne miejsce", „habe noch Platz" i „volné místo" znaczą to samo, a
+# cztery kopie tej listy to trzy miejsca do zapomnienia przy dopisaniu frazy.
+#
+# ZABEZPIECZENIE, BEZ KTÓREGO TO BYŁBY NAJDROŻSZY BŁĄD W TYM REPO: odrzucamy
+# TYLKO wtedy, gdy w treści NIE MA ŻADNEGO SYGNAŁU POPYTU. „Jadę do Warszawy,
+# auto stanęło na A4" ma frazę oferty („jadę do") i jest zleceniem — ratuje je
+# sygnał awarii z tabeli `POPYT`. Dlatego `POPYT` jest CELOWO SZEROKI i wolno go
+# rozdmuchiwać bez namysłu: każdy jego wpis wyłącznie POWSTRZYMUJE odrzucenie.
+# Cena za szeroki POPYT to oferta puszczona do modelu (ułamek grosza — model ma
+# własne pole `kierunek` i tam ją zatrzyma); cena za wąski to skasowane
+# zlecenie, o którym nikt się nie dowie.
+#
+# `POPYT` NIE JEST WYPROWADZONY Z TABEL PRZEPUSZCZENIA i to jest decyzja, nie
+# przeoczenie. Tamte zawierają dokładnie te frazy dwuznaczne, przed którymi ten
+# mechanizm ma bronić („wolne miejsce"), więc wyprowadzenie z nich unieważniłoby
+# całość. Odpowiada na inne pytanie: nie „czy warto zapytać model", tylko „czy
+# autor czegoś POTRZEBUJE".
+# ===========================================================================
+
+# Wartości kolumny `kierunek` — trzy i tylko trzy, tak samo jak przy kategorii
+# ładunku. Te same trzy zwraca klasyfikator (workers/classifier.py), bo to jedno
+# pole i jeden słownik wartości; model może zdanie tylko doczytać lepiej.
+KIERUNEK_ZLECENIE = "zlecenie"
+KIERUNEK_OFERTA = "oferta"
+KIERUNEK_NIEJASNY = "niejasne"
+
+# SYGNAŁY POPYTU — autor czegoś potrzebuje. Bije ofertę zawsze i bez wyjątku.
+POPYT: list[tuple[str, int, str]] = [
+    # --- prośba wprost (PL) ---
+    (r"szuka(m|my)", 0, "POPYT"),
+    (r"poszukuj(e|emy)", 0, "POPYT"),
+    (r"potrzebuj(e|emy)", 0, "POPYT"),
+    (r"potrzebn[aeyo]", 0, "POPYT"),
+    (r"prosz(e|ba) o", 0, "POPYT"),
+    (r"zlec(e|am|enie|enia)", 0, "POPYT"),
+    (r"kto (mi )?(przewiezie|przywiezie|zawiezie|dowiezie|odholuje|zabierze|"
+     r"sciagnie|podjedzie|pomoze|ma czas|wezmie|odbierze|podskoczy)", 0, "POPYT"),
+    (r"(ma ktos|kto ma) lawete", 0, "POPYT"),
+    (r"(jest )?ktos (w okolicy|z okolic|z laweta|obok)", 0, "POPYT"),
+    (r"polec(icie|acie|isz|i mi|a mi)", 0, "POPYT"),
+    (r"kogo (polecacie|polecicie)", 0, "POPYT"),
+    (r"znacie (kogos|jakas|jakies|firme|dobra)", 0, "POPYT"),
+    # Forma bezokolicznikowa z giełdy — po stronie POPYTU tak samo jednoznaczna
+    # jak w warstwie 2 („Do przywiezienia Citroen Berlingo z 18556 do 63-505").
+    (r"do (przywiezienia|przywozu|zabrania|odebrania|odbioru|przewiezienia|"
+     r"przewozu|sciagniecia|podjecia|zawiezienia|dowiezienia|"
+     r"przetransportowania|zaladowania)", 0, "POPYT"),
+    # PYTANIE o czyjś kurs to prośba o doładunek, czyli popyt — mimo że mówi
+    # o cudzej jeździe. „Kto jedzie" i „jadę" to dwie różne strony rynku.
+    (r"kto (jedzie|wraca|bedzie|jechal|wracal|mogl)", 0, "POPYT"),
+
+    # --- awaria i zdarzenie (PL) ---
+    # NAJWAŻNIEJSZA CZĘŚĆ TEJ TABELI. Post o zepsutym aucie nigdy nie jest
+    # ofertą przewoźnika, a bardzo często zawiera frazę z `OFERTA` („jadę do
+    # Warszawy i stanąłem na A4"). Bez tych wpisów odrzucalibyśmy zlecenia
+    # awaryjne, czyli te, które trzeba obsłużyć najszybciej.
+    (r"awari(a|i|e)", 0, "POPYT"),
+    (r"zepsu(l|la|lo|ty|ta|te|l sie|l mi sie)", 0, "POPYT"),
+    (r"unieruchomion[yae]", 0, "POPYT"),
+    (r"nie (odpala|odpali|pali|zapala|jezdzi|dziala|rusza|ruszy|"
+     r"chce jechac|chce odpalic|na chodzie)", 0, "POPYT"),
+    (r"(auto |pojazd |samochod )?niejezdzac[ey]", 0, "POPYT"),
+    (r"po (szkodzie|wypadku|stluczce|kolizji)", 0, "POPYT"),
+    (r"(auto )?powypadkow[ey]", 0, "POPYT"),
+    (r"uszkodzon[ye]", 0, "POPYT"),
+    (r"dachowa(lem|l|lo)", 0, "POPYT"),
+    (r"zdech(l|la|lo|l mi)", 0, "POPYT"),
+    (r"stan(alem|elam|al mi|ela mi)", 0, "POPYT"),
+    (r"(w|do) row(ie|u)", 0, "POPYT"),
+    (r"holowani[ae]|odholowa(c|nie|nia)", 0, "POPYT"),
+
+    # --- kupno auta, czyli transport planowany (PL) ---
+    (r"kupil[ae]m", 0, "POPYT"),
+    (r"kupione auto", 0, "POPYT"),
+    (r"sprowadz(enie|am|ilem|ilam)", 0, "POPYT"),
+    (r"odbior (auta|samochodu)", 0, "POPYT"),
+    (r"(z|spod) komisu", 0, "POPYT"),
+    (r"z (aukcji|autohausu)", 0, "POPYT"),
+    (r"od dealera", 0, "POPYT"),
+
+    # --- DE ---
+    (r"such(e|en|t)", 0, "POPYT"),
+    (r"gesucht", 0, "POPYT"),
+    (r"brauch(e|en|t)", 0, "POPYT"),
+    (r"benotig(e|t|en)", 0, "POPYT"),
+    (r"wer (kann|hat|holt|bringt|fahrt)", 0, "POPYT"),
+    (r"bitte um", 0, "POPYT"),
+    (r"panne|kaputt|defekt|totalschaden|unfall", 0, "POPYT"),
+    (r"(springt|startet|fahrt) nicht", 0, "POPYT"),
+    (r"liegen ?geblieben", 0, "POPYT"),
+    (r"nicht (fahrbereit|fahrtuchtig)", 0, "POPYT"),
+    (r"gekauft", 0, "POPYT"),
+
+    # --- CS / SK ---
+    (r"hleda(m|me)|hlada(m|me)", 0, "POPYT"),
+    (r"potrebuj(i|u|e|em|eme)", 0, "POPYT"),
+    (r"prosim o", 0, "POPYT"),
+    (r"(kdo|kto) (pomuze|pomoze|privezie|priveze|odveze|odvezie|ma|jede|pojede)",
+     0, "POPYT"),
+    (r"poruch[auy]", 0, "POPYT"),
+    (r"nepojizdn[a-z]*|nepojazdn[a-z]*", 0, "POPYT"),
+    (r"ne(startuje|nastartuje)", 0, "POPYT"),
+    (r"nehod[auy]|havari[aey]", 0, "POPYT"),
+    (r"(koupil jsem|kupil som)", 0, "POPYT"),
+]
+
+# SYGNAŁY OFERTY — autor sprzedaje WŁASNY przejazd. Odrzucamy TYLKO gdy wyżej
+# nie padł żaden sygnał popytu.
+OFERTA: list[tuple[str, int, str]] = [
+    # --- wolne miejsce oferowane (PL) ---
+    (r"wolna laweta", 0, "OFERTA"),
+    (r"wolny transport", 0, "OFERTA"),
+    (r"wolne miejsc[ae]", 0, "OFERTA"),
+    (r"mam wolne", 0, "OFERTA"),
+    (r"mam miejsce", 0, "OFERTA"),
+    # Jedno słowo luki, tak samo jak przy „szukam wolnego JEDNEGO miejsca"
+    # w warstwie 2: między czasownikiem a rzeczownikiem ludzie wtrącają
+    # liczebnik („zostało jedno miejsce", „zostały dwa miejsca").
+    (r"zosta(lo|ly)( [a-z]+)? miejsc[ae]", 0, "OFERTA"),
+    (r"jedno miejsce wolne", 0, "OFERTA"),
+    (r"doladunek wolny", 0, "OFERTA"),
+
+    # --- własna trasa (PL) ---
+    # „jadę" kontra „kto jedzie" — jedna litera różnicy w brzmieniu, dwie różne
+    # strony rynku. Ta druga forma stoi w `POPYT` i wygrywa.
+    (r"jade (z|ze|do|na trasie|w kierunku)", 0, "OFERTA"),
+    (r"wracam (z|ze|do)", 0, "OFERTA"),
+    (r"powrot (z|ze|do)", 0, "OFERTA"),
+    (r"trasa dnia", 0, "OFERTA"),
+    (r"kursuje", 0, "OFERTA"),
+
+    # --- podejmę ładunek (PL) ---
+    (r"podejme (ladunek|transport|zlecenie|kurs)", 0, "OFERTA"),
+    (r"przyjme (ladunek|transport|zlecenie|kurs)", 0, "OFERTA"),
+    (r"zabiore po drodze", 0, "OFERTA"),
+    (r"moge zabrac", 0, "OFERTA"),
+    (r"moge dolozyc", 0, "OFERTA"),
+
+    # --- DE ---
+    # OBIE PISOWNIE UMLAUTU, i to nie jest nadmiarowość: normalizacja zbija
+    # „Rückfahrt" do „ruckfahrt", ale NIE tyka zastępczego „Rueckfahrt", które
+    # Niemcy piszą z telefonu bez niemieckiej klawiatury. Wzorzec na jedną formę
+    # milczy przy drugiej i nie ma jak tego zauważyć — post po prostu przechodzi.
+    (r"frei(er|e) (platz|platze|plaetze)", 0, "OFERTA"),
+    (r"habe (noch )?platz", 0, "OFERTA"),
+    (r"fahre (am|nach|von|heute|morgen)", 0, "OFERTA"),
+    (r"r(u|ue)ckfahrt", 0, "OFERTA"),
+    (r"leerfahrt", 0, "OFERTA"),
+
+    # --- CS / SK ---
+    (r"volne (misto|miesto)", 0, "OFERTA"),
+    (r"jedu (z|ze|do)", 0, "OFERTA"),
+    (r"volny odtah", 0, "OFERTA"),
+]
+
+
+# ===========================================================================
 # WIELOJĘZYCZNOŚĆ
 #
 # Wszystko powyżej to słownik POLSKI. Poniżej ta sama struktura warstw i te same
@@ -793,6 +993,10 @@ PRZEPUSZCZENIE_DE: list[tuple[str, int, str]] = [
     (r"vom (handler|autohaus|hof)", 0, "transport planowany"),
     (r"aus (deutschland|holland|belgien|frankreich|italien|osterreich)",
      0, "transport planowany"),
+    # OBA NASTĘPNE SĄ WARUNKOWE — z tego samego powodu co polskie „wolne
+    # miejsce" (patrz nota tam). „Rückfahrt" i „noch Platz frei" pisze zarówno
+    # klient szukający doładunku, jak i przewoźnik reklamujący własny powrót;
+    # rozstrzyga KIERUNEK (`POPYT` / `OFERTA`), sprawdzany przed warstwami.
     (r"ruckfahrt", 0, "transport planowany"),
     (r"noch platz (auf|frei)", 0, "transport planowany"),
 
@@ -1174,6 +1378,75 @@ def kategoria_ladunku(tresc: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# KIERUNEK ZGŁOSZENIA — liczony raz, na treści znormalizowanej, poza słownikami.
+#
+# Tak samo jak kategoria ładunku: wzorce są wspólne dla czterech języków, a
+# odpowiedź musi istnieć na KAŻDEJ ścieżce — także tej, na której post został
+# odrzucony i nigdy nie zobaczy modelu. To właśnie te posty mają zostać w bazie
+# z `kierunek='oferta'`, bo tylko z nich da się kiedyś policzyć, ile kursów
+# przejechało obok z wolnym miejscem na trasie, którą operator i tak jedzie.
+# ---------------------------------------------------------------------------
+_POPYT = _skompiluj_liste(POPYT)
+_OFERTA = _skompiluj_liste(OFERTA)
+
+# ZNAK ZAPYTANIA JEST SYGNAŁEM POPYTU. Pytanie jest prośbą — przewoźnik
+# ogłaszający własne wolne miejsce nie pyta, tylko podaje trasę i telefon
+# („Wolna laweta Elbląg-Lublin tel. 501606207"). Bez tej reguły odpadałby
+# produkcyjny „Wolne miejsce w ten piątek?", czyli klient pytający, czy ktoś
+# ma miejsce — post bez ANI JEDNEGO czasownika, więc nie do uratowania żadnym
+# wzorcem z `POPYT`.
+#
+# Osobno od tabeli, bo to nie jest fraza: `_skompiluj` dokleja lewą granicę
+# słowa, a po „piątek" znak zapytania stoi tuż za literą i wzorzec nie
+# trafiłby NIGDY (patrz nota o prawej granicy przy `_skompiluj`).
+#
+# Cena: oferta zapisana jako pytanie („Wolne miejsce Kraków-Berlin, ktoś
+# chętny?") idzie do modelu zamiast odpaść tutaj. To ułamek grosza, a model ma
+# na nią własne pole `kierunek`. Cena pomyłki w drugą stronę to kurs.
+_PYTANIE = re.compile(r"\?")
+
+
+def _kierunek(tekst: str) -> tuple[str, list[str]]:
+    """Kierunek zgłoszenia + ślad, na treści JUŻ znormalizowanej.
+
+    POPYT SPRAWDZAMY PIERWSZY i to jest cała bezpieczna strona tego mechanizmu.
+    Post, w którym autor czegokolwiek potrzebuje, NIE JEST ofertą — nawet gdy
+    zawiera frazę oferty („jadę do Warszawy, auto stanęło na A4"). Odwrotna
+    kolejność kasowałaby zlecenia awaryjne, czyli te najpilniejsze.
+
+    OBA SYGNAŁY NARAZ TO "niejasne". Bramka naprawdę nie wie — a „niejasne"
+    niczego nie odrzuca i niczego nie wycisza, więc post idzie do modelu, który
+    przeczyta zdanie zamiast dopasowywać wzorce. Udawanie tu pewności byłoby
+    zgadywaniem w jedyną stronę, która kosztuje kurs.
+
+    Ślad wraca razem z kierunkiem z tego samego powodu co przy zwierzętach:
+    człowiek patrzący na odrzucony post ma prawo wiedzieć, KTÓRE słowo go tak
+    oznaczyło.
+    """
+    wzorzec_popytu = next((w for w, _waga, _e in _POPYT if w.search(tekst)), None)
+    oferta = next((w for w, _waga, _e in _OFERTA if w.search(tekst)), None)
+    popyt = (_etykieta("POPYT", wzorzec_popytu) if wzorzec_popytu is not None
+             else ("POPYT:pytanie" if _PYTANIE.search(tekst) else None))
+    if popyt is not None and oferta is not None:
+        return KIERUNEK_NIEJASNY, [popyt, _etykieta("OFERTA", oferta)]
+    if popyt is not None:
+        return KIERUNEK_ZLECENIE, [popyt]
+    if oferta is not None:
+        return KIERUNEK_OFERTA, [_etykieta("OFERTA", oferta)]
+    return KIERUNEK_NIEJASNY, []
+
+
+def kierunek(tresc: str) -> str:
+    """Kierunek dla SUROWEJ treści — "zlecenie" | "oferta" | "niejasne".
+
+    Publiczna z tego samego powodu co `kategoria_ladunku`: raport z trybu cienia
+    (scripts/raport_gate.py) liczy kierunek z TREŚCI, więc odpowiada także dla
+    wierszy sprzed migracji 0011, w których kolumna jest pusta.
+    """
+    return _kierunek(normalizuj(tresc))[0]
+
+
+# ---------------------------------------------------------------------------
 # DETEKCJA JĘZYKA — heurystyka na znakach i słowach funkcyjnych
 #
 # ŻADNEJ biblioteki i żadnego wywołania sieciowego. Bramka stoi na ścieżce
@@ -1345,6 +1618,16 @@ class GateResult:
     # Domyślne "inne", a nie "pojazd": wynik zbudowany ręcznie (test, skrypt) nie
     # oglądał treści, więc nie ma prawa twierdzić, że widział auto.
     kategoria_ladunku: str = KAT_INNE
+    # KTO KOGO SZUKA: "zlecenie" | "oferta" | "niejasne". W odróżnieniu od
+    # kategorii ładunku to pole ODRZUCA: "oferta" znaczy „autor sprzedaje własny
+    # przejazd", czyli konkurencja, a nie klient. Post i tak ląduje w bazie
+    # (`zrodlo_decyzji='gate'`, `czy_zlecenie=false`) razem z tą wartością —
+    # oferta na trasie, którą operator i tak jedzie, bywa okazją na doładunek,
+    # więc dane zostają, cichnie tylko telefon (ALERT_OFERTY w .env).
+    #
+    # Domyślne "niejasne", nie "zlecenie": wynik zbudowany ręcznie nie oglądał
+    # treści, więc nie ma prawa twierdzić, po której stronie rynku stoi autor.
+    kierunek: str = KIERUNEK_NIEJASNY
 
 
 def _etykieta(nazwa: str, wzorzec: re.Pattern[str], waga: int = 0) -> str:
@@ -1491,11 +1774,48 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
       2. JEDNO PRZEPUSZCZENIE WYSTARCZY. Jeśli choć jeden słownik widzi
          zlecenie, post idzie do modelu. Kosztuje to ułamek grosza, a wariant
          odwrotny kosztuje kurs.
+
+    KIERUNEK ROZSTRZYGA SIĘ PRZED SŁOWNIKAMI i jako jedyny stoi ponad ich
+    kolejnością warstw. Powód jest konkretny, nie porządkowy: frazy dwuznaczne
+    („wolne miejsce", „Rückfahrt") leżą w warstwie 2, czyli w przepuszczeniu,
+    które bije odrzucenie — więc oferta przewoźnika wychodziłaby stąd jako
+    zgłoszenie z giełdy, zanim jakikolwiek wzorzec odrzucenia doszedłby do
+    głosu. Sam mechanizm jest bezpieczny w tę samą stronę co reszta modułu:
+    odrzuca WYŁĄCZNIE przy zerowym sygnale popytu (patrz `_kierunek`).
     """
     prog = settings.GATE_PROG if prog is None else prog
     tryb = normalizuj_tryb(settings.GATE_TRYB if tryb is None else tryb)
     oryginal = (tresc or "").strip()
     tekst = normalizuj(tresc)
+
+    # Kategoria ładunku i kierunek liczone NIEZALEŻNIE od słowników i od tego,
+    # która warstwa rozstrzygnęła — oba mają wartość na każdej ścieżce, także
+    # tej najkrótszej. Bez tego post odrzucony jako oferta wyszedłby stąd bez
+    # kierunku, czyli bez jedynej informacji, która go tłumaczy.
+    kategoria, slad_kategorii = _kategoria(tekst)
+    kier, slad_kierunku = _kierunek(tekst)
+
+    if kier == KIERUNEK_OFERTA:
+        # OFERTA KONKURENCJI — autor sprzedaje własny przejazd. Ma komplet cech
+        # zlecenia (trasa, data, telefon), więc punktacja przepuściłaby go bez
+        # mrugnięcia; różnica jest w kierunku, nie w słowach. Nie pytamy o niego
+        # modelu, a mimo to WSZYSTKO o nim zostaje: wołający zapisze wiersz
+        # z `kierunek='oferta'` i `czy_zlecenie=false` (workers/fb_fetcher.py).
+        return GateResult(
+            przepusc=True if tryb == TRYB_CIEN else False,
+            punkty=0,
+            powod="oferta przewoznika",
+            trafienia=[*slad_kierunku, *slad_kategorii],
+            werdykt=False,
+            tryb=tryb,
+            # Bez przebiegu słownikami nie mamy zwycięzcy, z którego bierze się
+            # znacznik języka — zostaje sama detekcja. Pusta wartość jest tu
+            # poprawną odpowiedzią („nie rozstrzygnięto"), a nie brakiem:
+            # odrzucona oferta i tak nie trafi do nikogo, kto ma oddzwonić.
+            jezyk=wykryj_jezyk(oryginal),
+            kategoria_ladunku=kategoria,
+            kierunek=kier,
+        )
 
     wykryty = wykryj_jezyk(oryginal)
     if jezyk is not None and jezyk in SLOWNIKI:
@@ -1527,11 +1847,12 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
     if znacznik in ("cs", "sk"):
         znacznik = _wariant_cs_sk(oryginal)
 
-    # Kategoria ładunku liczona NIEZALEŻNIE od tego, która warstwa rozstrzygnęła
-    # i który słownik wygrał — wzorce zwierząt są wspólne dla wszystkich języków,
-    # a post o koniu przepuszczony przez warstwę 2 nigdy nie dojdzie do punktacji.
-    kategoria, slad = _kategoria(tekst)
-    trafienia = [*trafienia, *slad]
+    # Kategoria ładunku i kierunek policzone są WYŻEJ, przed słownikami — oba
+    # są wspólne dla wszystkich języków, a post przepuszczony przez warstwę 2
+    # nigdy nie dochodzi do punktacji, więc nie ma z czego ich odczytać później.
+    # Ślad kierunku dokładamy tylko wtedy, gdy coś powiedział: „niejasne" bez
+    # trafienia znaczy „żaden wzorzec nie padł" i nie ma czego pokazywać.
+    trafienia = [*trafienia, *slad_kierunku, *slad_kategorii]
 
     return GateResult(
         przepusc=True if tryb == TRYB_CIEN else werdykt,
@@ -1542,6 +1863,7 @@ def gate(tresc: str, prog: int | None = None, tryb: str | None = None,
         tryb=tryb,
         jezyk=znacznik,
         kategoria_ladunku=kategoria,
+        kierunek=kier,
     )
 
 
@@ -1562,6 +1884,7 @@ UPDATE posty SET
     gate_tryb         = %(gate_tryb)s,
     gate_jezyk        = %(gate_jezyk)s,
     kategoria_ladunku = %(kategoria_ladunku)s,
+    kierunek          = %(kierunek)s,
     gate_at           = NOW()
 WHERE fb_id = %(fb_id)s
 """
@@ -1585,6 +1908,12 @@ def wiersz_do_zapisu(wynik: GateResult, fb_id: str) -> dict[str, object]:
         # tę informację bezpowrotnie i bez śladu — a gdyby operator dokupił
         # przyczepę do koni, dane potrzebne do decyzji już tu czekają.
         "kategoria_ladunku": wynik.kategoria_ladunku or None,
+        # Kierunek z DOKŁADNIE tego samego powodu, tylko po drugiej stronie:
+        # oferta konkurencji jest odrzucana, ale nie kasowana. Wiersz zostaje
+        # z `kierunek='oferta'`, bo cudzy kurs na trasie, którą operator i tak
+        # jedzie, bywa okazją na doładunek albo na podnajęcie — a tego nie da
+        # się zobaczyć w danych, których się nie zapisało.
+        "kierunek": wynik.kierunek or None,
     }
 
 
@@ -1646,6 +1975,13 @@ def _main(argv: list[str]) -> int:
     print(f"ŁADUNEK:        {w.kategoria_ladunku}"
           + ("   (idzie do panelu ze znacznikiem i NIŻEJ na liście; alert tylko "
              "przy ALERT_ZWIERZETA=1)" if w.kategoria_ladunku == KAT_ZWIERZE else ""))
+    # Kierunek obok werdyktu, bo to jedyny powód odrzucenia, którego NIE widać
+    # w punktacji: oferta przewoźnika ma komplet cech zlecenia i różni się samą
+    # stroną rynku.
+    print(f"KIERUNEK:       {w.kierunek}"
+          + ("   (oferta konkurencji — zapisujemy do bazy, ale bez alertu; "
+             "ALERT_OFERTY=1 przywraca brzęczenie)"
+             if w.kierunek == KIERUNEK_OFERTA else ""))
     print(f"PUNKTY:         {w.punkty}"
           + (f"  (prog {args.prog if args.prog is not None else settings.GATE_PROG})"
              if w.powod.startswith("punktacja") else ""))

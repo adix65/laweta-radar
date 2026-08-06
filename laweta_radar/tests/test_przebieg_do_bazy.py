@@ -37,7 +37,8 @@ from laweta_radar.workers import fb_fetcher as f  # noqa: E402
 # Zapis dotyka kolumn z 0003/0004, powiadomienia żyją w tabeli z 0006.
 MIGRACJE = ("0001_posty.sql", "0002_gate.sql", "0003_fetcher.sql",
             "0004_klasyfikacja.sql", "0005_panel.sql", "0006_powiadomienia.sql",
-            "0009_werdykt_modelu.sql", "0010_kategoria_ladunku.sql")
+            "0009_werdykt_modelu.sql", "0010_kategoria_ladunku.sql",
+            "0011_kierunek.sql")
 
 GRUPA = {"url": "https://www.facebook.com/groups/testowa", "name": "Grupa testowa"}
 
@@ -383,3 +384,128 @@ def test_alert_zwierzeta_1_wysyla_alert_ze_znacznikiem(przebieg, monkeypatch):
 
     assert len(przebieg.telegram.wiadomosci) == 1
     assert "ZWIERZ" in przebieg.telegram.wiadomosci[0].upper()
+
+
+# ---------------------------------------------------------------------------
+# 8. OFERTY PRZEWOŹNIKÓW: cisza na telefonie, PEŁNY wiersz w bazie
+#
+# Oba posty niżej są z produkcji. Oba przeszły przez bramkę i klasyfikator jako
+# zlecenia i oba obudziły telefon — mimo że są ogłoszeniami konkurencji
+# z wolnym miejscem. Mają komplet cech zlecenia: trasę, datę i numer telefonu.
+#
+# Ten test jest jedynym miejscem, w którym widać CAŁĄ ścieżkę: bramka odrzuca,
+# kierunek zostaje w bazie, tabela `powiadomienia` jest pusta.
+# ---------------------------------------------------------------------------
+OFERTY_Z_PRODUKCJI = (
+    "Czwartek 06.08.26r wolna laweta Elblag-Lublin tel.501606207",
+    "Wolny transport 10.08 na trasie Grudziadz - Warszawa - Siedlce "
+    "Woj Maz 25T 9,5m Tel. 607284682",
+)
+
+
+@baza
+def test_oferty_przewoznikow_laduja_w_bazie_ale_nie_brzecza(przebieg, monkeypatch):
+    """Wymaganie ze zgłoszenia, w komplecie: bramka odrzuca, kierunek='oferta',
+    czy_zlecenie=false, ZERO wierszy w `powiadomienia`."""
+    monkeypatch.setattr(f.settings, "ALERT_OFERTY", 0)
+    # Tryb aktywny, czyli stan docelowy: bramka realnie blokuje i nie płacimy
+    # za tokeny. W cieniu ten sam post poszedłby do modelu, a wycisza go wtedy
+    # `services/powiadomienia` (patrz test niżej).
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "aktywny")
+    przebieg.posty_z_apify(*OFERTY_Z_PRODUKCJI)
+    assert przebieg.uruchom() == 0
+
+    for tresc in OFERTY_Z_PRODUKCJI:
+        with przebieg.conn.cursor() as cur:
+            cur.execute("SELECT czy_zlecenie, status, kierunek, gate_werdykt, "
+                        "       gate_powod, zrodlo_decyzji, tresc "
+                        "  FROM posty WHERE fb_id = %s", (f.fb_id(tresc),))
+            wiersz = cur.fetchone()
+        assert wiersz is not None, f"post zniknął z bazy: {tresc}"
+        (czy_zlecenie, status, kierunek, gate_werdykt, gate_powod,
+         zrodlo, w_bazie) = wiersz
+
+        assert gate_werdykt is False, tresc
+        assert gate_powod == "oferta przewoznika", tresc
+        assert czy_zlecenie is False, tresc
+        assert kierunek == "oferta", tresc
+        assert status == "smiec", tresc
+        # Decyzja bramki, nie modelu — czyli zero zapłaconych tokenów.
+        assert zrodlo == "gate", tresc
+        # ...i to jest cała różnica między „nie budzę" a „nie zapisuję":
+        # treść oferty zostaje w całości, razem z trasą i numerem.
+        assert w_bazie == tresc
+
+    # ZERO powiadomień: ani wysłanych, ani pominiętych. Post z
+    # `czy_zlecenie=false` nie dochodzi do warstwy alertów w ogóle, a
+    # podsumowanie ranne szuka wyłącznie zleceń ze statusem `nowe`.
+    assert przebieg.telegram.wiadomosci == []
+    assert przebieg.powiadomienia() == []
+
+
+@baza
+def test_oferta_przeoczona_przez_model_nadal_nie_brzeczy(przebieg, monkeypatch):
+    """Druga linia obrony i jedyna ścieżka, na której ALERT_OFERTY w ogóle
+    pracuje: bramka rozpoznała ofertę (w cieniu niczego nie blokuje), a model
+    mimo to orzekł „zlecenie". Wiersz w `powiadomienia` MUSI powstać — inaczej
+    podsumowanie ranne przysłałoby ten sam post o świcie, czyli ALERT_OFERTY=0
+    opóźniałby alert zamiast go wyłączać."""
+    monkeypatch.setattr(f.settings, "ALERT_OFERTY", 0)
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "cien")
+    # Model przeoczył kierunek i oddał zwykłe zlecenie — dokładnie to, co robił
+    # przed poprawką promptu.
+    przebieg.odpowiedz_modelu = ODPOWIEDZ_MODELU
+    przebieg.posty_z_apify(OFERTY_Z_PRODUKCJI[0])
+    assert przebieg.uruchom() == 0
+
+    with przebieg.conn.cursor() as cur:
+        cur.execute("SELECT czy_zlecenie, kierunek FROM posty WHERE fb_id = %s",
+                    (f.fb_id(OFERTY_Z_PRODUKCJI[0]),))
+        czy_zlecenie, kierunek = cur.fetchone()
+
+    # Werdykt modelu zostaje (to on ma ostatnie słowo o tym, czy to zlecenie),
+    # ale kierunek z bramki przeżył — model powiedział „nie wiem".
+    assert czy_zlecenie is True
+    assert kierunek == "oferta"
+    assert przebieg.telegram.wiadomosci == []
+    assert [p["kanal"] for p in przebieg.powiadomienia()] == ["pominiete_oferta"]
+
+
+@baza
+def test_alert_oferty_1_wysyla_alert_ze_znacznikiem(przebieg, monkeypatch):
+    """Jedna zmienna w .env dla operatora, który CHCE wiedzieć, kto jedzie jego
+    kierunkami — cudzy kurs bywa okazją na doładunek albo na podnajęcie."""
+    monkeypatch.setattr(f.settings, "ALERT_OFERTY", 1)
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "cien")
+    przebieg.posty_z_apify(OFERTY_Z_PRODUKCJI[0])
+    assert przebieg.uruchom() == 0
+
+    assert len(przebieg.telegram.wiadomosci) == 1
+    assert "OFERTA PRZEWOŹNIKA" in przebieg.telegram.wiadomosci[0]
+
+
+KONTROLA = "Szukam wolnego miejsca na lawecie z Kolonii do Krakowa"
+
+
+@baza
+def test_kontrola_szukam_wolnego_miejsca_nadal_dowozi_alert(przebieg, monkeypatch):
+    """Ta sama fraza co w ofercie, przeciwna strona rynku — i CAŁA droga do
+    telefonu ma zostać nietknięta. To jest test na koszt tej poprawki: gdyby
+    „wolne miejsce" zaczęło odpadać samo z siebie, kasowalibyśmy klientów
+    szukających doładunku, czyli najlepszy typ zlecenia, jaki ten system zna."""
+    monkeypatch.setattr(f.settings, "ALERT_OFERTY", 0)
+    monkeypatch.setattr(f.settings, "GATE_TRYB", "aktywny")
+    przebieg.posty_z_apify(KONTROLA)
+    assert przebieg.uruchom() == 0
+
+    with przebieg.conn.cursor() as cur:
+        cur.execute("SELECT czy_zlecenie, status, kierunek, gate_werdykt "
+                    "  FROM posty WHERE fb_id = %s", (f.fb_id(KONTROLA),))
+        czy_zlecenie, status, kierunek, gate_werdykt = cur.fetchone()
+
+    assert gate_werdykt is True
+    assert czy_zlecenie is True
+    assert status == "nowe"
+    assert kierunek == "zlecenie"
+    assert len(przebieg.telegram.wiadomosci) == 1
+    assert "OFERTA PRZEWOŹNIKA" not in przebieg.telegram.wiadomosci[0]

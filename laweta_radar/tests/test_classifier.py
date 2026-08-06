@@ -261,8 +261,8 @@ def test_kazdy_wynik_ma_komplet_pol():
     brakujący klucz wywala go dopiero na produkcji, przy poście, który akurat
     czegoś nie miał.
     """
-    wymagane = {"czy_zlecenie", "typ", "odbior", "dostawa", "pojazd", "stan",
-                "pilnosc", "kontakt", "cena_sugerowana", "pewnosc", "powod"}
+    wymagane = {"czy_zlecenie", "kierunek", "typ", "odbior", "dostawa", "pojazd",
+                "stan", "pilnosc", "kontakt", "cena_sugerowana", "pewnosc", "powod"}
     for _, tresc, surowa, _ in PRZYPADKI:
         wynik = klasyfikuj_z_odpowiedzia(tresc, surowa)
         assert set(wynik) == wymagane
@@ -489,6 +489,56 @@ def test_zwaliduj_znosi_kompletne_smieci():
 
 
 # ===========================================================================
+# KIERUNEK — po której stronie rynku stoi autor
+#
+# Oferta przewoźnika ma komplet cech zlecenia (trasa, data, telefon), więc
+# w produkcji przeszła przez wszystko i obudziła telefon. Prompt uczy model
+# ją rozpoznawać; TE testy pilnują tego, co zadziała także wtedy, gdy model
+# odpowie byle jak — czyli kodu.
+# ===========================================================================
+def test_kierunek_oferta_wymusza_nie_zlecenie():
+    """Sprzeczna para (oferta, true) idzie prosto na telefon operatora, jeśli jej
+    tu nie domkniemy. Instrukcja w promptcie nie jest kontrolą bezpieczeństwa —
+    kontrolą jest ta linijka, która działa też przy przejętym modelu."""
+    wynik = c.zwaliduj({"czy_zlecenie": True, "kierunek": "oferta", "pewnosc": 95})
+    assert wynik["kierunek"] == "oferta"
+    assert wynik["czy_zlecenie"] is False
+    assert c.warto_budzic(wynik) is False
+
+
+def test_kierunek_zlecenie_nie_rusza_werdyktu():
+    """W drugą stronę NIE domykamy: „to nie jest zlecenie" przy kierunku
+    „zlecenie" to zwykła reklama albo sprzedaż auta i ma taka zostać."""
+    assert c.zwaliduj({"czy_zlecenie": True, "kierunek": "zlecenie"})["czy_zlecenie"] is True
+    assert c.zwaliduj({"czy_zlecenie": False, "kierunek": "zlecenie"})["czy_zlecenie"] is False
+    assert c.zwaliduj({"czy_zlecenie": True, "kierunek": "niejasne"})["czy_zlecenie"] is True
+
+
+def test_kierunek_spoza_zbioru_schodzi_do_niejasnego():
+    """„niejasne" jest najmniej zobowiązujące w OBIE strony: nie odbiera
+    zlecenia operatorowi i nie wycisza alertu."""
+    assert c._DOMYSLNY_KIERUNEK == "niejasne"
+    for smiec in ("konkurencja", "", None, 7, "OFERTA_PRZEWOZNIKA"):
+        assert c.zwaliduj({"kierunek": smiec})["kierunek"] == "niejasne", smiec
+    # Brak pola w ogóle — model starszej generacji albo ucięta odpowiedź.
+    assert c.zwaliduj({"czy_zlecenie": True})["kierunek"] == "niejasne"
+
+
+def test_kierunek_ma_ten_sam_slownik_wartosci_co_bramka():
+    """Dwa odczyty jednego pola: bramka wzorcem, model zdaniem. Rozjazd w nazwach
+    znaczyłby, że kolumna `kierunek` niesie dwa różne słowniki naraz."""
+    from laweta_radar.workers import gate
+
+    assert set(c._POPRAWNE_KIERUNEK) == {gate.KIERUNEK_ZLECENIE, gate.KIERUNEK_OFERTA,
+                                         gate.KIERUNEK_NIEJASNY}
+
+
+def test_poprawny_kierunek_przechodzi_nietkniety():
+    for kierunek in c._POPRAWNE_KIERUNEK:
+        assert c.zwaliduj({"kierunek": kierunek})["kierunek"] == kierunek
+
+
+# ===========================================================================
 # PROMPT — zasady ekstrakcji SĄ produktem, nie dokumentacją
 # ===========================================================================
 def _przyklady_z_promptu(prompt: str) -> list[str]:
@@ -544,8 +594,26 @@ def test_prompt_niesie_zasady_ekstrakcji():
         "Poniżej 50 nie budzimy człowieka",
         "polecicie kogoś?",
         "TO JEST ZLECENIE",
+        # KIERUNEK — reguła, przez której brak dwie oferty przewoźników
+        # przeszły w produkcji jako zlecenia i obudziły telefon.
+        "POST, W KTÓRYM AUTOR OFERUJE SWÓJ TRANSPORT",
+        "czy autor CHCE COŚ PRZEWIEŹĆ (zlecenie), czy OFERUJE PRZEWIEZIENIE",
+        "Przy \"oferta\" zawsze czy_zlecenie=false",
+        # ...i druga strona tej samej reguły, bez której model zacząłby kasować
+        # klientów szukających doładunku.
+        "\"szukam wolnego miejsca na lawecie\" TO JEST ZLECENIE",
     ]:
         assert fraza in prompt, f"prompt zgubił regułę: {fraza!r}"
+
+
+def test_prompt_pokazuje_oferty_z_produkcji_jako_nie_zlecenia():
+    """Te dwa posty przeszły przez cały system i obudziły telefon. Instrukcja
+    bez nich jest opisem; z nimi jest decyzją pokazaną na konkrecie — a na
+    modelach tej klasy przykład działa mocniej niż reguła."""
+    prompt = _prompt_jednym_ciagiem()
+    assert "wolna laweta Elbląg-Lublin" in prompt
+    assert "Wolny transport 10.08 na trasie Grudziądz" in prompt
+    assert "mam wolne miejsce" in prompt
 
 
 def test_prompt_kaze_wyciagac_dane_ktore_stoja_w_tresci():
@@ -585,6 +653,11 @@ def test_przyklady_w_promptcie_sa_zgodne_z_kontraktem():
     for surowy in przyklady:
         dane = json.loads(surowy)
         wynik = c.zwaliduj(dane)
+        # Kierunek jest w KAŻDYM przykładzie i przechodzi walidator nietknięty.
+        # Przykład bez tego pola uczyłby model je pomijać — a wtedy oferta
+        # przewoźnika wracałaby jako „niejasne", czyli z alertem.
+        assert wynik["kierunek"] == dane["kierunek"], surowy
+        assert wynik["czy_zlecenie"] == dane["czy_zlecenie"], surowy
         assert wynik["typ"] == dane["typ"]
         assert wynik["pilnosc"] == dane["pilnosc"]
         assert wynik["pojazd"]["kategoria"] == dane["pojazd"]["kategoria"]
