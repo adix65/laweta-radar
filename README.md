@@ -353,6 +353,7 @@ podobnie.
 | `MAX_POWIADOMIEN_H` (15) | po przekroczeniu jedna zbiorcza „jeszcze N w panelu" | nie ucisza panelu |
 | `ALERT_ZWIERZETA` (0) | transport zwierząt czeka w panelu ze znacznikiem, bez alertu | nie odrzuca go i nie przestaje go zbierać |
 | `ALERT_OFERTY` (0) | oferta przewoźnika (cudze wolne miejsce) leży w bazie bez alertu | nie przestaje jej zbierać ani zapisywać |
+| `ALERT_DEGRADACJA_APIFY` (krytyczny) | martwy klucz/mniej proxy niż kluczy trafia tylko do logu; alert idzie wyłącznie gdy żywych kluczy < 2 (`off` = nigdy, `zawsze` = każdy powód osobno) | stan puli widać zawsze w logu przebiegu i w `/limity` |
 
 **BRAK DANYCH NIE JEST NISKĄ WARTOŚCIĄ — I NIGDY NIE WYCISZA ALERTU.** Próg
 działa wyłącznie na liczbie, którą naprawdę mamy. Nieznana pewność (`NULL`
@@ -482,6 +483,18 @@ liczone z tabeli `posty`, budżet dobowy i — gdy skonfigurowana jest pula prox
 ile adresów jest aktywnych/w kwarantannie i które konto z którego wychodzi
 (host:port, nigdy hasło). Wynik jest cache'owany 5 minut, żeby kilka `/limity`
 pod rząd nie generowało lawiny zapytań do Apify.
+
+Wczesne ostrzeżenie „⚠️ Pula Apify zdegradowana" (`_alert_jesli_zdegradowana`)
+sprawdza to samo przed każdym przebiegiem, żeby operator dowiedział się ZANIM
+pula spadnie do zera. Przy modelu z pulą wielu darmowych kont martwe/wyczerpane
+klucze same w sobie są normalnym stanem pracy — reaktywna rotacja
+(`workers/apify_keys.py`) je pomija i jedzie dalej — więc domyślny tryb
+`ALERT_DEGRADACJA_APIFY=krytyczny` budzi telefon TYLKO, gdy żywych kluczy
+zostało mniej niż dwa (patrz tabela wyżej). Reszta diagnostyki (martwe klucze,
+niedobór proxy) i tak trafia do logu przebiegu i do `/limity` — próg wycisza
+Telegram, nigdy widoczność stanu. Osobny, zawsze krytyczny alert „🆘 Pula Apify
+WYCZERPANA" (`_alert_pula_wyczerpana`) leci bez względu na ten próg, gdy run
+faktycznie się zatrzymał, bo żaden klucz już nie odpowiada.
 
 ### Pętla zwrotna: każde „Śmieć" to dane
 

@@ -296,6 +296,19 @@ def test_linia_startowa_nie_krzyczy_o_kluczu_nieuzywanego_providera():
         assert "llm=openai/gpt-5-mini" in opis
 
 
+def test_alert_degradacja_apify_domyslnie_krytyczny(monkeypatch):
+    """Brak zmiennej w .env -> "krytyczny", tak jak deklaruje .env.example."""
+    monkeypatch.delenv("ALERT_DEGRADACJA_APIFY", raising=False)
+    assert settings._txt("ALERT_DEGRADACJA_APIFY", "krytyczny") == "krytyczny"
+
+
+def test_alert_degradacja_apify_widoczny_w_linii_startowej():
+    """Widoczność jest tu celem: 'czemu nie przyszedł alert' ma odpowiedź bez
+    czytania kodu — patrz analogiczne alert_zwierzeta/alert_oferty."""
+    with ustaw(ALERT_DEGRADACJA_APIFY="zawsze"):
+        assert "alert_degradacja_apify=zawsze" in settings.opis_srodowiska()
+
+
 def test_liczby_degraduja_do_domyslnych_zamiast_rzucac(monkeypatch):
     """Literówka w pokrętle nie może zatrzymać przebiegu."""
     monkeypatch.setenv("X_INT", "30 minut")
