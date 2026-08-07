@@ -204,6 +204,75 @@ def test_dolna_granica_odstepu_jest_ostrozniejsza_w_sciezce_b():
     assert cfg_groups.MIN_INTERWAL_MIN_B > cfg_groups.MIN_INTERWAL_MIN_A
 
 
+# ---------------------------------------------------------------------------
+# 3b. PIĄTA POPRAWKA — poniżej progu budżetu odstęp to WARTOŚĆ DOMYŚLNA,
+# nie dolna granica formuły. Patrz config/groups.py (MIN_INTERWAL_MIN,
+# PROG_WYKORZYSTANIA_BUDZETU) i docstring interwal_min.
+# ---------------------------------------------------------------------------
+def test_ponizej_progu_budzetu_odstep_to_wprost_min_interwal_min():
+    """Poniżej progu formuła w ogóle się nie liczy — obie ścieżki, każde tempo
+    i przydział dają ten sam wynik: MIN_INTERWAL_MIN."""
+    prog = cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    for sciezka, min_interwal in (("A", cfg_groups.MIN_INTERWAL_MIN_A),
+                                  ("B", cfg_groups.MIN_INTERWAL_MIN_B)):
+        odstep = f.interwal_min(tempo_h=0.01, przydzial=1, sciezka=sciezka,
+                                min_interwal=min_interwal,
+                                wykorzystanie_budzetu=prog - 0.01)
+        assert odstep == cfg_groups.MIN_INTERWAL_MIN
+
+
+def test_powyzej_progu_budzetu_wraca_formula():
+    """Nad progiem funkcja wraca do dokładnie tego, co liczyła przed poprawką."""
+    prog = cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    sprzed_poprawki = f.interwal_min(tempo_h=1.0, przydzial=20, sciezka="B",
+                                     min_interwal=cfg_groups.MIN_INTERWAL_MIN_B)
+    z_gate_nad_progiem = f.interwal_min(tempo_h=1.0, przydzial=20, sciezka="B",
+                                        min_interwal=cfg_groups.MIN_INTERWAL_MIN_B,
+                                        wykorzystanie_budzetu=prog + 0.01)
+    assert z_gate_nad_progiem == sprzed_poprawki
+    assert sprzed_poprawki > cfg_groups.MIN_INTERWAL_MIN, (
+        "test nic nie sprawdza, jeśli formuła i domyślna wartość akurat się zgadzają")
+
+
+def test_brak_informacji_o_budzecie_zachowuje_stare_zachowanie():
+    """`wykorzystanie_budzetu=None` (domyślnie — i w każdym wywołaniu sprzed tej
+    poprawki) NIE włącza bramki. Wywołujący, który nie zna zużycia systemu, nie
+    dostaje niespodzianki."""
+    z_domyslnym = f.interwal_min(1.0, 20, "B", cfg_groups.MIN_INTERWAL_MIN_B)
+    jawne_none = f.interwal_min(1.0, 20, "B", cfg_groups.MIN_INTERWAL_MIN_B,
+                                wykorzystanie_budzetu=None)
+    assert z_domyslnym == jawne_none
+
+
+def test_plan_wykorzystanie_budzetu_z_zuzyte_i_budzet():
+    plan = f.Plan(sciezka="B", skad_sciezka="test", budzet=200, zuzyte_doba=50)
+    assert plan.wykorzystanie_budzetu == pytest.approx(0.25)
+    # Budżet zdjęty/błędny -> "budżetu już nie ma", formuła ma szansę oszczędzać
+    # zamiast pytać co 5 minut bez ograniczenia.
+    bez_budzetu = f.Plan(sciezka="B", skad_sciezka="test", budzet=0, zuzyte_doba=0)
+    assert bez_budzetu.wykorzystanie_budzetu == 1.0
+
+
+def test_plan_odstep_domyslny_gdy_budzet_ma_zapas():
+    grupy = _grupy(1)
+    harmonogram = {grupy[0]["url"]: {"nastepny_run_at": None, "pobrane_doba": 0}}
+    plan = f.zbuduj_plan(grupy, {}, harmonogram, budzet=1000, sciezka="B",
+                         skad_sciezka="test", teraz=TERAZ)
+    assert plan.wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    assert plan.grupy[0].odstep_min == cfg_groups.MIN_INTERWAL_MIN
+
+
+def test_plan_odstep_wraca_do_wzoru_gdy_budzet_ciasny():
+    grupy = _grupy(1)
+    # 90/100 = 90% > próg (0.7) — formuła wraca; przy tak małym dobowym
+    # sufcie ucieka od razu w górę, ponad wartość domyślną.
+    harmonogram = {grupy[0]["url"]: {"nastepny_run_at": None, "pobrane_doba": 90}}
+    plan = f.zbuduj_plan(grupy, {}, harmonogram, budzet=100, sciezka="B",
+                         skad_sciezka="test", teraz=TERAZ)
+    assert plan.wykorzystanie_budzetu >= cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    assert plan.grupy[0].odstep_min > cfg_groups.MIN_INTERWAL_MIN
+
+
 def test_sufit_limitu_jest_hojny_w_a_i_ciasny_w_b():
     """W A limit jest zabezpieczeniem od góry (koszt tnie warunek wieku),
     w B limit JEST kosztem, co do sztuki."""

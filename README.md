@@ -177,10 +177,10 @@ Główną dźwignią jest więc `onlyPostsNewerThan`, a nie częstotliwość —
 to pole honoruje**. Rozstrzyga to pomiar, a fetcher **czyta jego werdykt** z
 `docs/POMIAR-ACTORA.md` zamiast zgadywać:
 
-| ścieżka | okno | `resultsLimit` | odstęp | czym płacimy za gęstsze pytanie |
-|---|---|---|---|---|
-| **A** — actor tnie po wieku | odstęp × 2, min. 30 min | hojny (do 50) — i tak nie zostanie zużyty | od 5 min | niczym: koszt dobowy = tempo grupy |
-| **B** — actor przyjmuje tylko doby | `1 day` | ciasny (do 12) — **każdy punkt to pieniądze** | od 15 min | wprost proporcjonalnie |
+| ścieżka | okno | `resultsLimit` | odstęp GDY budżet ma zapas | odstęp GDY budżet ciasny | czym płacimy za gęstsze pytanie |
+|---|---|---|---|---|---|
+| **A** — actor tnie po wieku | odstęp × 2, min. 30 min | hojny (do 50) — i tak nie zostanie zużyty | `MIN_INTERWAL_MIN` = 5 min | od 5 min (wzór z tempa) | niczym: koszt dobowy = tempo grupy |
+| **B** — actor przyjmuje tylko doby | `1 day` | ciasny (do 12) — **każdy punkt to pieniądze** | `MIN_INTERWAL_MIN` = 5 min | od 15 min (wzór z budżetu) | wprost proporcjonalnie |
 
 **Bez pomiaru fetcher schodzi na B.** Nie dlatego, że jest bardziej prawdopodobna —
 dlatego, że pomyłka w tę stronę kosztuje trochę nadmiarowego pobierania, a pomyłka
@@ -196,6 +196,23 @@ spalona pula kont, z której korzysta też sales-core-engine.
 
 Zysk uboczny, który jest właściwie głównym: po dwóch tygodniach system sam pokaże,
 które grupy są warte pieniędzy, a które tylko paliły budżet.
+
+### Opóźnienie jest główną metryką (piąta poprawka)
+
+Na giełdzie kursów wygrywa pierwszy dzwoniący — produkcyjne dane pokazały medianę
+26-40 minut od publikacji posta do alertu, mimo crona już przestawionego na
+5 minut. Winny był `interwal_min()`: widełki `[MIN_INTERWAL_MIN_A/B,
+MAX_INTERWAL_MIN]` pozwalały wzorowi z tempa/budżetu wylądować gdziekolwiek
+między 15 a 120 minutami, zamiast trzymać go nisko.
+
+Dlatego odstęp każdej grupy `"ok"` to teraz WPROST `MIN_INTERWAL_MIN` (5 min),
+**dopóki `zuzyte_doba/budzet` całego systemu jest poniżej
+`PROG_WYKORZYSTANIA_BUDZETU`** (0.7) — niezależnie od ścieżki A/B. Dopiero powyżej
+progu wraca wzór z tabeli wyżej: ostatnie kilkanaście procent sufitu dobowego ma
+szansę wyhamować rozpęd, zanim padnie w środku dnia i uciszy WSZYSTKIE grupy na
+resztę doby UTC. Podsumowanie każdego przebiegu wypisuje medianę opóźnienia
+(`opublikowany_at -> wyslano_at`) z ostatnich 24h — cel to poniżej 10 minut
+(`CEL_MEDIANY_OPOZNIENIA_MIN`).
 
 ```bash
 export PYTHONPATH=$PWD

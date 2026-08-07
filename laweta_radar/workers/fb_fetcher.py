@@ -723,6 +723,49 @@ def _zapisz_harmonogram(conn, url: str, doba: str, *, pobrane_doba: int,
     conn.commit()
 
 
+def _mediana_opoznienia_alertow_min(conn, godziny: int = 24) -> float | None:
+    """Mediana (minuty) opublikowany_at -> wyslano_at, z ostatnich `godziny`
+    godzin. None, gdy w oknie nie ma ani jednego alertu z obiema datami znanymi
+    — inaczej „nie ma z czego liczyć" wyglądałoby jak „mediana zero minut",
+    czyli najlepszy możliwy wynik zamiast braku danych.
+
+    PIĄTA POPRAWKA — jedyny sposób, żeby efekt `MIN_INTERWAL_MIN` /
+    `PROG_WYKORZYSTANIA_BUDZETU` był widoczny w LOGU, a nie tylko odczuwalny
+    (albo nieodczuwalny) na telefonie operatora. Cel: mediana < 10 min
+    (`cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN`) — patrz wywołanie w `run`.
+
+    ŁĄCZYMY `powiadomienia` (wyslano_at — jedyne miejsce z faktem wysyłki)
+    i `posty` (opublikowany_at — jedyne miejsce z datą z Facebooka) PO fb_id.
+    Bez FK między tabelami (patrz 0006_powiadomienia.sql — wiersze zbiorcze
+    mają fb_id NULL), więc JOIN, nie kolumna dopisana do `powiadomienia`.
+    WYŁĄCZNIE kanał 'telegram': wiersze zbiorcze/pauza/wznowienie nie niosą
+    opóźnienia ŻADNEGO konkretnego zlecenia i rozmyłyby medianę w dowolną
+    stronę, zależnie od tego, kiedy akurat poszły.
+
+    ŚWIADOMIE bez odcinania ujemnych opóźnień (zegar FB bywa przed naszym
+    o kilkadziesiąt sekund — patrz `powiadomienia.wiek_posta`): to jest metryka
+    do diagnozy, nie do pokazania operatorowi, a filtrowanie niewygodnych
+    wartości ukrywałoby też PRAWDZIWE problemy z zegarem/danymi zamiast je
+    pokazać.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY EXTRACT(EPOCH FROM (p.wyslano_at - t.opublikowany_at)) / 60.0
+                   )
+              FROM powiadomienia p
+              JOIN posty t ON t.fb_id = p.fb_id
+             WHERE p.kanal = 'telegram'
+               AND p.wyslano_at > NOW() - (%s || ' hours')::interval
+               AND t.opublikowany_at IS NOT NULL
+            """,
+            (godziny,),
+        )
+        (mediana,) = cur.fetchone()
+    return float(mediana) if mediana is not None else None
+
+
 def _kolumny_ekstrakcji() -> tuple[str, ...]:
     """Nazwy płaskich kolumn z ekstrakcji — z klasyfikatora, nie z kopii tutaj.
 
@@ -1038,7 +1081,7 @@ def rozdziel_budzet(urle: list[str], budzet: int, statystyki: dict[str, dict],
 
 
 def interwal_min(tempo_h: float, przydzial: int, sciezka: str,
-                 min_interwal: int) -> int:
+                 min_interwal: int, wykorzystanie_budzetu: float | None = None) -> int:
     """Co ile minut pytać o tę grupę. Sens tej liczby jest INNY w każdej ścieżce.
 
     ŚCIEŻKA A — koszt dobowy grupy nie zależy od odstępu. Actor oddaje przyrost
@@ -1053,7 +1096,22 @@ def interwal_min(tempo_h: float, przydzial: int, sciezka: str,
 
     Wynik przycięty do [min_interwal, MAX_INTERWAL_MIN]. Górna granica to wprost
     opóźnienie, z jakim w najgorszym razie zobaczymy zlecenie z cichej grupy.
+
+    PIĄTA POPRAWKA — `wykorzystanie_budzetu` (zuzyte_doba/budzet CAŁEGO systemu,
+    liczone RAZ w `zbuduj_plan`, nie na grupę) zmienia rolę `min_interwal` z
+    dolnej granicy formuły w jej WARTOŚĆ DOMYŚLNĄ: dopóki jest poniżej
+    `cfg_groups.PROG_WYKORZYSTANIA_BUDZETU`, formuła (i ścieżka A/B) w ogóle się
+    nie liczy — zwracamy wprost `cfg_groups.MIN_INTERWAL_MIN`. Produkcyjne dane
+    (26-40 min od publikacji do alertu) pokazały, że formuła rozciągała odstęp
+    do 15-120 minut, mimo że budżetu było pod dostatkiem — a na giełdzie kursów
+    liczy się pierwszy telefon, nie zaoszczędzony run Apify.
+    `None` (domyślnie — i w każdym dotychczasowym wywołaniu tej funkcji, w tym
+    w testach) znaczy „zużycie nieznane, licz z formuły" — stare zachowanie
+    tam, gdzie wołający nie zna jeszcze stanu budżetu całego systemu.
     """
+    if (wykorzystanie_budzetu is not None
+            and wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU):
+        return cfg_groups.MIN_INTERWAL_MIN
     if sciezka == "A":
         minuty = (60.0 / tempo_h) if tempo_h > 0 else float(min_interwal)
     else:
@@ -1141,6 +1199,11 @@ class Plan:
         return max(0, self.budzet - self.zuzyte_doba)
 
     @property
+    def wykorzystanie_budzetu(self) -> float:
+        """zuzyte_doba/budzet — patrz `interwal_min`, próg `PROG_WYKORZYSTANIA_BUDZETU`."""
+        return (self.zuzyte_doba / self.budzet) if self.budzet > 0 else 1.0
+
+    @property
     def koszt_usd(self) -> float:
         return sum(g.koszt_usd for g in self.do_pobrania)
 
@@ -1166,6 +1229,14 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
     plan = Plan(sciezka=sciezka, skad_sciezka=skad_sciezka, budzet=budzet,
                 zuzyte_doba=zuzyte)
 
+    # PIĄTA POPRAWKA — zużycie liczone RAZ, dla całego systemu, PRZED pętlą po
+    # grupach: to jest właśnie "wykorzystanie budżetu poniżej progu" z
+    # `interwal_min`, nie coś liczone od nowa per grupa. `budzet <= 0` (sufit
+    # zdjęty albo błędna konfiguracja) traktujemy jako "budżetu już nie ma"
+    # (1.0, patrz `Plan.wykorzystanie_budzetu`) — formuła ma wtedy szansę
+    # zaoszczędzić, zamiast pytać co 5 minut bez żadnego ograniczenia.
+    wykorzystanie_budzetu = plan.wykorzystanie_budzetu
+
     urle = [g["url"] for g in grupy]
     przydzialy = rozdziel_budzet(urle, budzet, statystyki)
 
@@ -1175,7 +1246,8 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
         stat = statystyki.get(url) or {}
         tempo = tempo_na_godzine(stat, teraz, cfg_groups.OKNO_TEMPA_H)
         przydzial = przydzialy.get(url, 0)
-        odstep = interwal_min(tempo, przydzial, sciezka, min_interwal)
+        odstep = interwal_min(tempo, przydzial, sciezka, min_interwal,
+                              wykorzystanie_budzetu=wykorzystanie_budzetu)
         limit, okno = _adaptive_group_params(tempo, odstep, sciezka, nadpisanie_limitu)
         pobrane = stan.get("pobrane_doba", 0)
 
@@ -1203,10 +1275,19 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
 
 def opis_planu(plan: Plan) -> list[str]:
     """Plan jako tekst — to samo wypisuje `--sucho` i normalny przebieg."""
+    # PIĄTA POPRAWKA — poniżej progu odstęp każdej grupy "ok" to WPROST
+    # MIN_INTERWAL_MIN (patrz `interwal_min`), nie coś, co trzeba by wyliczyć
+    # z widełek niżej w tabeli. Ta linia mówi wprost, który tryb obowiązuje w
+    # TYM przebiegu — bez niej "co 5 min" w tabeli grup wygląda jak przypadek
+    # dobrego tempa, nie jak reguła.
+    tryb_odstepu = ("DOMYŚLNY (MIN_INTERWAL_MIN)" if
+                    plan.wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+                    else "ZE WZORU (tempo/budżet — próg zużycia przekroczony)")
     linie = [
         f"[{KTO}] ścieżka actora: {plan.sciezka} ({plan.skad_sciezka})",
-        f"[{KTO}] budżet dobowy: {plan.budzet} postów, zużyte {plan.zuzyte_doba}, "
-        f"zostało {plan.zostalo}",
+        f"[{KTO}] budżet dobowy: {plan.budzet} postów, zużyte {plan.zuzyte_doba} "
+        f"({plan.wykorzystanie_budzetu:.0%}), zostało {plan.zostalo}",
+        f"[{KTO}] odstęp grup: {tryb_odstepu} — próg {cfg_groups.PROG_WYKORZYSTANIA_BUDZETU:.0%}",
         f"[{KTO}] grup w tym przebiegu: {len(plan.do_pobrania)} z {len(plan.grupy)}",
     ]
     for g in plan.grupy:
@@ -1807,6 +1888,31 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         # grupach, a jest zepsutym deployem.
         log(f"[{KTO}] UWAGA: klasyfikator nie działał w tym przebiegu "
             f"({klasyfikator_padl}). Posty czekają w bazie ze statusem 'nowe'.")
+
+    # PIĄTA POPRAWKA — ostatnia linia podsumowania, celowo: to jest liczba, po
+    # której widać, czy MIN_INTERWAL_MIN/PROG_WYKORZYSTANIA_BUDZETU realnie
+    # skróciły czas do alertu, czy tylko wyglądają dobrze w planie. Best-effort
+    # (jak reszta diagnostyki w tym pliku) — brak tej jednej liczby w logu nie
+    # ma prawa zablokować przebiegu, który już wysłał, co miał wysłać.
+    conn_mediana = _polacz_best_effort()
+    if conn_mediana is not None:
+        try:
+            mediana = _mediana_opoznienia_alertow_min(conn_mediana)
+        except Exception as e:  # noqa: BLE001 — metryka nie może wywalić przebiegu
+            log(f"[{KTO}] nie policzyłem mediany opóźnienia alertów (24h): "
+                f"{_jedna_linia(e)}")
+        else:
+            if mediana is None:
+                log(f"[{KTO}] mediana opóźnienia alertów (24h): brak danych "
+                    f"(zero alertów z opublikowany_at w oknie)")
+            else:
+                ocena = ("OK" if mediana < cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN
+                         else "PONAD CELEM")
+                log(f"[{KTO}] mediana opóźnienia alertów (24h, opublikowany_at -> "
+                    f"wyslano_at): {mediana:.1f} min — cel <"
+                    f"{cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN} min: {ocena}")
+        finally:
+            conn_mediana.close()
     return 0
 
 
