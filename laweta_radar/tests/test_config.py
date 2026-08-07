@@ -75,6 +75,7 @@ STALE_CZYTANE_PRZEZ_FETCHERA = (
     "APIFY_ACTOR", "APIFY_SORT", "APIFY_TIMEOUT", "CENA_USD_ZA_POST",
     "POSTOW_NA_GRUPE", "PULA_STARTOWA_POSTOW", "OKNO_WYDAJNOSCI_DNI",
     "MIN_INTERWAL_MIN_A", "MIN_INTERWAL_MIN_B", "MAX_INTERWAL_MIN",
+    "MIN_INTERWAL_MIN", "PROG_WYKORZYSTANIA_BUDZETU", "CEL_MEDIANY_OPOZNIENIA_MIN",
     "OKNO_TEMPA_H", "MIN_POSTOW_NA_GRUPE", "DOMYSLNIE_POSTOW_NA_GRUPE",
     "ZAPAS_NA_PACZKE", "MAX_POSTOW_NA_GRUPE_A", "MAX_POSTOW_NA_GRUPE_B",
     "MNOZNIK_OKNA", "MIN_OKNO_MIN",
@@ -293,6 +294,19 @@ def test_linia_startowa_nie_krzyczy_o_kluczu_nieuzywanego_providera():
         assert "klucz_modelu=tak" in opis
         assert "anthropic=BRAK" not in opis
         assert "llm=openai/gpt-5-mini" in opis
+
+
+def test_alert_degradacja_apify_domyslnie_krytyczny(monkeypatch):
+    """Brak zmiennej w .env -> "krytyczny", tak jak deklaruje .env.example."""
+    monkeypatch.delenv("ALERT_DEGRADACJA_APIFY", raising=False)
+    assert settings._txt("ALERT_DEGRADACJA_APIFY", "krytyczny") == "krytyczny"
+
+
+def test_alert_degradacja_apify_widoczny_w_linii_startowej():
+    """Widoczność jest tu celem: 'czemu nie przyszedł alert' ma odpowiedź bez
+    czytania kodu — patrz analogiczne alert_zwierzeta/alert_oferty."""
+    with ustaw(ALERT_DEGRADACJA_APIFY="zawsze"):
+        assert "alert_degradacja_apify=zawsze" in settings.opis_srodowiska()
 
 
 def test_liczby_degraduja_do_domyslnych_zamiast_rzucac(monkeypatch):

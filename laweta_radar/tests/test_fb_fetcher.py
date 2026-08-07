@@ -204,6 +204,75 @@ def test_dolna_granica_odstepu_jest_ostrozniejsza_w_sciezce_b():
     assert cfg_groups.MIN_INTERWAL_MIN_B > cfg_groups.MIN_INTERWAL_MIN_A
 
 
+# ---------------------------------------------------------------------------
+# 3b. PIĄTA POPRAWKA — poniżej progu budżetu odstęp to WARTOŚĆ DOMYŚLNA,
+# nie dolna granica formuły. Patrz config/groups.py (MIN_INTERWAL_MIN,
+# PROG_WYKORZYSTANIA_BUDZETU) i docstring interwal_min.
+# ---------------------------------------------------------------------------
+def test_ponizej_progu_budzetu_odstep_to_wprost_min_interwal_min():
+    """Poniżej progu formuła w ogóle się nie liczy — obie ścieżki, każde tempo
+    i przydział dają ten sam wynik: MIN_INTERWAL_MIN."""
+    prog = cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    for sciezka, min_interwal in (("A", cfg_groups.MIN_INTERWAL_MIN_A),
+                                  ("B", cfg_groups.MIN_INTERWAL_MIN_B)):
+        odstep = f.interwal_min(tempo_h=0.01, przydzial=1, sciezka=sciezka,
+                                min_interwal=min_interwal,
+                                wykorzystanie_budzetu=prog - 0.01)
+        assert odstep == cfg_groups.MIN_INTERWAL_MIN
+
+
+def test_powyzej_progu_budzetu_wraca_formula():
+    """Nad progiem funkcja wraca do dokładnie tego, co liczyła przed poprawką."""
+    prog = cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    sprzed_poprawki = f.interwal_min(tempo_h=1.0, przydzial=20, sciezka="B",
+                                     min_interwal=cfg_groups.MIN_INTERWAL_MIN_B)
+    z_gate_nad_progiem = f.interwal_min(tempo_h=1.0, przydzial=20, sciezka="B",
+                                        min_interwal=cfg_groups.MIN_INTERWAL_MIN_B,
+                                        wykorzystanie_budzetu=prog + 0.01)
+    assert z_gate_nad_progiem == sprzed_poprawki
+    assert sprzed_poprawki > cfg_groups.MIN_INTERWAL_MIN, (
+        "test nic nie sprawdza, jeśli formuła i domyślna wartość akurat się zgadzają")
+
+
+def test_brak_informacji_o_budzecie_zachowuje_stare_zachowanie():
+    """`wykorzystanie_budzetu=None` (domyślnie — i w każdym wywołaniu sprzed tej
+    poprawki) NIE włącza bramki. Wywołujący, który nie zna zużycia systemu, nie
+    dostaje niespodzianki."""
+    z_domyslnym = f.interwal_min(1.0, 20, "B", cfg_groups.MIN_INTERWAL_MIN_B)
+    jawne_none = f.interwal_min(1.0, 20, "B", cfg_groups.MIN_INTERWAL_MIN_B,
+                                wykorzystanie_budzetu=None)
+    assert z_domyslnym == jawne_none
+
+
+def test_plan_wykorzystanie_budzetu_z_zuzyte_i_budzet():
+    plan = f.Plan(sciezka="B", skad_sciezka="test", budzet=200, zuzyte_doba=50)
+    assert plan.wykorzystanie_budzetu == pytest.approx(0.25)
+    # Budżet zdjęty/błędny -> "budżetu już nie ma", formuła ma szansę oszczędzać
+    # zamiast pytać co 5 minut bez ograniczenia.
+    bez_budzetu = f.Plan(sciezka="B", skad_sciezka="test", budzet=0, zuzyte_doba=0)
+    assert bez_budzetu.wykorzystanie_budzetu == 1.0
+
+
+def test_plan_odstep_domyslny_gdy_budzet_ma_zapas():
+    grupy = _grupy(1)
+    harmonogram = {grupy[0]["url"]: {"nastepny_run_at": None, "pobrane_doba": 0}}
+    plan = f.zbuduj_plan(grupy, {}, harmonogram, budzet=1000, sciezka="B",
+                         skad_sciezka="test", teraz=TERAZ)
+    assert plan.wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    assert plan.grupy[0].odstep_min == cfg_groups.MIN_INTERWAL_MIN
+
+
+def test_plan_odstep_wraca_do_wzoru_gdy_budzet_ciasny():
+    grupy = _grupy(1)
+    # 90/100 = 90% > próg (0.7) — formuła wraca; przy tak małym dobowym
+    # sufcie ucieka od razu w górę, ponad wartość domyślną.
+    harmonogram = {grupy[0]["url"]: {"nastepny_run_at": None, "pobrane_doba": 90}}
+    plan = f.zbuduj_plan(grupy, {}, harmonogram, budzet=100, sciezka="B",
+                         skad_sciezka="test", teraz=TERAZ)
+    assert plan.wykorzystanie_budzetu >= cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+    assert plan.grupy[0].odstep_min > cfg_groups.MIN_INTERWAL_MIN
+
+
 def test_sufit_limitu_jest_hojny_w_a_i_ciasny_w_b():
     """W A limit jest zabezpieczeniem od góry (koszt tnie warunek wieku),
     w B limit JEST kosztem, co do sztuki."""
@@ -673,9 +742,13 @@ class _HTTPBlad(Exception):
 class _FakeConnDB:
     def __init__(self) -> None:
         self.closed = 0
+        self.rollbacks = 0
 
     def close(self) -> None:
         self.closed += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 def test_samoleczenie_happy_path_nie_dotyka_bazy(monkeypatch):
@@ -933,7 +1006,11 @@ def test_degradacja_alertuje_gdy_mniej_niz_dwa_zywe_klucze(monkeypatch):
     assert any("UWAGA" in linia for linia in logi)
 
 
-def test_degradacja_alertuje_gdy_martwy_klucz(monkeypatch):
+def test_degradacja_martwy_klucz_sam_nie_budzi_telefonu_domyslnie(monkeypatch):
+    """Domyślny tryb "krytyczny": martwy klucz sam w sobie to normalny stan
+    rotacji (patrz ALERT_DEGRADACJA_APIFY w .env.example) — trafia do logu,
+    ale NIE budzi telefonu. Trzy żywe klucze (>= próg), więc jedynym powodem
+    jest tu klucz martwy."""
     from laweta_radar.services import telegram_notify
 
     wyslane = []
@@ -944,15 +1021,83 @@ def test_degradacja_alertuje_gdy_martwy_klucz(monkeypatch):
         lambda conn, tokeny: {"t3": {"status": f.apify_keys.STATUS_KLUCZ_MARTWY}})
     monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
                         lambda: type("Cfg", (), {"pool": ()})())
-    # trzy żywe (>= próg), więc TYLKO klucz martwy ma wywołać alert
+    logi = []
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("martwych" in linia for linia in logi)   # diagnostyka w logu przebiegu, zawsze
+
+
+def test_degradacja_mniej_proxy_niz_kluczy_sam_nie_budzi_telefonu_domyslnie(monkeypatch):
+    """Jak wyżej, dla powodu „mniej żywych proxy niż kluczy" — w trybie
+    domyślnym ("krytyczny") sam z siebie nie wysyła Telegrama, tylko loguje."""
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ("p1", "p2", "p3")})())
+    monkeypatch.setattr(f.apify_proxy, "wczytaj_stan_proxy",
+                        lambda conn, urls: {"p1": {"status": "kwarantanna"},
+                                            "p2": {"status": "kwarantanna"}})
+    # 3 proxy w puli, 2 w kwarantannie -> 1 żywe, mniej niż 3 klucze
+    logi = []
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("żywych proxy" in linia for linia in logi)
+
+
+def test_degradacja_tryb_zawsze_przywraca_alert_na_martwy_klucz(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=zawsze to zachowanie sprzed przełącznika: każdy
+    powód, także sam martwy klucz, budzi telefon."""
+    from laweta_radar.services import telegram_notify
+
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "zawsze")
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(
+        f.apify_keys, "wczytaj_stany",
+        lambda conn, tokeny: {"t3": {"status": f.apify_keys.STATUS_KLUCZ_MARTWY}})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
     f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
     assert len(wyslane) == 1
     assert "martwych" in wyslane[0]
 
 
-def test_degradacja_alertuje_gdy_mniej_proxy_niz_kluczy(monkeypatch):
+def test_degradacja_tryb_off_wycisza_nawet_powod_krytyczny(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=off: nawet "żywych kluczy < 2" (jedyny powód,
+    który przetrwałby "krytyczny") nie idzie na Telegram — ale log przebiegu
+    i tak dostaje pełny stan, bo wyciszamy brzęczenie, nie diagnostykę."""
     from laweta_radar.services import telegram_notify
 
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "off")
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+    logi = []
+    f._alert_jesli_zdegradowana(["t1"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("UWAGA" in linia and "żywych kluczy" in linia for linia in logi)
+
+
+def test_degradacja_wartosc_nieznana_degraduje_do_krytyczny(monkeypatch):
+    """Literówka w ALERT_DEGRADACJA_APIFY ma zawęzić hałas, nie otworzyć go
+    na oścież — degraduje do "krytyczny", tak jak GATE_TRYB."""
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "cos-innego")
+    assert f._tryb_alertu_degradacji() == "krytyczny"
+
+
+def test_degradacja_tryb_zawsze_przywraca_alert_na_mniej_proxy(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=zawsze: zachowanie sprzed przełącznika."""
+    from laweta_radar.services import telegram_notify
+
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "zawsze")
     wyslane = []
     monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
@@ -981,3 +1126,94 @@ def test_degradacja_diagnostyka_pada_nie_wywala_runu(monkeypatch):
     monkeypatch.setattr(f.apify_keys, "wczytaj_stany", _wybuchnij)
     f._alert_jesli_zdegradowana(["t1"], ["t1", "t2"], log=lambda *a: None)   # nie ma rzucić
     assert wyslane == []
+
+
+# ---------------------------------------------------------------------------
+# Backfill kierunek_geo/odbior_kraj/dostawa_kraj — w KAŻDYM przebiegu, offline
+# ---------------------------------------------------------------------------
+def test_backfill_geo_limit_zero_nie_dotyka_bazy(monkeypatch):
+    """0 wyłącza backfill CAŁKOWICIE — nawet nie próbuje się łączyć."""
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 0)
+
+    def _wybuchnij():
+        raise AssertionError("limit=0 nie powinien w ogóle łączyć się z bazą")
+
+    monkeypatch.setattr(f, "_polacz_best_effort", _wybuchnij)
+    f._doganiaj_kierunek_geo(log=lambda *a: None)   # nie ma rzucić
+
+
+def test_backfill_geo_bez_bazy_nie_wywala_runu(monkeypatch):
+    """Best-effort jak reszta samoleczenia: brak połączenia degraduje do cichego wyjścia."""
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
+    f._doganiaj_kierunek_geo(log=lambda *a: None)   # nie ma rzucić
+
+
+def test_backfill_geo_przelicza_do_limitu_i_loguje_rozklad(monkeypatch):
+    """Limit z ustawień dojeżdża do zapytania, a podsumowanie liczy się z bazy,
+    nie z tego, ile wierszy PRÓBOWANO przeliczyć — ten sam nawyk co reszta pliku."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 7)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+
+    wiersze = [("id1", "38-400", "Krosno", None, "Berlin", "tresc1"),
+              ("id2", "38-400", "Krosno", "35-001", "Rzeszow", "tresc2")]
+    wolania: dict[str, int] = {}
+
+    def _wiersze(conn, limit):
+        wolania["limit"] = limit
+        return wiersze
+
+    kierunki = iter(["wyjazd", "krajowy"])
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", _wiersze)
+    monkeypatch.setattr(geo_backfill, "przelicz", lambda conn, w: next(kierunki))
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+
+    assert wolania["limit"] == 7
+    assert any("doliczono kierunek_geo w 2" in linia for linia in log)
+    assert any("wyjazd=1" in linia and "krajowy=1" in linia for linia in log)
+
+
+def test_backfill_geo_pusta_zaleglosc_nie_loguje_nic(monkeypatch):
+    """Nie ma czego przeliczać -> cisza, nie linia „doliczono 0 wierszy" co przebieg."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", lambda conn, limit: [])
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+    assert log == []
+
+
+def test_backfill_geo_blad_jednego_wiersza_nie_zatrzymuje_reszty(monkeypatch):
+    """Jeden padnięty geokoder nie ma prawa zablokować reszty paczki — jak
+    wszędzie indziej w tym pliku, błąd per wiersz jest policzony i zalogowany,
+    nie wywalony jako wyjątek z całej funkcji."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    conn = _FakeConnDB()
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: conn)
+
+    wiersze = [("zle", "x", "y", None, None, "t"),
+              ("dobre", "38-400", "Krosno", None, "Berlin", "t")]
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", lambda conn, limit: wiersze)
+
+    def _przelicz(conn, wiersz):
+        if wiersz[0] == "zle":
+            raise RuntimeError("geokoder padł")
+        return "wyjazd"
+
+    monkeypatch.setattr(geo_backfill, "przelicz", _przelicz)
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+
+    assert any("doliczono kierunek_geo w 1" in linia for linia in log)
+    assert any("zle" in linia and "geokoder padł" in linia for linia in log)
+    assert conn.rollbacks == 1

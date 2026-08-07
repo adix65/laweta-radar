@@ -422,18 +422,39 @@ def _alert_pula_proxy_wyczerpana(cfg: apify_proxy.ProxyConfig, log=print) -> Non
 # Próg żywych kluczy, poniżej którego pula jest o JEDNĄ awarię od zera.
 PROG_MIN_ZYWYCH_KLUCZY = 2
 
+# Trzy poziomy hałasu ALERT_DEGRADACJA_APIFY — patrz .env.example. Nieznana
+# wartość degraduje do "krytyczny", tak samo jak GATE_TRYB w workers/gate.py:
+# literówka w .env ma zawęzić hałas, nie otworzyć go na oścież.
+_TRYB_ALERTU_OFF = "off"
+_TRYB_ALERTU_KRYTYCZNY = "krytyczny"
+_TRYB_ALERTU_ZAWSZE = "zawsze"
+_TRYBY_ALERTU_DEGRADACJI = (_TRYB_ALERTU_OFF, _TRYB_ALERTU_KRYTYCZNY, _TRYB_ALERTU_ZAWSZE)
+
+
+def _tryb_alertu_degradacji() -> str:
+    """ALERT_DEGRADACJA_APIFY znormalizowany. Nieznana/pusta wartość -> "krytyczny"."""
+    s = settings.ALERT_DEGRADACJA_APIFY.strip().lower()
+    return s if s in _TRYBY_ALERTU_DEGRADACJI else _TRYB_ALERTU_KRYTYCZNY
+
 
 def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=print) -> None:
     """WCZESNE ostrzeżenie (run jedzie dalej — część kluczy jeszcze działa),
     nie awaria: operator ma się dowiedzieć, ZANIM pula spadnie do zera i
     zadziała `_alert_pula_wyczerpana`. Sekcja 5 zadania „samolecząca się pula":
 
-        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY
+        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY               [KRYTYCZNY powód]
         żywych proxy < liczba kluczy (mniej wyjść niż kont — korelacja rośnie)
         którykolwiek klucz oznaczony jako martwy (zwykle ban — wymaga człowieka)
 
     Best-effort: bez bazy funkcja nic nie robi (nie ma czego sprawdzić) —
     diagnostyka nie może zablokować runu, tak samo jak w `_alert_pula_wyczerpana`.
+
+    ALERT_DEGRADACJA_APIFY steruje WYŁĄCZNIE tym, czy powyższe budzi telefon —
+    stan puli trafia do logu przebiegu ZAWSZE (niezależnie od trybu) i jest
+    zawsze widoczny w /limity na żądanie. Przy modelu z pulą darmowych kont
+    martwe klucze są normalnym stanem pracy (rotacja sama je pomija), więc
+    domyślny tryb "krytyczny" budzi telefon TYLKO dla powodu, który realnie
+    zapowiada utratę zleceń — mało żywych kluczy.
     """
     conn = _polacz_best_effort()
     if conn is None:
@@ -453,18 +474,29 @@ def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=pri
     finally:
         conn.close()
 
-    powody = []
+    # (opis, czy_krytyczny) — "krytyczny" znaczy: przetrwa filtr trybu "krytyczny".
+    powody: list[tuple[str, bool]] = []
     if len(tokeny_zywe) < PROG_MIN_ZYWYCH_KLUCZY:
-        powody.append(f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})")
+        powody.append((f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})", True))
     if zywe_proxy is not None and zywe_proxy < len(tokeny):
-        powody.append(f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy")
+        powody.append((f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy", False))
     if martwe:
-        powody.append(f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify")
+        powody.append((f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify", False))
     if not powody:
         return
 
-    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(powody)}.")
-    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in powody)
+    opisy = [p for p, _ in powody]
+    # Log przebiegu widzi PEŁNY stan ZAWSZE, niezależnie od ALERT_DEGRADACJA_APIFY
+    # — wyciszamy Telegram, nie diagnostykę (ta sama zasada co przy /limity).
+    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(opisy)}.")
+
+    tryb = _tryb_alertu_degradacji()
+    if tryb == _TRYB_ALERTU_OFF:
+        return
+    if tryb == _TRYB_ALERTU_KRYTYCZNY and not any(krytyczny for _, krytyczny in powody):
+        return
+
+    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in opisy)
             + "\n\nSprawdź /limity na Telegramie.")
     try:
         from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom
@@ -721,6 +753,49 @@ def _zapisz_harmonogram(conn, url: str, doba: str, *, pobrane_doba: int,
              pobrane_doba, przydzial, (blad or None)),
         )
     conn.commit()
+
+
+def _mediana_opoznienia_alertow_min(conn, godziny: int = 24) -> float | None:
+    """Mediana (minuty) opublikowany_at -> wyslano_at, z ostatnich `godziny`
+    godzin. None, gdy w oknie nie ma ani jednego alertu z obiema datami znanymi
+    — inaczej „nie ma z czego liczyć" wyglądałoby jak „mediana zero minut",
+    czyli najlepszy możliwy wynik zamiast braku danych.
+
+    PIĄTA POPRAWKA — jedyny sposób, żeby efekt `MIN_INTERWAL_MIN` /
+    `PROG_WYKORZYSTANIA_BUDZETU` był widoczny w LOGU, a nie tylko odczuwalny
+    (albo nieodczuwalny) na telefonie operatora. Cel: mediana < 10 min
+    (`cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN`) — patrz wywołanie w `run`.
+
+    ŁĄCZYMY `powiadomienia` (wyslano_at — jedyne miejsce z faktem wysyłki)
+    i `posty` (opublikowany_at — jedyne miejsce z datą z Facebooka) PO fb_id.
+    Bez FK między tabelami (patrz 0006_powiadomienia.sql — wiersze zbiorcze
+    mają fb_id NULL), więc JOIN, nie kolumna dopisana do `powiadomienia`.
+    WYŁĄCZNIE kanał 'telegram': wiersze zbiorcze/pauza/wznowienie nie niosą
+    opóźnienia ŻADNEGO konkretnego zlecenia i rozmyłyby medianę w dowolną
+    stronę, zależnie od tego, kiedy akurat poszły.
+
+    ŚWIADOMIE bez odcinania ujemnych opóźnień (zegar FB bywa przed naszym
+    o kilkadziesiąt sekund — patrz `powiadomienia.wiek_posta`): to jest metryka
+    do diagnozy, nie do pokazania operatorowi, a filtrowanie niewygodnych
+    wartości ukrywałoby też PRAWDZIWE problemy z zegarem/danymi zamiast je
+    pokazać.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY EXTRACT(EPOCH FROM (p.wyslano_at - t.opublikowany_at)) / 60.0
+                   )
+              FROM powiadomienia p
+              JOIN posty t ON t.fb_id = p.fb_id
+             WHERE p.kanal = 'telegram'
+               AND p.wyslano_at > NOW() - (%s || ' hours')::interval
+               AND t.opublikowany_at IS NOT NULL
+            """,
+            (godziny,),
+        )
+        (mediana,) = cur.fetchone()
+    return float(mediana) if mediana is not None else None
 
 
 def _kolumny_ekstrakcji() -> tuple[str, ...]:
@@ -1038,7 +1113,7 @@ def rozdziel_budzet(urle: list[str], budzet: int, statystyki: dict[str, dict],
 
 
 def interwal_min(tempo_h: float, przydzial: int, sciezka: str,
-                 min_interwal: int) -> int:
+                 min_interwal: int, wykorzystanie_budzetu: float | None = None) -> int:
     """Co ile minut pytać o tę grupę. Sens tej liczby jest INNY w każdej ścieżce.
 
     ŚCIEŻKA A — koszt dobowy grupy nie zależy od odstępu. Actor oddaje przyrost
@@ -1053,7 +1128,22 @@ def interwal_min(tempo_h: float, przydzial: int, sciezka: str,
 
     Wynik przycięty do [min_interwal, MAX_INTERWAL_MIN]. Górna granica to wprost
     opóźnienie, z jakim w najgorszym razie zobaczymy zlecenie z cichej grupy.
+
+    PIĄTA POPRAWKA — `wykorzystanie_budzetu` (zuzyte_doba/budzet CAŁEGO systemu,
+    liczone RAZ w `zbuduj_plan`, nie na grupę) zmienia rolę `min_interwal` z
+    dolnej granicy formuły w jej WARTOŚĆ DOMYŚLNĄ: dopóki jest poniżej
+    `cfg_groups.PROG_WYKORZYSTANIA_BUDZETU`, formuła (i ścieżka A/B) w ogóle się
+    nie liczy — zwracamy wprost `cfg_groups.MIN_INTERWAL_MIN`. Produkcyjne dane
+    (26-40 min od publikacji do alertu) pokazały, że formuła rozciągała odstęp
+    do 15-120 minut, mimo że budżetu było pod dostatkiem — a na giełdzie kursów
+    liczy się pierwszy telefon, nie zaoszczędzony run Apify.
+    `None` (domyślnie — i w każdym dotychczasowym wywołaniu tej funkcji, w tym
+    w testach) znaczy „zużycie nieznane, licz z formuły" — stare zachowanie
+    tam, gdzie wołający nie zna jeszcze stanu budżetu całego systemu.
     """
+    if (wykorzystanie_budzetu is not None
+            and wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU):
+        return cfg_groups.MIN_INTERWAL_MIN
     if sciezka == "A":
         minuty = (60.0 / tempo_h) if tempo_h > 0 else float(min_interwal)
     else:
@@ -1141,6 +1231,11 @@ class Plan:
         return max(0, self.budzet - self.zuzyte_doba)
 
     @property
+    def wykorzystanie_budzetu(self) -> float:
+        """zuzyte_doba/budzet — patrz `interwal_min`, próg `PROG_WYKORZYSTANIA_BUDZETU`."""
+        return (self.zuzyte_doba / self.budzet) if self.budzet > 0 else 1.0
+
+    @property
     def koszt_usd(self) -> float:
         return sum(g.koszt_usd for g in self.do_pobrania)
 
@@ -1166,6 +1261,14 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
     plan = Plan(sciezka=sciezka, skad_sciezka=skad_sciezka, budzet=budzet,
                 zuzyte_doba=zuzyte)
 
+    # PIĄTA POPRAWKA — zużycie liczone RAZ, dla całego systemu, PRZED pętlą po
+    # grupach: to jest właśnie "wykorzystanie budżetu poniżej progu" z
+    # `interwal_min`, nie coś liczone od nowa per grupa. `budzet <= 0` (sufit
+    # zdjęty albo błędna konfiguracja) traktujemy jako "budżetu już nie ma"
+    # (1.0, patrz `Plan.wykorzystanie_budzetu`) — formuła ma wtedy szansę
+    # zaoszczędzić, zamiast pytać co 5 minut bez żadnego ograniczenia.
+    wykorzystanie_budzetu = plan.wykorzystanie_budzetu
+
     urle = [g["url"] for g in grupy]
     przydzialy = rozdziel_budzet(urle, budzet, statystyki)
 
@@ -1175,7 +1278,8 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
         stat = statystyki.get(url) or {}
         tempo = tempo_na_godzine(stat, teraz, cfg_groups.OKNO_TEMPA_H)
         przydzial = przydzialy.get(url, 0)
-        odstep = interwal_min(tempo, przydzial, sciezka, min_interwal)
+        odstep = interwal_min(tempo, przydzial, sciezka, min_interwal,
+                              wykorzystanie_budzetu=wykorzystanie_budzetu)
         limit, okno = _adaptive_group_params(tempo, odstep, sciezka, nadpisanie_limitu)
         pobrane = stan.get("pobrane_doba", 0)
 
@@ -1203,10 +1307,19 @@ def zbuduj_plan(grupy: list[dict], statystyki: dict[str, dict],
 
 def opis_planu(plan: Plan) -> list[str]:
     """Plan jako tekst — to samo wypisuje `--sucho` i normalny przebieg."""
+    # PIĄTA POPRAWKA — poniżej progu odstęp każdej grupy "ok" to WPROST
+    # MIN_INTERWAL_MIN (patrz `interwal_min`), nie coś, co trzeba by wyliczyć
+    # z widełek niżej w tabeli. Ta linia mówi wprost, który tryb obowiązuje w
+    # TYM przebiegu — bez niej "co 5 min" w tabeli grup wygląda jak przypadek
+    # dobrego tempa, nie jak reguła.
+    tryb_odstepu = ("DOMYŚLNY (MIN_INTERWAL_MIN)" if
+                    plan.wykorzystanie_budzetu < cfg_groups.PROG_WYKORZYSTANIA_BUDZETU
+                    else "ZE WZORU (tempo/budżet — próg zużycia przekroczony)")
     linie = [
         f"[{KTO}] ścieżka actora: {plan.sciezka} ({plan.skad_sciezka})",
-        f"[{KTO}] budżet dobowy: {plan.budzet} postów, zużyte {plan.zuzyte_doba}, "
-        f"zostało {plan.zostalo}",
+        f"[{KTO}] budżet dobowy: {plan.budzet} postów, zużyte {plan.zuzyte_doba} "
+        f"({plan.wykorzystanie_budzetu:.0%}), zostało {plan.zostalo}",
+        f"[{KTO}] odstęp grup: {tryb_odstepu} — próg {cfg_groups.PROG_WYKORZYSTANIA_BUDZETU:.0%}",
         f"[{KTO}] grup w tym przebiegu: {len(plan.do_pobrania)} z {len(plan.grupy)}",
     ]
     for g in plan.grupy:
@@ -1407,6 +1520,69 @@ def _jedna_linia(e: BaseException, n: int = 200) -> str:
     return f"{type(e).__name__}: {' '.join(str(e).split())[:n]}"
 
 
+def _doganiaj_kierunek_geo(log=print) -> None:
+    """Domyka zaległość `odbior_kraj`/`dostawa_kraj`/`kierunek_geo` W KAŻDYM
+    przebiegu — ta sama pętla sprzątająca co naprawa ekstrakcji (`naprawione`
+    w `run()`), tylko bez czekania, aż Apify pokaże post jeszcze raz.
+
+    PO CO ODDZIELNIE OD `do_naprawy`. Naprawa ekstrakcji działa na postach,
+    które fetcher I TAK zobaczył w tym przebiegu (Apify je zwrócił) — nie ma
+    jak nią naprawić wiersza sprzed tygodni, bo grupy oddają tylko najnowsze
+    posty. Kolumny geo są inne: liczą się WYŁĄCZNIE z miast/kodów już
+    zapisanych w wierszu (`geo.geokoduj`, offline), więc backfill nie
+    potrzebuje ani Apify, ani modelu — może przeliczać całą historię, jedno
+    zapytanie SQL na przebieg, za darmo. Migracja 0013 zostawiła 134 takie
+    wiersze; bez tego haka jedyną drogą do ich naprawy byłoby pamiętanie
+    o ręcznym odpaleniu `scripts/uzupelnij_kierunek_geo.py`.
+
+    WZORZEC DLA KOLEJNYCH MIGRACJI: każda następna migracja, która dokłada
+    kolumnę liczoną z danych JUŻ w bazie (nie z nowego wywołania Apify ani
+    modelu), ma dostać analogiczny hak tutaj — funkcja czytająca do
+    `KIERUNEK_GEO_BACKFILL_LIMIT` wierszy i wołana z tego samego miejsca
+    w `run()`. System ma sam nadganiać zaległości; jednorazowy skrypt
+    (jak `uzupelnij_kierunek_geo.py`) zostaje wyłącznie jako narzędzie do
+    NATYCHMIASTOWEGO przeliczenia całej historii zaraz po migracji.
+
+    PONOWNE UŻYCIE, NIE KOPIA: `wiersze_do_przeliczenia`/`przelicz` importujemy
+    z `scripts/uzupelnij_kierunek_geo.py` zamiast przepisywać tu SQL i wywołanie
+    geokodera — druga kopia tej samej reguły rozjechałaby się przy pierwszej
+    zmianie geokodera (patrz nota w tamtym module).
+
+    BEST-EFFORT, jak reszta diagnostyki/samoleczenia w tym pliku: błąd tutaj
+    nie ma prawa zablokować pobierania, za które już zapłaciliśmy Apify.
+    """
+    limit = settings.KIERUNEK_GEO_BACKFILL_LIMIT
+    if limit <= 0:
+        return
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill  # noqa: PLC0415
+
+    conn = _polacz_best_effort()
+    if conn is None:
+        return
+    try:
+        wiersze = geo_backfill.wiersze_do_przeliczenia(conn, limit)
+        if not wiersze:
+            return
+        policzone: dict[str, int] = {}
+        bledy = 0
+        for wiersz in wiersze:
+            try:
+                kierunek = geo_backfill.przelicz(conn, wiersz)
+                policzone[kierunek] = policzone.get(kierunek, 0) + 1
+            except Exception as e:  # noqa: BLE001 — jeden wiersz nie psuje reszty
+                bledy += 1
+                conn.rollback()
+                log(f"[{KTO}] kierunek_geo: {wiersz[0]}: {_jedna_linia(e)}")
+        rozklad = ", ".join(f"{k}={v}" for k, v in sorted(policzone.items()))
+        bledy_txt = f", {bledy} błędów" if bledy else ""
+        log(f"[{KTO}] doliczono kierunek_geo w {sum(policzone.values())} "
+            f"wierszach sprzed migracji 0013 ({rozklad}){bledy_txt}.")
+    except Exception as e:  # noqa: BLE001 — backfill to usprawnienie, nie warunek runu
+        log(f"[{KTO}] nie policzyłem zaległości kierunek_geo: {_jedna_linia(e)}")
+    finally:
+        conn.close()
+
+
 def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         sucho: bool = False, nadpisanie_limitu: int | None = None,
         log=print) -> int:
@@ -1517,6 +1693,15 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     if sucho:
         log(f"[{KTO}] --sucho: nie wołam actora. Nic nie wydano.")
         return 0
+
+    # Backfill kierunek_geo/odbior_kraj/dostawa_kraj — NIEZALEŻNIE od budżetu
+    # i planu pobierania niżej: to zapytanie do bazy, zero Apify, więc ma się
+    # wykonać w KAŻDYM realnym przebiegu, także takim, w którym sufit dobowy
+    # jest wyczerpany i `plan.do_pobrania` zaraz każe wyjść. Patrz
+    # `_doganiaj_kierunek_geo` i `KIERUNEK_GEO_BACKFILL_LIMIT`.
+    if baza_gotowa:
+        _doganiaj_kierunek_geo(log=log)
+
     if not plan.do_pobrania:
         # Nie jest to błąd — to normalny wynik przy gęstym cronie i rzadkich
         # grupach. Ale gdy powodem jest wyczerpany budżet, musi być to widać
@@ -1807,6 +1992,31 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         # grupach, a jest zepsutym deployem.
         log(f"[{KTO}] UWAGA: klasyfikator nie działał w tym przebiegu "
             f"({klasyfikator_padl}). Posty czekają w bazie ze statusem 'nowe'.")
+
+    # PIĄTA POPRAWKA — ostatnia linia podsumowania, celowo: to jest liczba, po
+    # której widać, czy MIN_INTERWAL_MIN/PROG_WYKORZYSTANIA_BUDZETU realnie
+    # skróciły czas do alertu, czy tylko wyglądają dobrze w planie. Best-effort
+    # (jak reszta diagnostyki w tym pliku) — brak tej jednej liczby w logu nie
+    # ma prawa zablokować przebiegu, który już wysłał, co miał wysłać.
+    conn_mediana = _polacz_best_effort()
+    if conn_mediana is not None:
+        try:
+            mediana = _mediana_opoznienia_alertow_min(conn_mediana)
+        except Exception as e:  # noqa: BLE001 — metryka nie może wywalić przebiegu
+            log(f"[{KTO}] nie policzyłem mediany opóźnienia alertów (24h): "
+                f"{_jedna_linia(e)}")
+        else:
+            if mediana is None:
+                log(f"[{KTO}] mediana opóźnienia alertów (24h): brak danych "
+                    f"(zero alertów z opublikowany_at w oknie)")
+            else:
+                ocena = ("OK" if mediana < cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN
+                         else "PONAD CELEM")
+                log(f"[{KTO}] mediana opóźnienia alertów (24h, opublikowany_at -> "
+                    f"wyslano_at): {mediana:.1f} min — cel <"
+                    f"{cfg_groups.CEL_MEDIANY_OPOZNIENIA_MIN} min: {ocena}")
+        finally:
+            conn_mediana.close()
     return 0
 
 

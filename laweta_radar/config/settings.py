@@ -257,6 +257,52 @@ POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
 SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 
 # ---------------------------------------------------------------------------
+# ALERT "PULA APIFY ZDEGRADOWANA" (workers/fb_fetcher._alert_jesli_zdegradowana).
+#
+# Trzy poziomy hałasu tej JEDNEJ wiadomości. NIE dotyczy 🆘 „PULA APIFY
+# WYCZERPANA" (workers/fb_fetcher._alert_pula_wyczerpana) — ten alert idzie,
+# gdy run się FAKTYCZNIE zatrzymał z braku zasobów (AllKeysExhausted), jest
+# zawsze krytyczny i przełącznika nie ma.
+#
+#   "off"       — nigdy nie idzie na Telegram. Stan puli i tak zawsze widać
+#                 w logu przebiegu i w /limity na żądanie.
+#   "krytyczny" — (DOMYŚLNE) na Telegram idzie WYŁĄCZNIE powód „żywych kluczy
+#                 poniżej progu" (fb_fetcher.PROG_MIN_ZYWYCH_KLUCZY). Martwe
+#                 klucze same w sobie i niedobór proxy trafiają wyłącznie do
+#                 logu — reaktywna rotacja i tak je pomija.
+#   "zawsze"    — każdy z trzech powodów budzi telefon osobno (zachowanie
+#                 sprzed tego przełącznika).
+#
+# Normalizacja (nieznana wartość -> "krytyczny", ten sam wzór co
+# GATE_TRYB/workers.gate.normalizuj_tryb) mieszka przy konsumencie —
+# fb_fetcher._tryb_alertu_degradacji — nie tutaj, żeby uniknąć cyklu importów.
+# ---------------------------------------------------------------------------
+ALERT_DEGRADACJA_APIFY = _txt("ALERT_DEGRADACJA_APIFY", "krytyczny")
+
+# ---------------------------------------------------------------------------
+# BACKFILL kierunek_geo / odbior_kraj / dostawa_kraj W KAŻDYM PRZEBIEGU.
+#
+# Migracja 0013 dołożyła trzy kolumny liczone z miast/kodów, które JUŻ stały
+# w bazie (patrz `services/geo.py`) — ale bez tego pokrętła nadgonienie starych
+# wierszy zostawałoby jednym ręcznym uruchomieniem `scripts/uzupelnij_kierunek_geo.py`,
+# o którym trzeba pamiętać. Zamiast tego `workers/fb_fetcher.run()` w KAŻDYM
+# przebiegu doprzelicza do tylu najświeższych wierszy z miastem/kodem i pustym
+# `kierunek_geo`, ile tu stoi. Geokodowanie jest offline i darmowe (zero Apify,
+# zero modelu), więc jedyny koszt tego pokrętła to czas jednego zapytania SQL.
+#
+# ZASADA NA PRZYSZŁOŚĆ: każda kolejna migracja, która dokłada kolumnę liczoną
+# z danych JUŻ w bazie (nie z nowego wywołania Apify ani modelu), ma dostać
+# analogiczny hak w tej samej pętli sprzątającej co ekstrakcja i ten backfill —
+# patrz `workers/fb_fetcher._doganiaj_kierunek_geo` jako wzorzec. System ma sam
+# nadganiać zaległości; jednorazowy skrypt zostaje wyłącznie jako narzędzie do
+# NATYCHMIASTOWEGO przeliczenia całej historii zaraz po migracji, nie jako
+# jedyna droga do naprawy.
+#
+# 0 wyłącza backfill (np. do izolowania go przy diagnozowaniu czegoś innego).
+# ---------------------------------------------------------------------------
+KIERUNEK_GEO_BACKFILL_LIMIT = max(0, _int("KIERUNEK_GEO_BACKFILL_LIMIT", 50))
+
+# ---------------------------------------------------------------------------
 # WYSZUKIWARKA GRUP (scripts/znajdz_grupy.py) — narzędzie ręczne, nie pipeline.
 #
 # CIASTECZKA. Wyszukiwarka grup FB dla NIEZALOGOWANEGO oddaje ścianę logowania,
@@ -687,6 +733,11 @@ def opis_srodowiska() -> str:
          # z Elbląga" ma mieć odpowiedź w linii startowej. Dane o ofertach są
          # w bazie niezależnie od tej wartości.
          f", alert_oferty={'tak' if ALERT_OFERTY else 'nie (tylko baza)'}"
+         # „Czemu nie przyszedł alert o zdegradowanej puli Apify" ma tę samą
+         # odpowiedź w linii startowej. Stan puli JEST zawsze w logu przebiegu
+         # i w /limity niezależnie od tej wartości — tu widać tylko, czy budzi
+         # telefon (patrz fb_fetcher._tryb_alertu_degradacji dla normalizacji).
+         f", alert_degradacja_apify={ALERT_DEGRADACJA_APIFY}"
          # „Czemu alert przyszedł bez mapy" ma mieć odpowiedź w linii startowej,
          # a nie dopiero w kodzie: albo wyłączone w .env, albo brak `staticmap`
          # (to drugie mówi raz services/mapa.py, przy pierwszym alercie).

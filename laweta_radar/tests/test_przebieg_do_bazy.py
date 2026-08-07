@@ -306,6 +306,81 @@ def test_naprawa_wiersza_z_poprzedniego_przebiegu(przebieg):
     assert any("uzupełniono ekstrakcję w 1" in linia for linia in przebieg.log)
 
 
+# ---------------------------------------------------------------------------
+# ZGŁOSZENIE: kierunek_geo/odbior_kraj/dostawa_kraj sprzed migracji 0013 mają
+# się domykać SAME, w tej samej pętli sprzątającej co naprawa ekstrakcji —
+# bez ręcznego odpalania scripts/uzupelnij_kierunek_geo.py.
+# ---------------------------------------------------------------------------
+def _wstaw_stary_wiersz(przebieg, fb_id: str, *, odbior_kod=None, odbior_miasto=None,
+                        dostawa_kod=None, dostawa_miasto=None, minut_temu: int = 0) -> None:
+    """Wiersz w kształcie sprzed migracji 0013: miasto/kod już są, kolumny
+    geo jeszcze puste — dokładnie stan, w jakim migracja zostawiła 134 zlecenia."""
+    with przebieg.conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO posty (fb_id, tresc, grupa_url, odbior_kod, odbior_miasto, "
+            "dostawa_kod, dostawa_miasto, zrodlo_decyzji, czy_zlecenie, status, "
+            "pobrany_at) VALUES (%s, %s, %s, %s, %s, %s, %s, 'ai', true, 'nowe', "
+            "NOW() - (%s || ' minutes')::interval)",
+            (fb_id, f"stary post {fb_id} sprzed migracji 0013", GRUPA["url"],
+             odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto, minut_temu))
+    przebieg.conn.commit()
+
+
+def _geo_wiersza(przebieg, fb_id: str) -> tuple:
+    with przebieg.conn.cursor() as cur:
+        cur.execute("SELECT odbior_kraj, dostawa_kraj, kierunek_geo FROM posty "
+                    "WHERE fb_id = %s", (fb_id,))
+        return cur.fetchone()
+
+
+@baza
+def test_kierunek_geo_backfill_domyka_stary_wiersz_bez_apify_i_modelu(przebieg):
+    """Wiersz sprzed 0013 dostaje kraj i kierunek w PIERWSZYM przebiegu, który
+    go widzi — bez czekania, aż Apify pokaże ten post jeszcze raz (tak jak
+    naprawa ekstrakcji musi czekać), i bez ani jednego wywołania modelu:
+    geokodowanie liczy się offline z miast, które już stały w wierszu.
+    """
+    stary_fb_id = "legacy-0013-001"
+    _wstaw_stary_wiersz(przebieg, stary_fb_id, odbior_kod="38-400",
+                        odbior_miasto="Krosno", dostawa_miasto="Berlin")
+
+    assert przebieg.uruchom() == 0
+
+    odbior_kraj, dostawa_kraj, kierunek_geo = _geo_wiersza(przebieg, stary_fb_id)
+    assert (odbior_kraj, dostawa_kraj, kierunek_geo) == ("PL", "DE", "wyjazd")
+    assert any("doliczono kierunek_geo w 1" in linia for linia in przebieg.log)
+
+
+@baza
+def test_kierunek_geo_backfill_limit_rozklada_zaleglosc_na_kilka_przebiegow(przebieg, monkeypatch):
+    """`KIERUNEK_GEO_BACKFILL_LIMIT=1` -> jeden wiersz na przebieg, reszta
+    czeka na kolejny. Dokładnie zachowanie ze zgłoszenia: 134 zaległe wiersze
+    nie mają zablokować pojedynczego przebiegu fetchera, ani czekać na kogoś,
+    kto pamięta o ręcznym skrypcie — kolejne przebiegi (cron, co kilka minut)
+    domykają resztę same, NIEZALEŻNIE od tego, czy jest coś nowego do pobrania
+    z Apify (harmonogram niżej celowo NIE jest przewijany między przebiegami).
+    """
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 1)
+    fb_ids = ["legacy-a", "legacy-b"]
+    for i, fb_id in enumerate(fb_ids):
+        _wstaw_stary_wiersz(przebieg, fb_id, odbior_kod="38-400", dostawa_miasto="Berlin",
+                            minut_temu=i)
+
+    def kierunki() -> dict:
+        return {fb_id: _geo_wiersza(przebieg, fb_id)[2] for fb_id in fb_ids}
+
+    assert przebieg.uruchom() == 0
+    stan = kierunki()
+    assert sum(v is not None for v in stan.values()) == 1, (
+        "limit=1 miał przeliczyć dokładnie jeden z dwóch zaległych wierszy")
+
+    assert przebieg.uruchom() == 0        # drugi przebieg, ŻADNEGO nowego posta
+    stan = kierunki()
+    assert all(v == "wyjazd" for v in stan.values()), (
+        "drugi przebieg powinien domknąć wiersz pominięty w pierwszym — bez "
+        "tego zaległość nigdy się nie kończy, tylko przesuwa")
+
+
 @baza
 def test_dwa_przebiegi_daja_jeden_alert(przebieg):
     """Dedup powiadomień stoi na wierszu w bazie — nie na pamięci procesu.
