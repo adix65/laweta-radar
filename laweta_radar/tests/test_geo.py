@@ -185,6 +185,16 @@ def test_kolizja_kodow_miedzy_krajami_rozstrzyga_miasto(tmp_path):
 # 66-449 Skwierzyna/ Polen" pokazywał marker dostawy pod Brnem (Czechy) zamiast
 # w Skwierzynie (lubuskie), bo "66-449" (PL) i "664 49" (CZ) po zdjęciu
 # separatorów dają identyczne "66449", a dopasowanie brało kolizję na ślepo.
+#
+# Fixture niżej jest CELOWO SYMETRYCZNA (oba kraje mają wpis pod dokładnie tym
+# samym kolidującym kluczem) — testuje sam MECHANIZM rozstrzygania kształtem,
+# niezależnie od tego, czy taka symetria akurat zachodzi w realnym eksporcie.
+# W prawdziwej bazie NIE zachodzi: `grep '^PL,66-449,' data/kody_eu.csv` nie
+# daje nic, Skwierzyna siedzi w pliku pod innym kodem. Ten ASYMETRYCZNY,
+# faktyczny kształt (kod nie ma dopasowania w kraju, na który wskazuje —
+# fallback nazwą albo `None`, NIGDY cudzy kraj) mają osobne testy niżej,
+# `test_realny_przypadek_skwierzyna_daje_kierunek_przywoz_nie_tranzyt` i
+# `test_realny_kod_bez_dopasowania_w_kraju_nigdy_nie_daje_cudzego_kraju`.
 # ===========================================================================
 FIXTURE_PL_CZ = """kraj,kod,miejscowosc,wojewodztwo,lat,lng
 PL,66-449,Skwierzyna,lubuskie,52.5964,15.5088
@@ -248,17 +258,33 @@ def test_kod_bez_separatora_z_krajem_w_tresci_wybiera_polske(tmp_path):
 def test_realny_przypadek_skwierzyna_daje_kierunek_przywoz_nie_tranzyt(tmp_path):
     """REALNY PRZYPADEK Z PRODUKCJI: "Transport eines Jaguar XF von Bochum nach
     66-449 Skwierzyna/ Polen" pokazywał Brno zamiast Skwierzyny, 887 km zamiast
-    ~700 i kierunek "tranzyt" zamiast "przywoz". Myślnik w "66-449" wystarcza —
-    nawet bez miasta i bez słowa "Polen" — bo kształt jest unikalnie polski.
+    ~700 i kierunek "tranzyt" zamiast "przywoz".
+
+    Fixture NIE jest symetryczna jak `FIXTURE_PL_CZ` wyżej — i to jest clou tego
+    testu. `grep '^PL,66-449,' data/kody_eu.csv` w prawdziwym eksporcie GeoNames
+    nie daje NIC: Skwierzyna w pliku siedzi pod innym kodem, więc pod kluczem
+    "66449" baza zna WYŁĄCZNIE czeskie Ostopovice. Myślnik w "66-449" mówi
+    "szukaj w Polsce", ale sam kod w Polsce nie istnieje — więc krok 1 kończy
+    się bez punktu (nie czeskim), a rozstrzyga dopiero nazwa "Skwierzyna" z
+    treści posta, ograniczona do kraju, o którym już wiadomo z kształtu (PL).
     """
-    _z_fixture_pl_cz(tmp_path)
+    plik = tmp_path / "pl_cz_realny_eksport.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "PL,66-440,Skwierzyna,lubuskie,52.5964,15.5088\n"
+        "CZ,664 49,Ostopovice,Jihomoravsky,49.1611,16.4967\n",
+        encoding="utf-8")
+    geo.zaladuj(plik)
+
     tresc = "Transport eines Jaguar XF von Bochum nach 66-449 Skwierzyna/ Polen"
     odbior = geo.Punkt(51.4818, 7.2162, "miasto", "Bochum (DE)", kraj="DE")
     dostawa = geo.geokoduj("66-449", "Skwierzyna", tresc=tresc)
 
     assert dostawa is not None
     assert dostawa.kraj == "PL"
-    assert dostawa.zrodlo == "kod"
+    # "kod" nie pasował w PL (baza go tam nie ma) -> wynik przyszedł fallbackiem
+    # nazwą miasta, nie dopasowaniem kodu.
+    assert dostawa.zrodlo == "miasto"
     assert dostawa.niepewny is False
     assert round(dostawa.lat, 4) == 52.5964    # Skwierzyna, NIE Brno
 
@@ -269,6 +295,34 @@ def test_realny_przypadek_skwierzyna_daje_kierunek_przywoz_nie_tranzyt(tmp_path)
     # Dystans musi wyjść z realnej Skwierzyny, nie z Brna (887 km bez sensu
     # dla trasy Bochum-lubuskie): Haversine*1.25 w tej relacji to rząd 650-780 km.
     assert 550 <= p["km_trasy"] <= 850, p["km_trasy"]
+
+
+def test_realny_kod_bez_dopasowania_w_kraju_nigdy_nie_daje_cudzego_kraju(tmp_path):
+    """Ten sam "66-449" jak wyżej, ale BEZ nazwy miasta ani w treści, ani jako
+    argument: kod nie ma dopasowania w Polsce (baza pod tym kluczem zna
+    wyłącznie Czechy), więc jedynym poprawnym wynikiem jest `None`. Kod
+    z cudzego kraju pod tym samym, zdartym z separatorów kluczem jest ZAWSZE
+    błędną odpowiedzią, nawet gdy cyfry pasują — pokazanie Ostopovic (Brno,
+    887 km) jako pewnika jest dokładnie tym błędem, który ten test pilnuje.
+    """
+    plik = tmp_path / "pl_cz_realny_eksport_bez_miasta.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "PL,66-440,Skwierzyna,lubuskie,52.5964,15.5088\n"
+        "CZ,664 49,Ostopovice,Jihomoravsky,49.1611,16.4967\n",
+        encoding="utf-8")
+    geo.zaladuj(plik)
+
+    wynik = geo.geokoduj("66-449", None)
+    assert wynik is None
+
+    # Konsekwencja w warstwie wyżej: brak punktu -> brak trasy i brak ceny,
+    # zamiast pewnie wyglądającej trasy do złego kraju.
+    odbior = geo.Punkt(51.4818, 7.2162, "miasto", "Bochum (DE)", kraj="DE")
+    p = geo.podsumowanie(odbior, wynik)
+    assert p["km_trasy"] is None
+    assert p["szacunek_pln"] is None
+    assert p["dostawa_kraj"] is None
 
 
 def test_de_piec_cyfr_kontra_cz_sk_bez_spacji_ta_sama_pulapka(tmp_path):
