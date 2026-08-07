@@ -240,6 +240,36 @@ MIN_INTERWAL_MIN_A = 5
 MIN_INTERWAL_MIN_B = 15
 MAX_INTERWAL_MIN = 120      # nawet martwa grupa dostaje szansę dwa razy na dobę... i tyle
 
+# PIĄTA POPRAWKA — opóźnienie jest GŁÓWNĄ metryką tego systemu, nie kosztem.
+# Produkcyjne dane: alert dochodzi do operatora po 26-40 min od publikacji
+# posta, mimo że cron chodzi już co 5 minut (patrz docstring `fb_fetcher.py`,
+# CLI). Skoro cron nie jest wąskim gardłem, zostaje wyłącznie ODSTĘP, jaki
+# `interwal_min()` liczy z tempa/budżetu grupy — i to on rozciągał realne
+# przebiegi do 15-120 minut, bo widełki `[min_interwal, MAX_INTERWAL_MIN]`
+# pozwalały formule tam wylądować, a nie zmuszały jej do dołu.
+#
+# MIN_INTERWAL_MIN NIE jest tu dolną granicą wzoru — jest jego WARTOŚCIĄ
+# DOMYŚLNĄ, dopóki `PROG_WYKORZYSTANIA_BUDZETU` nie zostanie przekroczony
+# (patrz `interwal_min`, wywołanie w `zbuduj_plan`). Na giełdzie kursów wygrywa
+# pierwszy dzwoniący — pięć minut jest tu więc ceną wejścia, nie oszczędnością
+# do wygospodarowania.
+MIN_INTERWAL_MIN = 5
+
+# Próg zużycia SUFITU DOBOWEGO (zuzyte_doba / budzet, cały system, nie jedna
+# grupa), PONIŻEJ którego każda grupa "ok" dostaje wprost `MIN_INTERWAL_MIN`,
+# z pominięciem formuły tempa/budżetu. Nie 1.0 (dopiero przy pełnym
+# wyczerpaniu) — ostatnie kilkanaście procent budżetu spaliłoby się w kilku
+# przebiegach co pięć minut, a sufit padłby w środku dnia i uciszył WSZYSTKIE
+# grupy do końca doby UTC (patrz `run`, "SUFIT DOBOWY WYCZERPANY"), co boli
+# dużo bardziej niż kilka minut opóźnienia teraz. 0.7 zostawia zapas, w którym
+# formuła zdąży spowolnić ZANIM sufit realnie zagrozi.
+PROG_WYKORZYSTANIA_BUDZETU = 0.7
+
+# Cel mediany opóźnienia alertu (opublikowany_at -> wyslano_at), wypisywany
+# w podsumowaniu przebiegu (patrz `run`) — żeby efekt powyższych dwóch stałych
+# było widać w logu, a nie tylko odczuwalny na telefonie operatora.
+CEL_MEDIANY_OPOZNIENIA_MIN = 10
+
 # Dobowa pula postów dla grupy BEZ historii. Bez niej nowa grupa nigdy nie
 # zbierze danych, na podstawie których bandyta mógłby jej cokolwiek przyznać —
 # a grupa bez danych wygląda dla bandyty tak samo jak grupa bezwartościowa.
