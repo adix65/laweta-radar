@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Przeliczenie kraju i kierunku geograficznego dla postów sprzed migracji
-0013_kierunek_geo.sql. Jednorazowy backfill, BEZ ani jednego wywołania modelu.
+0013_kierunek_geo.sql. BEZ ani jednego wywołania modelu.
 
 PO CO TO ISTNIEJE. `workers/classifier.wiersz_do_zapisu` liczy `odbior_kraj`,
 `dostawa_kraj` i `kierunek_geo` na bieżąco, od migracji 0013 — ale posty
 sklasyfikowane WCZEŚNIEJ mają te trzy kolumny puste, choć mają już miasta
 i kody pocztowe w `odbior_miasto`/`odbior_kod`/`dostawa_miasto`/`dostawa_kod`.
-Bez tego skryptu "pokaż wyjazdy z Polski" milczałoby o całej historii sprzed
+Bez backfillu "pokaż wyjazdy z Polski" milczałoby o całej historii sprzed
 włączenia tej funkcji, mimo że dane do policzenia tego są już w bazie.
 
 DLACZEGO BEZ MODELU. Kraj ustala geokoder (`services/geo.geokoduj`) z tego,
@@ -15,10 +15,22 @@ te pola wyciągnął klasyfikator w swoim czasie i nie trzeba pytać go drugi ra
 Geokodowanie liczy się w locie i offline, więc backfill to czysta funkcja tego,
 co już jest w wierszu: żadnego kosztu Apify, żadnego kosztu modelu.
 
+NIE JEST TO JUŻ JEDYNA DROGA DO NAPRAWY. `workers/fb_fetcher.run()` woła
+funkcje z tego modułu (`wiersze_do_przeliczenia`/`przelicz`) w KAŻDYM
+przebiegu — patrz `_doganiaj_kierunek_geo` w `fb_fetcher.py` oraz
+`KIERUNEK_GEO_BACKFILL_LIMIT` w `.env` (domyślnie 50 wierszy/przebieg). Ten
+skrypt zostaje jako narzędzie RĘCZNE do NATYCHMIASTOWEGO przeliczenia całej
+zaległej historii naraz — np. zaraz po odpaleniu migracji 0013, zamiast
+czekać, aż fetcher domknie 134 zaległe wiersze porcjami po 50. Przy kolejnej
+migracji, która dokłada kolumnę liczoną z danych już w bazie, analogiczny
+skrypt ma dostać taki sam hak w fetcherze — system ma sam nadganiać
+zaległości, a nie polegać na pamiętaniu o jednorazowym uruchomieniu.
+
 CZEGO TEN SKRYPT NIE ROBI: nie wysyła powiadomień i nie dotyka `czy_zlecenie`
 ani `status`. Uzupełnia trzy kolumny geograficzne — nic więcej.
 
-UŻYCIE (ręcznie, po odpaleniu migracji 0013, nigdy z crona):
+UŻYCIE (ręcznie, do natychmiastowego przeliczenia całej zaległości naraz —
+fetcher i tak domknie resztę sam, porcjami, w kolejnych przebiegach):
 
     python laweta_radar/scripts/uzupelnij_kierunek_geo.py --sucho     # ile do zrobienia
     python laweta_radar/scripts/uzupelnij_kierunek_geo.py             # wszystkie

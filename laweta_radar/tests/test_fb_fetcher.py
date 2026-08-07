@@ -742,9 +742,13 @@ class _HTTPBlad(Exception):
 class _FakeConnDB:
     def __init__(self) -> None:
         self.closed = 0
+        self.rollbacks = 0
 
     def close(self) -> None:
         self.closed += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 def test_samoleczenie_happy_path_nie_dotyka_bazy(monkeypatch):
@@ -1050,3 +1054,94 @@ def test_degradacja_diagnostyka_pada_nie_wywala_runu(monkeypatch):
     monkeypatch.setattr(f.apify_keys, "wczytaj_stany", _wybuchnij)
     f._alert_jesli_zdegradowana(["t1"], ["t1", "t2"], log=lambda *a: None)   # nie ma rzucić
     assert wyslane == []
+
+
+# ---------------------------------------------------------------------------
+# Backfill kierunek_geo/odbior_kraj/dostawa_kraj — w KAŻDYM przebiegu, offline
+# ---------------------------------------------------------------------------
+def test_backfill_geo_limit_zero_nie_dotyka_bazy(monkeypatch):
+    """0 wyłącza backfill CAŁKOWICIE — nawet nie próbuje się łączyć."""
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 0)
+
+    def _wybuchnij():
+        raise AssertionError("limit=0 nie powinien w ogóle łączyć się z bazą")
+
+    monkeypatch.setattr(f, "_polacz_best_effort", _wybuchnij)
+    f._doganiaj_kierunek_geo(log=lambda *a: None)   # nie ma rzucić
+
+
+def test_backfill_geo_bez_bazy_nie_wywala_runu(monkeypatch):
+    """Best-effort jak reszta samoleczenia: brak połączenia degraduje do cichego wyjścia."""
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: None)
+    f._doganiaj_kierunek_geo(log=lambda *a: None)   # nie ma rzucić
+
+
+def test_backfill_geo_przelicza_do_limitu_i_loguje_rozklad(monkeypatch):
+    """Limit z ustawień dojeżdża do zapytania, a podsumowanie liczy się z bazy,
+    nie z tego, ile wierszy PRÓBOWANO przeliczyć — ten sam nawyk co reszta pliku."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 7)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+
+    wiersze = [("id1", "38-400", "Krosno", None, "Berlin", "tresc1"),
+              ("id2", "38-400", "Krosno", "35-001", "Rzeszow", "tresc2")]
+    wolania: dict[str, int] = {}
+
+    def _wiersze(conn, limit):
+        wolania["limit"] = limit
+        return wiersze
+
+    kierunki = iter(["wyjazd", "krajowy"])
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", _wiersze)
+    monkeypatch.setattr(geo_backfill, "przelicz", lambda conn, w: next(kierunki))
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+
+    assert wolania["limit"] == 7
+    assert any("doliczono kierunek_geo w 2" in linia for linia in log)
+    assert any("wyjazd=1" in linia and "krajowy=1" in linia for linia in log)
+
+
+def test_backfill_geo_pusta_zaleglosc_nie_loguje_nic(monkeypatch):
+    """Nie ma czego przeliczać -> cisza, nie linia „doliczono 0 wierszy" co przebieg."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", lambda conn, limit: [])
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+    assert log == []
+
+
+def test_backfill_geo_blad_jednego_wiersza_nie_zatrzymuje_reszty(monkeypatch):
+    """Jeden padnięty geokoder nie ma prawa zablokować reszty paczki — jak
+    wszędzie indziej w tym pliku, błąd per wiersz jest policzony i zalogowany,
+    nie wywalony jako wyjątek z całej funkcji."""
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill
+
+    monkeypatch.setattr(f.settings, "KIERUNEK_GEO_BACKFILL_LIMIT", 50)
+    conn = _FakeConnDB()
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: conn)
+
+    wiersze = [("zle", "x", "y", None, None, "t"),
+              ("dobre", "38-400", "Krosno", None, "Berlin", "t")]
+    monkeypatch.setattr(geo_backfill, "wiersze_do_przeliczenia", lambda conn, limit: wiersze)
+
+    def _przelicz(conn, wiersz):
+        if wiersz[0] == "zle":
+            raise RuntimeError("geokoder padł")
+        return "wyjazd"
+
+    monkeypatch.setattr(geo_backfill, "przelicz", _przelicz)
+
+    log: list[str] = []
+    f._doganiaj_kierunek_geo(log=log.append)
+
+    assert any("doliczono kierunek_geo w 1" in linia for linia in log)
+    assert any("zle" in linia and "geokoder padł" in linia for linia in log)
+    assert conn.rollbacks == 1

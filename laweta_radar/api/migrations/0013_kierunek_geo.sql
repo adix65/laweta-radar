@@ -35,10 +35,12 @@
 --
 --   KTO WYPEŁNIA. `workers/classifier.wiersz_do_zapisu` — tym samym
 --   geokodowaniem co `odbior_kod`/`odbior_miasto` już tam policzone, w tym
---   samym momencie zapisu. Dla wierszy sprzed tej zmiany jednorazowy skrypt
---   `scripts/uzupelnij_kierunek_geo.py` przelicza je wstecz z miast już
---   zapisanych w bazie — BEZ jednego wywołania modelu, bo geokodowanie jest
---   czystą funkcją tego, co już tam stoi.
+--   samym momencie zapisu. Dla wierszy sprzed tej zmiany `workers/fb_fetcher.run()`
+--   doprzelicza wstecz do KIERUNEK_GEO_BACKFILL_LIMIT wierszy w KAŻDYM przebiegu
+--   (`_doganiaj_kierunek_geo`, ta sama pętla sprzątająca co naprawa ekstrakcji) —
+--   BEZ jednego wywołania modelu ani Apify, bo geokodowanie jest czystą funkcją
+--   tego, co już stoi w wierszu. `scripts/uzupelnij_kierunek_geo.py` robi to samo
+--   ręcznie i bez limitu, do natychmiastowego przeliczenia całej zaległości naraz.
 --
 --   ODPALANIE — jako postgres, RĘCZNIE, nigdy z workera:
 --     psql "$DATABASE_URL_ADMIN" -f laweta_radar/api/migrations/0013_kierunek_geo.sql

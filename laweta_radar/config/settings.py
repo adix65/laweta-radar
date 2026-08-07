@@ -257,6 +257,29 @@ POSTY_NA_DOBE = _int("POSTY_NA_DOBE", 2000)
 SCIEZKA_ACTORA = _txt("SCIEZKA_ACTORA").upper()
 
 # ---------------------------------------------------------------------------
+# BACKFILL kierunek_geo / odbior_kraj / dostawa_kraj W KAŻDYM PRZEBIEGU.
+#
+# Migracja 0013 dołożyła trzy kolumny liczone z miast/kodów, które JUŻ stały
+# w bazie (patrz `services/geo.py`) — ale bez tego pokrętła nadgonienie starych
+# wierszy zostawałoby jednym ręcznym uruchomieniem `scripts/uzupelnij_kierunek_geo.py`,
+# o którym trzeba pamiętać. Zamiast tego `workers/fb_fetcher.run()` w KAŻDYM
+# przebiegu doprzelicza do tylu najświeższych wierszy z miastem/kodem i pustym
+# `kierunek_geo`, ile tu stoi. Geokodowanie jest offline i darmowe (zero Apify,
+# zero modelu), więc jedyny koszt tego pokrętła to czas jednego zapytania SQL.
+#
+# ZASADA NA PRZYSZŁOŚĆ: każda kolejna migracja, która dokłada kolumnę liczoną
+# z danych JUŻ w bazie (nie z nowego wywołania Apify ani modelu), ma dostać
+# analogiczny hak w tej samej pętli sprzątającej co ekstrakcja i ten backfill —
+# patrz `workers/fb_fetcher._doganiaj_kierunek_geo` jako wzorzec. System ma sam
+# nadganiać zaległości; jednorazowy skrypt zostaje wyłącznie jako narzędzie do
+# NATYCHMIASTOWEGO przeliczenia całej historii zaraz po migracji, nie jako
+# jedyna droga do naprawy.
+#
+# 0 wyłącza backfill (np. do izolowania go przy diagnozowaniu czegoś innego).
+# ---------------------------------------------------------------------------
+KIERUNEK_GEO_BACKFILL_LIMIT = max(0, _int("KIERUNEK_GEO_BACKFILL_LIMIT", 50))
+
+# ---------------------------------------------------------------------------
 # WYSZUKIWARKA GRUP (scripts/znajdz_grupy.py) — narzędzie ręczne, nie pipeline.
 #
 # CIASTECZKA. Wyszukiwarka grup FB dla NIEZALOGOWANEGO oddaje ścianę logowania,
