@@ -149,6 +149,11 @@ def test_kolizja_kodow_miedzy_krajami_rozstrzyga_miasto(tmp_path):
     Kolizje są realne, bo indeks zna kod bez separatorów: polska „39-200"
     zapisana jako „39200" ma kształt niemieckiego kodu, a różnica to 700 km.
     Nazwa miasta jest jedyną informacją, która naprawdę wie, o który kraj chodzi.
+
+    Zapytanie w tym teście jest CELOWO bez separatora ("39200" — tak zapisałby
+    to ktoś, kto zgubił polski myślnik) — więc kształt (`_kraje_z_ksztaltu`)
+    niczego tu nie rozstrzyga i całe rozstrzygnięcie spada na miasto/kontekst;
+    zapis Z separatorem ("39-200") ma osobny test niżej.
     """
     plik = tmp_path / "kolizja.csv"
     plik.write_text(
@@ -158,12 +163,139 @@ def test_kolizja_kodow_miedzy_krajami_rozstrzyga_miasto(tmp_path):
         encoding="utf-8")
     geo.zaladuj(plik)
 
-    assert "Debica" in geo.geokoduj("39200", "Debica").nazwa
-    assert "Magdeburg" in geo.geokoduj("39200", "Magdeburg").nazwa
-    # Bez miasta wygrywa PL — tu jesteśmy i taka jest większość postów. Wybór
-    # bywa zły i dlatego kraj ZAWSZE stoi w nazwie, którą widzi operator.
+    z_debica = geo.geokoduj("39200", "Debica")
+    assert "Debica" in z_debica.nazwa and z_debica.zrodlo == "kod"
+    z_magdeburg = geo.geokoduj("39200", "Magdeburg")
+    assert "Magdeburg" in z_magdeburg.nazwa and z_magdeburg.zrodlo == "kod"
+    # Bez miasta i bez treści posta NIC nie rozstrzyga kraj — wynik nadal
+    # powstaje (PL, bo tu jesteśmy i taka jest większość postów), ale TERAZ
+    # oznaczony jako niepewny: to zgadywanie, nie rozstrzygnięcie, i operator
+    # ma to zobaczyć, zanim pojedzie 700 km w złą stronę.
     bez_kontekstu = geo.geokoduj("39200", None)
     assert "Debica" in bez_kontekstu.nazwa and "(PL)" in bez_kontekstu.nazwa
+    assert bez_kontekstu.zrodlo == "miasto_niepewne"
+    assert bez_kontekstu.niepewny is True
+    assert "DE" in bez_kontekstu.nazwa   # kraj alternatywny widoczny w opisie
+
+
+# ===========================================================================
+# KOLIZJA PL/CZ — separator JEST nośnikiem informacji o kraju
+#
+# Realny przypadek produkcyjny: "Transport eines Jaguar XF von Bochum nach
+# 66-449 Skwierzyna/ Polen" pokazywał marker dostawy pod Brnem (Czechy) zamiast
+# w Skwierzynie (lubuskie), bo "66-449" (PL) i "664 49" (CZ) po zdjęciu
+# separatorów dają identyczne "66449", a dopasowanie brało kolizję na ślepo.
+# ===========================================================================
+FIXTURE_PL_CZ = """kraj,kod,miejscowosc,wojewodztwo,lat,lng
+PL,66-449,Skwierzyna,lubuskie,52.5964,15.5088
+CZ,664 49,Ostopovice,Jihomoravsky,49.1611,16.4967
+"""
+
+
+def _z_fixture_pl_cz(tmp_path):
+    plik = tmp_path / "pl_cz.csv"
+    plik.write_text(FIXTURE_PL_CZ, encoding="utf-8")
+    geo.zaladuj(plik)
+    return plik
+
+
+def test_kod_z_myslnikiem_to_zawsze_polska(tmp_path):
+    """"66-449" — myślnik po dwóch cyfrach jest UNIKALNIE polski. Rozstrzyga
+    sam, bez miasta i bez treści, i to PEWNIE (`zrodlo="kod"`, nie niepewne)."""
+    _z_fixture_pl_cz(tmp_path)
+    p = geo.geokoduj("66-449", None)
+    assert p is not None
+    assert p.kraj == "PL" and "Skwierzyna" in p.nazwa
+    assert p.zrodlo == "kod"
+    assert p.niepewny is False
+
+
+def test_kod_ze_spacja_po_trzech_cyfrach_to_czechy(tmp_path):
+    """"664 49" — spacja po TRZECH cyfrach jest wzorem czesko-słowackim, nie
+    polskim (polski to dwie-myślnik-trzy). Rozstrzyga pewnie na CZ."""
+    _z_fixture_pl_cz(tmp_path)
+    p = geo.geokoduj("664 49", None)
+    assert p is not None
+    assert p.kraj == "CZ" and "Ostopovice" in p.nazwa
+    assert p.zrodlo == "kod"
+    assert p.niepewny is False
+
+
+def test_kod_bez_separatora_bez_kontekstu_jest_niepewny(tmp_path):
+    """"66449" (bez separatora wcale) nie dowodzi niczego — może być polskim
+    kodem bez myślnika tak samo jak czeskim/słowackim bez spacji. Bez miasta
+    i bez treści posta MUSI wyjść jako niepewne, nie jako pewny wybór."""
+    _z_fixture_pl_cz(tmp_path)
+    p = geo.geokoduj("66449", None)
+    assert p is not None
+    assert p.zrodlo == "miasto_niepewne"
+    assert p.niepewny is True
+    # Oba kandydujące kraje mają być widoczne operatorowi w nazwie.
+    assert "PL" in p.nazwa and "CZ" in p.nazwa
+
+
+def test_kod_bez_separatora_z_krajem_w_tresci_wybiera_polske(tmp_path):
+    """Ten sam niejednoznaczny "66449" — ale post mówi wprost "Polen". Kontekst
+    z treści rozstrzyga tam, gdzie kształt kodu milczy."""
+    _z_fixture_pl_cz(tmp_path)
+    p = geo.geokoduj("66449", None, tresc="Transport nach 66449 Skwierzyna/ Polen")
+    assert p is not None
+    assert p.kraj == "PL"
+    assert p.zrodlo == "kod"
+    assert p.niepewny is False
+
+
+def test_realny_przypadek_skwierzyna_daje_kierunek_przywoz_nie_tranzyt(tmp_path):
+    """REALNY PRZYPADEK Z PRODUKCJI: "Transport eines Jaguar XF von Bochum nach
+    66-449 Skwierzyna/ Polen" pokazywał Brno zamiast Skwierzyny, 887 km zamiast
+    ~700 i kierunek "tranzyt" zamiast "przywoz". Myślnik w "66-449" wystarcza —
+    nawet bez miasta i bez słowa "Polen" — bo kształt jest unikalnie polski.
+    """
+    _z_fixture_pl_cz(tmp_path)
+    tresc = "Transport eines Jaguar XF von Bochum nach 66-449 Skwierzyna/ Polen"
+    odbior = geo.Punkt(51.4818, 7.2162, "miasto", "Bochum (DE)", kraj="DE")
+    dostawa = geo.geokoduj("66-449", "Skwierzyna", tresc=tresc)
+
+    assert dostawa is not None
+    assert dostawa.kraj == "PL"
+    assert dostawa.zrodlo == "kod"
+    assert dostawa.niepewny is False
+    assert round(dostawa.lat, 4) == 52.5964    # Skwierzyna, NIE Brno
+
+    p = geo.podsumowanie(odbior, dostawa, tresc)
+    assert p["dostawa_kraj"] == "PL"
+    assert p["kierunek_geo"] == geo.KIERUNEK_PRZYWOZ
+    assert p["niepewne"] == []   # rozstrzygnięte pewnie — nic tu nie ostrzega
+    # Dystans musi wyjść z realnej Skwierzyny, nie z Brna (887 km bez sensu
+    # dla trasy Bochum-lubuskie): Haversine*1.25 w tej relacji to rząd 650-780 km.
+    assert 550 <= p["km_trasy"] <= 850, p["km_trasy"]
+
+
+def test_de_piec_cyfr_kontra_cz_sk_bez_spacji_ta_sama_pulapka(tmp_path):
+    """Ta sama pułapka po drugiej stronie: niemiecki kod (pięć cyfr, NIGDY
+    separatora) i czesko-słowacki zapisany bez spacji dają identyczny klucz.
+    Bez separatora ANI kontekstu nie zgadujemy; kontekst rozstrzyga tak samo
+    jak przy PL/CZ."""
+    plik = tmp_path / "de_cz.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "DE,10115,Berlin,Berlin,52.5300,13.3800\n"
+        "CZ,101 15,Testovice,Praha,50.1000,14.3000\n",
+        encoding="utf-8")
+    geo.zaladuj(plik)
+
+    # "10115" bez separatora: DE_FR_IT i CZ_SK dopasowują się oba -> niepewne.
+    bez_kontekstu = geo.geokoduj("10115", None)
+    assert bez_kontekstu.zrodlo == "miasto_niepewne"
+    assert bez_kontekstu.niepewny is True
+
+    # Spacja po TRZECH cyfrach jest jednoznacznie czesko-słowacka.
+    z_myslnikiem = geo.geokoduj("101 15", None)
+    assert z_myslnikiem.kraj == "CZ" and z_myslnikiem.zrodlo == "kod"
+
+    # Kontekst "Niemcy" rozstrzyga gołe cyfry na DE.
+    z_kontekstem = geo.geokoduj("10115", None, tresc="Berlin, Niemcy")
+    assert z_kontekstem.kraj == "DE" and z_kontekstem.zrodlo == "kod"
 
 
 # ===========================================================================
@@ -259,6 +391,38 @@ def test_kraj_z_drugiego_konca_trasy_nie_kasuje_miasta(tmp_path):
     _z_miejscowosciami(tmp_path)
     p = geo.geokoduj(None, "Lahnstein", tresc="odbior Lahnstein, transport z Czech")
     assert p is not None and "(DE)" in p.nazwa
+
+
+def test_kraje_z_kodow_ufa_rozstrzygnieciu_kodu_a_nie_calej_bazie(tmp_path):
+    """`_kraje_z_kodow` (rozstrzyganie kolizji NAZWY miasta kodem znalezionym
+    w treści) MA ufać temu, co `znajdz_kody` już rozstrzygnęła z kontekstu —
+    nie wolno jej dorzucać WSZYSTKICH krajów, jakie baza zna pod tym samym,
+    zdartym z separatorów kluczem. Baza ma tu (celowo, jak "66-449"/"664 49"
+    w produkcji) DRUGI wpis pod tym samym "56112" — austriacki, czyli TEN SAM
+    kraj co drugi wariant miasta "Lahnstein" w fixture.
+
+    "Koln" (nie "Niemcy") jest tu użyte specjalnie: to sygnał KONTEKSTU kodu
+    (`_SYGNALY_KRAJU`), nie nazwa kraju (`_NAZWY_KRAJOW`) — więc DRUGI filtr
+    w `geokoduj` (`_kraje_z_nazw`) nie pomoże, i rozstrzygnięcie zależy
+    WYŁĄCZNIE od `_kraje_z_kodow`. Stare zachowanie (bierz WSZYSTKIE kraje
+    bazy pod tym kluczem) dorzucałoby AT, filtr nie zawężałby wariantów do
+    jednego i wynik trafiałby do `zrodlo="miasto_niepewne"` — mimo że „56112
+    Koln" w treści jest jednoznaczne.
+    """
+    plik = tmp_path / "kolizja_kodu_w_tresci.csv"
+    plik.write_text(
+        FIXTURE_Z_MIEJSCOWOSCIAMI
+        + "AT,56112,Irrelevant,Sonstige,48.0000,14.0000,\n",
+        encoding="utf-8")
+    geo.zaladuj(plik)
+
+    p = geo.geokoduj(None, "Lahnstein",
+                     tresc="Miejscowosc Lahnstein 56112 Koln do 39-400 Tarnobrzeg")
+    assert p is not None
+    assert "(DE)" in p.nazwa
+    assert round(p.lat, 4) == 50.3049
+    assert p.zrodlo == "miasto"   # jednoznaczne — kod w treści rozstrzygnął sam
+    assert p.niepewny is False
 
 
 def test_populacje_porownywalne_daja_none(tmp_path):

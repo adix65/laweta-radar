@@ -26,8 +26,11 @@ jest gorsza niż jej brak: brak widać, złej liczby nie.
 
 `zrodlo` W KAŻDYM PUNKCIE JEST CZĘŚCIĄ PRODUKTU, nie diagnostyką. Wartość
 "miasto_niepewne" znaczy „w Polsce jest kilkanaście miejscowości o tej nazwie
-i wybraliśmy największą". To MUSI trafić do interfejsu: operator ma zobaczyć,
-że lokalizacja jest zgadywana, ZANIM pojedzie 60 km.
+i wybraliśmy największą" — ALBO „kod pocztowy po zdjęciu separatorów pasuje do
+kilku krajów naraz i żaden sygnał go nie rozstrzygnął" (patrz `geokoduj`,
+`_kraje_z_ksztaltu`: polska Skwierzyna „66-449" i czeskie Ostopovice pod Brnem
+„664 49" dają identyczne „66449"). To MUSI trafić do interfejsu: operator ma
+zobaczyć, że lokalizacja jest zgadywana, ZANIM pojedzie 60 km — albo 300.
 
 ZERO WYWOŁAŃ SIECIOWYCH. Moduł czyta jeden plik CSV przy pierwszym użyciu
 i dalej działa z pamięci. Bazę pobiera osobno `scripts/pobierz_geo.py`.
@@ -75,11 +78,21 @@ class Punkt:
     """Miejsce na mapie wraz z informacją, SKĄD je znamy.
 
     `zrodlo`:
-      "kod"               — dokładne dopasowanie kodu pocztowego, najpewniejsze;
+      "kod"               — dokładne dopasowanie kodu pocztowego, jednoznaczne
+                            co do kraju (kształtem zapisu, miastem albo treścią
+                            posta — patrz `geokoduj`), najpewniejsze;
       "miasto"            — nazwa miasta jednoznaczna w bazie (także wtedy, gdy
                             jednoznaczność dał kraj wyczytany z treści posta);
-      "miasto_niepewne"   — nazwa niejednoznaczna, wzięliśmy największą
-                            miejscowość o tej nazwie. POKAŻ TO OPERATOROWI;
+      "miasto_niepewne"   — DWA przypadki, ta sama etykieta, bo oba znaczą to
+                            samo dla operatora („wynik powstał, ale zgadnięty"):
+                              • nazwa miejscowości niejednoznaczna — wzięliśmy
+                                największą o tej nazwie;
+                              • KOD POCZTOWY po zdjęciu separatorów pasuje do
+                                kilku krajów naraz ("66-449" PL i "664 49" CZ
+                                dają jedno "66449") i ani kształt zapisu, ani
+                                miasto, ani treść posta nie rozstrzygnęły,
+                                o który kraj chodzi.
+                            POKAŻ TO OPERATOROWI;
       "miasto_odmienione" — nazwa z posta była formą odmienioną („Kielc",
                             „Katowic") i dopasowała się dopiero prefiksem.
                             Traktowana jak "miasto_niepewne";
@@ -226,6 +239,18 @@ FORMATY_KODU: dict[str, re.Pattern[str]] = {
     "AT_BE": re.compile(r"^[0-9]{4}$"),
 }
 
+# Nazwa formatu (klucz `FORMATY_KODU`) -> faktyczne kody krajów, jakie ten
+# kształt może reprezentować. Osobna mapa, bo `FORMATY_KODU` nazywa tylko
+# KSZTAŁT ("DE_FR_IT"), a do filtrowania rekordów bazy (kolumna `kraj`)
+# potrzeba konkretnych krajów, którym ten kształt odpowiada.
+_FORMAT_KRAJE: dict[str, tuple[str, ...]] = {
+    "PL": ("PL",),
+    "DE_FR_IT": ("DE", "FR", "IT"),
+    "CZ_SK": ("CZ", "SK"),
+    "NL": ("NL",),
+    "AT_BE": ("AT", "BE"),
+}
+
 
 def czy_kod_pocztowy(kod: str | None) -> bool:
     """Czy ten ciąg ma kształt kodu pocztowego w którymś z obsługiwanych krajów.
@@ -254,6 +279,35 @@ def normalizuj_kod(kod: str | None) -> str:
     klasyfikatora rozjechałaby się przy pierwszym dołożonym formacie.
     """
     return re.sub(r"[\s.-]", "", (kod or "")).upper()
+
+
+def _kraje_z_ksztaltu(kod_oryginalny: str | None) -> set[str]:
+    """Kraje, jakie SUGERUJE ZAPIS kodu — czytany z ORYGINAŁU, PRZED `normalizuj_kod`.
+
+    Polski kod pisze się dwie cyfry-myślnik-trzy ("66-449"), czeski/słowacki
+    sześć cyfr ze spacją ("664 49"). Po zdjęciu separatora oba dają identyczne
+    "66449" — `normalizuj_kod` (do budowy klucza w bazie) ściera dokładnie ten
+    sygnał, którego tu potrzebujemy, więc kształt trzeba rozpoznać ZANIM to się
+    stanie, na wartości, jaką ktoś naprawdę napisał (post, model, CLI).
+
+    Separator jest tu WARUNKIEM, nie ozdobnikiem: gołe cyfry ("66449") nie
+    dowodzą NICZEGO — mogą być polskim kodem bez myślnika tak samo jak
+    niemieckim zapisanym poprawnie (Niemcy separatora nie używają wcale) —
+    dlatego kod bez separatora oddaje PUSTY zbiór ([]), nie zbiór wszystkich
+    formatów, które go kształtem przypominają: pusty zbiór to sygnał
+    „kształt nic nie rozstrzyga", jednoznaczny dla `_przefiltruj_krajami`
+    (filtr pusty = brak filtra), podczas gdy zwrócenie {DE,FR,IT,CZ,SK} tutaj
+    wyglądałoby na rozstrzygnięcie i wykluczałoby PL, którego to akurat NIE
+    dotyczy (polski kod bez myślnika to nadal realny, częsty zapis).
+    """
+    s = (kod_oryginalny or "").strip().upper()
+    if not s or not re.search(r"[ -]", s):
+        return set()
+    kraje: set[str] = set()
+    for format_nazwa, wzorzec in FORMATY_KODU.items():
+        if wzorzec.match(s):
+            kraje.update(_FORMAT_KRAJE[format_nazwa])
+    return kraje
 
 
 def _wczytaj(sciezka: Path | None = None) -> tuple[dict, dict]:
@@ -437,18 +491,23 @@ def _warianty(rekordy: list[dict]) -> list[dict]:
 def _kraje_z_kodow(tresc: str | None, po_kodzie: dict) -> set[str]:
     """Kraje wskazane przez kody pocztowe stojące w treści posta.
 
-    Kod znany bazie mówi o kraju WIĘCEJ niż jego kształt — „39400" wygląda
-    na niemiecki, a jest też polskim 39-400 zapisanym bez myślnika. Dlatego
-    dla kodu obecnego w bazie bierzemy wszystkie kraje jego wystąpień,
-    a kształtem posiłkujemy się tylko przy kodzie, którego baza nie zna.
+    `znajdz_kody` już rozstrzygnęła kraj z KSZTAŁTU zapisu w tekście, kiedy to
+    możliwe (PL zawsze, bo "NN-NNN" jest unikalny) albo z kontekstu (DE/CZ/SK/
+    AT/BE, gdy w oknie stoi nazwa kraju) — i TO rozstrzygnięcie ma pierwszeństwo
+    przed samą bazą. Baza pod TYM SAMYM, zdartym z separatorów kluczem bywa
+    WSPÓLNA dla kilku krajów naraz („66-449" polskie i „664 49" czeskie dają
+    jedno „66449") — wzięcie stamtąd WSZYSTKICH krajów tego klucza dorzucałoby
+    fałszywy sygnał drugiego kraju, o którym tekst w tym miejscu nic nie mówi
+    (dokładnie ta sama pułapka, którą naprawia `_kraje_z_ksztaltu` w `geokoduj`).
+    Do bazy sięgamy dopiero, gdy `znajdz_kody` sama nie wie ("?") — np. goły
+    ciąg cyfr bez separatora i bez kontekstu w oknie wokół niego.
     """
     kraje: set[str] = set()
     for kod, kraj in znajdz_kody(tresc or ""):
-        w_bazie = {r["kraj"] for r in po_kodzie.get(normalizuj_kod(kod), ())}
-        if w_bazie:
-            kraje.update(w_bazie)
-        elif kraj != "?":
+        if kraj != "?":
             kraje.add(kraj)
+            continue
+        kraje.update(r["kraj"] for r in po_kodzie.get(normalizuj_kod(kod), ()))
     return kraje
 
 
@@ -506,7 +565,11 @@ def geokoduj(kod: str | None, miasto: str | None,
     STAŁ w treści i wskazywał Niemcy jednoznacznie, tylko nikt go nie zapytał.
 
     Kolejność prób jest kolejnością PEWNOŚCI:
-      1. kod pocztowy — dokładne dopasowanie, `zrodlo="kod"`;
+      1. kod pocztowy — dopasowanie po kluczu bez separatorów, `zrodlo="kod"`.
+         Gdy pod tym kluczem siedzi więcej niż jeden kraj naraz (patrz niżej),
+         rozstrzygamy KSZTAŁTEM zapisu, potem miastem, potem krajem z treści —
+         a gdy i to nie rozstrzygnie, wynik i tak powstaje, ale oznaczony jako
+         `zrodlo="miasto_niepewne"`, tak samo jak niejednoznaczna nazwa;
       2. nazwa miasta — po normalizacji; forma odmieniona („Kielc", „Katowic")
          łapie się prefiksem i wychodzi jako `zrodlo="miasto_odmienione"`.
          Przy nazwie z wielu krajów kolejność rozstrzygania:
@@ -523,28 +586,60 @@ def geokoduj(kod: str | None, miasto: str | None,
     klucz = normalizuj_kod(kod)
     if klucz and klucz in po_kodzie:
         trafienia = po_kodzie[klucz]
-        # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne: "39200" to polska
-        # Dębica zapisana bez myślnika ORAZ niemiecki kod spod Magdeburga,
-        # a różnica to 700 km. Rozstrzygamy w trzech krokach, od najpewniejszego:
+        # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne — bo klucz w bazie
+        # jest kodem BEZ SEPARATORÓW: polska Dębica „39-200" i niemiecki kod
+        # spod Magdeburga „39200" dają jedno „39200" (700 km różnicy); polska
+        # Skwierzyna „66-449" i czeskie Ostopovice pod Brnem „664 49" dają
+        # jedno „66449" (kolejne kilkaset km). Rozstrzygamy w krokach, od
+        # najpewniejszego, ZAWĘŻAJĄC `kandydaci` do kraju, o którym się
+        # dowiemy — `_przefiltruj_krajami` NIGDY nie odrzuca WSZYSTKICH
+        # naraz, bo sygnał, który nie pasuje do żadnego kandydata, o TYM
+        # kodzie nic nie mówi (może dotyczyć drugiego końca trasy):
         #
-        #   1. nazwą miasta, jeśli przyszła razem z kodem — to jedyna informacja,
-        #      która naprawdę wie, o który kraj chodzi;
-        #   2. PL, bo tu jesteśmy i taka jest większość postów;
-        #   3. pierwszym trafieniem.
+        #   1. KSZTAŁTEM ZAPISU — separator JEST nośnikiem informacji o kraju
+        #      (myślnik po dwóch cyfrach = PL, spacja po trzech = CZ/SK) i
+        #      trzeba go przeczytać z ORYGINALNEGO `kod`, ZANIM `normalizuj_kod`
+        #      go zetrze — to zdarcie separatora miesza kraje w jeden klucz;
+        #   2. nazwą miasta, jeśli przyszła razem z kodem — to ona najlepiej
+        #      wie, o który kraj chodzi;
+        #   3. nazwą kraju w treści posta („Polen", „Niemcy", „Deutschland");
+        #   4. PL, jeśli WCIĄŻ zostało więcej niż jeden kraj — bo tu jesteśmy
+        #      i taka jest większość postów, ale TYLKO gdy kroki 1-3 tego nie
+        #      rozstrzygnęły (inaczej to zgadywanie, nie rozstrzygnięcie);
+        #   5. pierwszym pozostałym trafieniem, z tego samego powodu co krok 4.
         #
-        # Krok 2 bywa zły i nie da się tego uniknąć bez wiedzy, której nie mamy
-        # — dlatego kraj ZAWSZE wchodzi do `nazwa` i widzi go operator, zanim
+        # Gdy PO WSZYSTKICH krokach kandydaci wciąż obejmują więcej niż jeden
+        # kraj, NIE zgadujemy: `zrodlo="miasto_niepewne"` — ta sama etykieta co
+        # przy niejednoznacznej nazwie miasta. Widoczne „?" jest bezpieczniejsze
+        # niż pewnie wyglądająca trasa do złego kraju — i tak jak przy nazwie,
+        # kraj ZAWSZE wchodzi do `nazwa`, żeby operator zobaczył wybór, zanim
         # wsiądzie do auta.
+        kandydaci = trafienia
         szukana = normalizuj_nazwe(miasto or "")
-        rekord = (next((r for r in trafienia
+        for kraje in (
+            _kraje_z_ksztaltu(kod),
+            {r["kraj"] for r in trafienia
+             if szukana and normalizuj_nazwe(r["miejscowosc"]) == szukana},
+            _kraje_z_nazw(tresc),
+        ):
+            if len({r["kraj"] for r in kandydaci}) == 1:
+                break
+            kandydaci = _przefiltruj_krajami(kandydaci, kraje)
+
+        kraje_kandydatow = {r["kraj"] for r in kandydaci}
+        niepewny_kraj = len(kraje_kandydatow) > 1
+        rekord = (next((r for r in kandydaci
                         if szukana and normalizuj_nazwe(r["miejscowosc"]) == szukana), None)
-                  or next((r for r in trafienia if r["kraj"] == "PL"), None)
-                  or trafienia[0])
+                  or next((r for r in kandydaci if r["kraj"] == "PL"), None)
+                  or kandydaci[0])
+        inne_kraje = ", ".join(sorted(kraje_kandydatow - {rekord["kraj"]}))
+        dopisek = f" — kod pasuje też do: {inne_kraje}" if niepewny_kraj else ""
         return Punkt(
             lat=rekord["lat"],
             lng=rekord["lng"],
-            zrodlo="kod",
-            nazwa=f"{rekord['miejscowosc']} {rekord['kod']} ({rekord['kraj']})".strip(),
+            zrodlo="miasto_niepewne" if niepewny_kraj else "kod",
+            nazwa=(f"{rekord['miejscowosc']} {rekord['kod']} ({rekord['kraj']})"
+                   + dopisek).strip(),
             kraj=rekord["kraj"],
         )
 
