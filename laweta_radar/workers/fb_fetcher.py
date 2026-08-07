@@ -422,18 +422,39 @@ def _alert_pula_proxy_wyczerpana(cfg: apify_proxy.ProxyConfig, log=print) -> Non
 # Próg żywych kluczy, poniżej którego pula jest o JEDNĄ awarię od zera.
 PROG_MIN_ZYWYCH_KLUCZY = 2
 
+# Trzy poziomy hałasu ALERT_DEGRADACJA_APIFY — patrz .env.example. Nieznana
+# wartość degraduje do "krytyczny", tak samo jak GATE_TRYB w workers/gate.py:
+# literówka w .env ma zawęzić hałas, nie otworzyć go na oścież.
+_TRYB_ALERTU_OFF = "off"
+_TRYB_ALERTU_KRYTYCZNY = "krytyczny"
+_TRYB_ALERTU_ZAWSZE = "zawsze"
+_TRYBY_ALERTU_DEGRADACJI = (_TRYB_ALERTU_OFF, _TRYB_ALERTU_KRYTYCZNY, _TRYB_ALERTU_ZAWSZE)
+
+
+def _tryb_alertu_degradacji() -> str:
+    """ALERT_DEGRADACJA_APIFY znormalizowany. Nieznana/pusta wartość -> "krytyczny"."""
+    s = settings.ALERT_DEGRADACJA_APIFY.strip().lower()
+    return s if s in _TRYBY_ALERTU_DEGRADACJI else _TRYB_ALERTU_KRYTYCZNY
+
 
 def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=print) -> None:
     """WCZESNE ostrzeżenie (run jedzie dalej — część kluczy jeszcze działa),
     nie awaria: operator ma się dowiedzieć, ZANIM pula spadnie do zera i
     zadziała `_alert_pula_wyczerpana`. Sekcja 5 zadania „samolecząca się pula":
 
-        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY
+        żywych kluczy < PROG_MIN_ZYWYCH_KLUCZY               [KRYTYCZNY powód]
         żywych proxy < liczba kluczy (mniej wyjść niż kont — korelacja rośnie)
         którykolwiek klucz oznaczony jako martwy (zwykle ban — wymaga człowieka)
 
     Best-effort: bez bazy funkcja nic nie robi (nie ma czego sprawdzić) —
     diagnostyka nie może zablokować runu, tak samo jak w `_alert_pula_wyczerpana`.
+
+    ALERT_DEGRADACJA_APIFY steruje WYŁĄCZNIE tym, czy powyższe budzi telefon —
+    stan puli trafia do logu przebiegu ZAWSZE (niezależnie od trybu) i jest
+    zawsze widoczny w /limity na żądanie. Przy modelu z pulą darmowych kont
+    martwe klucze są normalnym stanem pracy (rotacja sama je pomija), więc
+    domyślny tryb "krytyczny" budzi telefon TYLKO dla powodu, który realnie
+    zapowiada utratę zleceń — mało żywych kluczy.
     """
     conn = _polacz_best_effort()
     if conn is None:
@@ -453,18 +474,29 @@ def _alert_jesli_zdegradowana(tokeny_zywe: list[str], tokeny: list[str], log=pri
     finally:
         conn.close()
 
-    powody = []
+    # (opis, czy_krytyczny) — "krytyczny" znaczy: przetrwa filtr trybu "krytyczny".
+    powody: list[tuple[str, bool]] = []
     if len(tokeny_zywe) < PROG_MIN_ZYWYCH_KLUCZY:
-        powody.append(f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})")
+        powody.append((f"żywych kluczy: {len(tokeny_zywe)} (próg {PROG_MIN_ZYWYCH_KLUCZY})", True))
     if zywe_proxy is not None and zywe_proxy < len(tokeny):
-        powody.append(f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy")
+        powody.append((f"żywych proxy: {zywe_proxy} < {len(tokeny)} kluczy", False))
     if martwe:
-        powody.append(f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify")
+        powody.append((f"{len(martwe)} kluczy martwych (401) — sprawdź konta w Apify", False))
     if not powody:
         return
 
-    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(powody)}.")
-    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in powody)
+    opisy = [p for p, _ in powody]
+    # Log przebiegu widzi PEŁNY stan ZAWSZE, niezależnie od ALERT_DEGRADACJA_APIFY
+    # — wyciszamy Telegram, nie diagnostykę (ta sama zasada co przy /limity).
+    log(f"[{KTO}] UWAGA: pula Apify zdegradowana — {'; '.join(opisy)}.")
+
+    tryb = _tryb_alertu_degradacji()
+    if tryb == _TRYB_ALERTU_OFF:
+        return
+    if tryb == _TRYB_ALERTU_KRYTYCZNY and not any(krytyczny for _, krytyczny in powody):
+        return
+
+    tekst = ("⚠️ *Pula Apify zdegradowana*\n\n" + "\n".join(f"• {p}" for p in opisy)
             + "\n\nSprawdź /limity na Telegramie.")
     try:
         from laweta_radar.services import telegram_notify  # noqa: PLC0415 — leniwie, jak _powiadom

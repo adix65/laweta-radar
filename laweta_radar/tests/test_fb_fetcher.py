@@ -1006,7 +1006,11 @@ def test_degradacja_alertuje_gdy_mniej_niz_dwa_zywe_klucze(monkeypatch):
     assert any("UWAGA" in linia for linia in logi)
 
 
-def test_degradacja_alertuje_gdy_martwy_klucz(monkeypatch):
+def test_degradacja_martwy_klucz_sam_nie_budzi_telefonu_domyslnie(monkeypatch):
+    """Domyślny tryb "krytyczny": martwy klucz sam w sobie to normalny stan
+    rotacji (patrz ALERT_DEGRADACJA_APIFY w .env.example) — trafia do logu,
+    ale NIE budzi telefonu. Trzy żywe klucze (>= próg), więc jedynym powodem
+    jest tu klucz martwy."""
     from laweta_radar.services import telegram_notify
 
     wyslane = []
@@ -1017,15 +1021,83 @@ def test_degradacja_alertuje_gdy_martwy_klucz(monkeypatch):
         lambda conn, tokeny: {"t3": {"status": f.apify_keys.STATUS_KLUCZ_MARTWY}})
     monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
                         lambda: type("Cfg", (), {"pool": ()})())
-    # trzy żywe (>= próg), więc TYLKO klucz martwy ma wywołać alert
+    logi = []
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("martwych" in linia for linia in logi)   # diagnostyka w logu przebiegu, zawsze
+
+
+def test_degradacja_mniej_proxy_niz_kluczy_sam_nie_budzi_telefonu_domyslnie(monkeypatch):
+    """Jak wyżej, dla powodu „mniej żywych proxy niż kluczy" — w trybie
+    domyślnym ("krytyczny") sam z siebie nie wysyła Telegrama, tylko loguje."""
+    from laweta_radar.services import telegram_notify
+
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ("p1", "p2", "p3")})())
+    monkeypatch.setattr(f.apify_proxy, "wczytaj_stan_proxy",
+                        lambda conn, urls: {"p1": {"status": "kwarantanna"},
+                                            "p2": {"status": "kwarantanna"}})
+    # 3 proxy w puli, 2 w kwarantannie -> 1 żywe, mniej niż 3 klucze
+    logi = []
+    f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("żywych proxy" in linia for linia in logi)
+
+
+def test_degradacja_tryb_zawsze_przywraca_alert_na_martwy_klucz(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=zawsze to zachowanie sprzed przełącznika: każdy
+    powód, także sam martwy klucz, budzi telefon."""
+    from laweta_radar.services import telegram_notify
+
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "zawsze")
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(
+        f.apify_keys, "wczytaj_stany",
+        lambda conn, tokeny: {"t3": {"status": f.apify_keys.STATUS_KLUCZ_MARTWY}})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
     f._alert_jesli_zdegradowana(["t1", "t2", "t3"], ["t1", "t2", "t3"], log=lambda *a: None)
     assert len(wyslane) == 1
     assert "martwych" in wyslane[0]
 
 
-def test_degradacja_alertuje_gdy_mniej_proxy_niz_kluczy(monkeypatch):
+def test_degradacja_tryb_off_wycisza_nawet_powod_krytyczny(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=off: nawet "żywych kluczy < 2" (jedyny powód,
+    który przetrwałby "krytyczny") nie idzie na Telegram — ale log przebiegu
+    i tak dostaje pełny stan, bo wyciszamy brzęczenie, nie diagnostykę."""
     from laweta_radar.services import telegram_notify
 
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "off")
+    wyslane = []
+    monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
+    monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
+    monkeypatch.setattr(f.apify_keys, "wczytaj_stany", lambda conn, tokeny: {})
+    monkeypatch.setattr(f.apify_proxy, "load_proxy_config",
+                        lambda: type("Cfg", (), {"pool": ()})())
+    logi = []
+    f._alert_jesli_zdegradowana(["t1"], ["t1", "t2", "t3"], log=logi.append)
+    assert wyslane == []
+    assert any("UWAGA" in linia and "żywych kluczy" in linia for linia in logi)
+
+
+def test_degradacja_wartosc_nieznana_degraduje_do_krytyczny(monkeypatch):
+    """Literówka w ALERT_DEGRADACJA_APIFY ma zawęzić hałas, nie otworzyć go
+    na oścież — degraduje do "krytyczny", tak jak GATE_TRYB."""
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "cos-innego")
+    assert f._tryb_alertu_degradacji() == "krytyczny"
+
+
+def test_degradacja_tryb_zawsze_przywraca_alert_na_mniej_proxy(monkeypatch):
+    """ALERT_DEGRADACJA_APIFY=zawsze: zachowanie sprzed przełącznika."""
+    from laweta_radar.services import telegram_notify
+
+    monkeypatch.setattr(f.settings, "ALERT_DEGRADACJA_APIFY", "zawsze")
     wyslane = []
     monkeypatch.setattr(telegram_notify, "wyslij", lambda tekst: wyslane.append(tekst) or 1)
     monkeypatch.setattr(f, "_polacz_best_effort", lambda: _FakeConnDB())
