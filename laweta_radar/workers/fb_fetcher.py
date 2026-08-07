@@ -1488,6 +1488,69 @@ def _jedna_linia(e: BaseException, n: int = 200) -> str:
     return f"{type(e).__name__}: {' '.join(str(e).split())[:n]}"
 
 
+def _doganiaj_kierunek_geo(log=print) -> None:
+    """Domyka zaległość `odbior_kraj`/`dostawa_kraj`/`kierunek_geo` W KAŻDYM
+    przebiegu — ta sama pętla sprzątająca co naprawa ekstrakcji (`naprawione`
+    w `run()`), tylko bez czekania, aż Apify pokaże post jeszcze raz.
+
+    PO CO ODDZIELNIE OD `do_naprawy`. Naprawa ekstrakcji działa na postach,
+    które fetcher I TAK zobaczył w tym przebiegu (Apify je zwrócił) — nie ma
+    jak nią naprawić wiersza sprzed tygodni, bo grupy oddają tylko najnowsze
+    posty. Kolumny geo są inne: liczą się WYŁĄCZNIE z miast/kodów już
+    zapisanych w wierszu (`geo.geokoduj`, offline), więc backfill nie
+    potrzebuje ani Apify, ani modelu — może przeliczać całą historię, jedno
+    zapytanie SQL na przebieg, za darmo. Migracja 0013 zostawiła 134 takie
+    wiersze; bez tego haka jedyną drogą do ich naprawy byłoby pamiętanie
+    o ręcznym odpaleniu `scripts/uzupelnij_kierunek_geo.py`.
+
+    WZORZEC DLA KOLEJNYCH MIGRACJI: każda następna migracja, która dokłada
+    kolumnę liczoną z danych JUŻ w bazie (nie z nowego wywołania Apify ani
+    modelu), ma dostać analogiczny hak tutaj — funkcja czytająca do
+    `KIERUNEK_GEO_BACKFILL_LIMIT` wierszy i wołana z tego samego miejsca
+    w `run()`. System ma sam nadganiać zaległości; jednorazowy skrypt
+    (jak `uzupelnij_kierunek_geo.py`) zostaje wyłącznie jako narzędzie do
+    NATYCHMIASTOWEGO przeliczenia całej historii zaraz po migracji.
+
+    PONOWNE UŻYCIE, NIE KOPIA: `wiersze_do_przeliczenia`/`przelicz` importujemy
+    z `scripts/uzupelnij_kierunek_geo.py` zamiast przepisywać tu SQL i wywołanie
+    geokodera — druga kopia tej samej reguły rozjechałaby się przy pierwszej
+    zmianie geokodera (patrz nota w tamtym module).
+
+    BEST-EFFORT, jak reszta diagnostyki/samoleczenia w tym pliku: błąd tutaj
+    nie ma prawa zablokować pobierania, za które już zapłaciliśmy Apify.
+    """
+    limit = settings.KIERUNEK_GEO_BACKFILL_LIMIT
+    if limit <= 0:
+        return
+    from laweta_radar.scripts import uzupelnij_kierunek_geo as geo_backfill  # noqa: PLC0415
+
+    conn = _polacz_best_effort()
+    if conn is None:
+        return
+    try:
+        wiersze = geo_backfill.wiersze_do_przeliczenia(conn, limit)
+        if not wiersze:
+            return
+        policzone: dict[str, int] = {}
+        bledy = 0
+        for wiersz in wiersze:
+            try:
+                kierunek = geo_backfill.przelicz(conn, wiersz)
+                policzone[kierunek] = policzone.get(kierunek, 0) + 1
+            except Exception as e:  # noqa: BLE001 — jeden wiersz nie psuje reszty
+                bledy += 1
+                conn.rollback()
+                log(f"[{KTO}] kierunek_geo: {wiersz[0]}: {_jedna_linia(e)}")
+        rozklad = ", ".join(f"{k}={v}" for k, v in sorted(policzone.items()))
+        bledy_txt = f", {bledy} błędów" if bledy else ""
+        log(f"[{KTO}] doliczono kierunek_geo w {sum(policzone.values())} "
+            f"wierszach sprzed migracji 0013 ({rozklad}){bledy_txt}.")
+    except Exception as e:  # noqa: BLE001 — backfill to usprawnienie, nie warunek runu
+        log(f"[{KTO}] nie policzyłem zaległości kierunek_geo: {_jedna_linia(e)}")
+    finally:
+        conn.close()
+
+
 def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
         sucho: bool = False, nadpisanie_limitu: int | None = None,
         log=print) -> int:
@@ -1598,6 +1661,15 @@ def run(*, budzet: int | None = None, tylko_grupa: str | None = None,
     if sucho:
         log(f"[{KTO}] --sucho: nie wołam actora. Nic nie wydano.")
         return 0
+
+    # Backfill kierunek_geo/odbior_kraj/dostawa_kraj — NIEZALEŻNIE od budżetu
+    # i planu pobierania niżej: to zapytanie do bazy, zero Apify, więc ma się
+    # wykonać w KAŻDYM realnym przebiegu, także takim, w którym sufit dobowy
+    # jest wyczerpany i `plan.do_pobrania` zaraz każe wyjść. Patrz
+    # `_doganiaj_kierunek_geo` i `KIERUNEK_GEO_BACKFILL_LIMIT`.
+    if baza_gotowa:
+        _doganiaj_kierunek_geo(log=log)
+
     if not plan.do_pobrania:
         # Nie jest to błąd — to normalny wynik przy gęstym cronie i rzadkich
         # grupach. Ale gdy powodem jest wyczerpany budżet, musi być to widać

@@ -607,7 +607,8 @@ laweta_radar/
     raport_gate.py     # rozliczenie trybu cienia bramki
     raport_feedback.py # co operator odrzucił i co model o tym sądził
     uzupelnij_klasyfikacje.py # dopisuje ekstrakcję wierszom, które ją zgubiły
-    uzupelnij_kierunek_geo.py # jednorazowy backfill kraju/kierunku dla starych wierszy
+    uzupelnij_kierunek_geo.py # ręczne przeliczenie kraju/kierunku bez limitu —
+                               # fetcher domyka resztę sam, patrz KIERUNEK_GEO_BACKFILL_LIMIT
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames
@@ -1373,6 +1374,7 @@ pm2 restart laweta-api laweta-bot
 | zlecenia są, alertów zero | log fetchera — linia `UWAGA: N zleceń i ANI JEDNEGO wysłanego alertu` |
 | zlecenie bez typu, miasta i telefonu | log fetchera — `OSTRZEŻENIE: post <fb_id> ma w bazie werdykt modelu i ZERO pól z ekstrakcji` |
 | jak odzyskać stare zlecenia bez ekstrakcji | `python laweta_radar/scripts/uzupelnij_klasyfikacje.py --sucho` |
+| ile wierszy jeszcze czeka na kierunek_geo | fetcher domyka do `KIERUNEK_GEO_BACKFILL_LIMIT`/przebieg sam; przelicz resztę naraz: `python laweta_radar/scripts/uzupelnij_kierunek_geo.py --sucho` |
 | czy powiadomienia nie są wyciszone | `/stop` czy `/start` — ostatni wpis w tabeli `powiadomienia` |
 | które grupy wyrzucić z konfiguracji | `curl -s localhost:8002/statystyki` albo `/statystyki` w panelu |
 | co operator odrzucił i czemu model się mylił | `python laweta_radar/scripts/raport_feedback.py` |
