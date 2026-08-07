@@ -269,6 +269,73 @@ def test_ostatnie_pokazuje_odleglosc_autora_gdy_trasy_nie_znamy(geo_pod_krosnem)
     assert "wg autora: 490 km" in tekst
 
 
+# ---------------------------------------------------------------------------
+# /wyjazdy /przywozy /krajowe /tranzyt
+# ---------------------------------------------------------------------------
+def test_komendy_kierunku_routing(monkeypatch):
+    """Cztery komendy, jedna funkcja — routing przekazuje właściwy kierunek
+    i domyślną albo podaną liczbę godzin, tak jak `/ostatnie` przekazuje `ile`."""
+    zapamietane = []
+    monkeypatch.setattr(
+        bot, "_lista_kierunku",
+        lambda conn, kierunek, tytul, godziny: zapamietane.append((kierunek, godziny)) or "ok")
+    bot.obsluz_komende(_Polaczenie(), "/wyjazdy")
+    bot.obsluz_komende(_Polaczenie(), "/przywozy 48")
+    bot.obsluz_komende(_Polaczenie(), "/krajowe dużo")   # śmieć -> domyślna
+    bot.obsluz_komende(_Polaczenie(), "/tranzyt@laweta_bot 6")
+    assert zapamietane == [
+        (bot.geo.KIERUNEK_WYJAZD, bot.DOMYSLNIE_GODZIN_KIERUNKU),
+        (bot.geo.KIERUNEK_PRZYWOZ, 48),
+        (bot.geo.KIERUNEK_KRAJOWY, bot.DOMYSLNIE_GODZIN_KIERUNKU),
+        (bot.geo.KIERUNEK_TRANZYT, 6),
+    ]
+
+
+@pytest.fixture
+def geo_pl_de(tmp_path):
+    """Krosno (PL) i Köln (DE) — starcza do policzenia wyjazdu i przywozu."""
+    plik = tmp_path / "kody.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "PL,38-400,Krosno,podkarpackie,49.6886,21.7706\n"
+        "DE,50667,Koln,Nordrhein-Westfalen,50.9375,6.9603\n",
+        encoding="utf-8")
+    bot.geo.zaladuj(plik)
+    yield
+    bot.geo.zaladuj()
+
+
+def _wiersz_kierunku(fb_id="fb1", post_url="https://fb.com/p/1", status="nowe",
+                     o_kod="38-400", o_miasto="Krosno",
+                     d_kod="50667", d_miasto="Koln", tresc="laweta z Krosna do Kolonii") -> tuple:
+    return (fb_id, post_url, status, o_kod, o_miasto, d_kod, d_miasto, tresc)
+
+
+def test_lista_kierunku_pokazuje_trase_km_cene_i_link(geo_pl_de):
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(1,), _wiersz_kierunku()]), bot.geo.KIERUNEK_WYJAZD,
+        "🧭 Wyjazdy z Polski", 24)
+    assert "Krosno" in tekst and "Koln" in tekst
+    assert "km" in tekst
+    assert "zł" in tekst
+    assert "https://fb.com/p/1" in tekst
+
+
+def test_lista_kierunku_pusta(geo_pl_de):
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(0,)]), bot.geo.KIERUNEK_WYJAZD, "🧭 Wyjazdy z Polski", 24)
+    assert "brak" in tekst.lower()
+
+
+def test_lista_kierunku_liczy_pominiete_dokladnie(geo_pl_de):
+    """`razem` z osobnego COUNT, nie `len(wiersze)` po limicie — inaczej liczba
+    pominiętych zgadywałaby się z tego, co akurat zmieściło się w limicie."""
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(3,), _wiersz_kierunku(fb_id="fb1"), _wiersz_kierunku(fb_id="fb2")]),
+        bot.geo.KIERUNEK_WYJAZD, "🧭 Wyjazdy z Polski", 24)
+    assert "1 pominiętych" in tekst
+
+
 def test_stop_wlacza_pauze():
     conn = _Polaczenie([None])           # brak wpisu = pauza nieaktywna
     odp = bot.obsluz_komende(conn, "/stop")

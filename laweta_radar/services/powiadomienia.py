@@ -137,6 +137,22 @@ PILNOSC = {
     "elastycznie": ("🗓", "ELASTYCZNIE"),
 }
 
+# Znacznik kierunku geograficznego, tuż obok kilometrów w pierwszej linii
+# (`_linia_pilnosci`) — wyjazd i przywóz to dla przewoźnika DWA RÓŻNE PRODUKTY
+# (patrz podpowiedź o ładunku powrotnym w `zbuduj_tresc`), więc różnica ma być
+# widoczna w tym samym rzucie oka, co sama trasa. "krajowy" i "tranzyt"
+# pokazujemy też — operator ma wiedzieć, że
+# oba końce leżą w tym samym kraju albo że żaden nie leży w Polsce, zamiast się
+# tego domyślać z nazw miast. `geo.KIERUNEK_NIEZNANY` celowo BEZ wpisu: przy
+# nierozpoznanym punkcie i tak stoi ostrzeżenie z `_linia_brakow` — druga
+# etykieta obok niego byłaby szumem, nie informacją.
+ZNACZNIKI_KIERUNKU = {
+    geo.KIERUNEK_WYJAZD: "WYJAZD",
+    geo.KIERUNEK_PRZYWOZ: "PRZYWÓZ",
+    geo.KIERUNEK_KRAJOWY: "KRAJOWY",
+    geo.KIERUNEK_TRANZYT: "TRANZYT",
+}
+
 # Znacznik języka pokazujemy TYLKO dla obcych. Wynika to z docs/WIELOJEZYCZNOSC.md:
 # alert niesie znacznik, bo od niego zależy, w jakim języku operator ma oddzwonić
 # — a wszystkie pozostałe pola są już po polsku, więc sam post tego nie zdradzi.
@@ -295,6 +311,14 @@ def _linia_pilnosci(zlecenie: dict, pods: dict) -> str:
     ikona, etykieta = PILNOSC.get(str(zlecenie.get("pilnosc") or "").lower(),
                                   ("🔧", "ZLECENIE"))
     czesci = [f"{ikona} {etykieta}"]
+    # Znacznik kierunku TUŻ PRZED kilometrami — "WYJAZD · 780 km", nie gdzieś
+    # dalej w wiadomości. Brak wpisu w `ZNACZNIKI_KIERUNKU` (kierunek nieznany)
+    # pomijamy: to zawsze pokrywa się z `km is None` niżej, bo oba potrzebują
+    # obu końców trasy rozpoznanych — ostrzeżenie o tym już daje `trasa
+    # nieustalona`, druga etykieta o tym samym braku byłaby powtórką.
+    znacznik_kierunku = ZNACZNIKI_KIERUNKU.get(pods.get("kierunek_geo"))
+    if znacznik_kierunku:
+        czesci.append(znacznik_kierunku)
     km = pods["km_trasy"]
     if km is None:
         czesci.append("trasa nieustalona")
@@ -447,6 +471,15 @@ def zbuduj_tresc(zlecenie: dict, pods: dict | None = None,
     # Bez tej linii operator dzwoni do konkurencji, żeby zaproponować jej kurs.
     if str(zlecenie.get("kierunek") or "") == gate.KIERUNEK_OFERTA:
         linie.append(esc("🔁 OFERTA PRZEWOŹNIKA — cudze wolne miejsce, nie zlecenie"))
+    # PODPOWIEDŹ O ŁADUNKU POWROTNYM z tego samego powodu co obie linie wyżej:
+    # wyjazd z Polski to dla przewoźnika INNY PRODUKT niż przywóz — trzeba go
+    # połączyć z czymś na drogę powrotną, inaczej pusty powrót zjada marżę.
+    # Tylko przy "wyjazd" (`ZNACZNIKI_KIERUNKU` już pokazał to w nagłówku,
+    # tutaj chodzi o to, co z tym zrobić) — przywóz i kurs krajowy nie mają tego
+    # problemu, a tranzyt tym bardziej nie jest nasz do rozwiązania.
+    if pods.get("kierunek_geo") == geo.KIERUNEK_WYJAZD:
+        linie.append(esc("↩️ wyjazd z Polski — warto poszukać ładunku powrotnego, "
+                         "pusty powrót zjada marżę"))
     linie.append("")
     trasa = _linia_trasy(zlecenie, odbior, dostawa, pods)
     if trasa:

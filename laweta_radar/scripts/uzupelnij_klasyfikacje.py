@@ -76,7 +76,7 @@ def napraw(conn, wiersz: tuple) -> bool:
     """
     fb_id, tresc, grupa, jezyk = wiersz
     wynik = classifier.klasyfikuj(tresc or "", grupa or "", jezyk or "")
-    dane = classifier.wiersz_do_zapisu(wynik, fb_id)
+    dane = classifier.wiersz_do_zapisu(wynik, fb_id, tresc=tresc)
     with conn.cursor() as cur:
         cur.execute(classifier.SQL_ZAPIS, dane)
     conn.commit()

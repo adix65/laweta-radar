@@ -40,6 +40,11 @@ router = APIRouter(prefix="/zlecenia", tags=["zlecenia"],
 # naczelna repo.
 STATUSY = ("nowe", "dzwonie", "wygrane", "przegrane", "smiec")
 
+# Wartości `kierunek_geo` — z `geo.py`, nie przepisane tutaj: druga lista tych
+# samych pięciu stringów rozjechałaby się przy pierwszym dopisanym kierunku.
+KIERUNKI_GEO = (geo.KIERUNEK_PRZYWOZ, geo.KIERUNEK_WYJAZD, geo.KIERUNEK_KRAJOWY,
+                geo.KIERUNEK_TRANZYT, geo.KIERUNEK_NIEZNANY)
+
 # Kolumny czytane do listy. Wypisane jawnie, nie `SELECT *`: kolejna migracja
 # doda kolumnę, a lista zleceń pobierana co 30 s przez telefon w zasięgu LTE
 # nie ma powodu wozić pełnej treści posta dla stu rekordów.
@@ -120,6 +125,12 @@ def _rekord(wiersz: dict, *, zwroc_tresc: bool = True) -> dict:
         # „gdzieś", nieodróżnialną wzrokowo od pewnej.
         "lat": odbior.lat if odbior else None,
         "lng": odbior.lng if odbior else None,
+        # Kierunek geograficzny liczony NA ŻYWO tym samym `geo.podsumowanie`,
+        # co kilometry — nie z kolumny `kierunek_geo` w wierszu. Kolumna
+        # istnieje do FILTROWANIA w SQL-u (patrz `lista()` niżej), a wartość
+        # w odpowiedzi ma być tym samym, co pokazałby świeży przelicz, nawet
+        # dla wiersza sprzed backfillu (`scripts/uzupelnij_kierunek_geo.py`).
+        "kierunek_geo": pods["kierunek_geo"],
     })
     return dane
 
@@ -132,6 +143,9 @@ def lista(
     do: date | None = Query(default=None, description="posty do tej daty włącznie"),
     max_km: int | None = Query(default=None, ge=0,
                                description="filtr operatora, NIE próg systemu"),
+    kierunek_geo: str | None = Query(
+        default=None,
+        description="przywoz|wyjazd|krajowy|tranzyt|nieznany; bez podania — wszystkie"),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> dict:
     """Lista zleceń, najnowsze u góry.
@@ -150,6 +164,12 @@ def lista(
     w bazie i nie ma ich tam z premedytacją: zależą od `BAZA_LAT/BAZA_LON`, które
     operator może zmienić (przeprowadzka, druga baza), a kolumna z kilometrami
     stałaby się wtedy cicho nieprawdziwa dla całej historii.
+
+    `kierunek_geo` filtruje WPROST W SQL-U, w odróżnieniu od `max_km`: kraj obu
+    końców trasy nie zależy od konfiguracji operatora, więc kolumna w bazie
+    (`0013_kierunek_geo.sql`) jest stabilna i można na niej filtrować bez
+    doliczania geografii najpierw. WYMIAR DO FILTROWANIA, nie próg — bez tego
+    parametru wracają zlecenia WSZYSTKICH kierunków, tak jak dziś.
     """
     warunki = ["czy_zlecenie"]
     parametry: list = []
@@ -165,6 +185,15 @@ def lista(
     if do:
         warunki.append("COALESCE(opublikowany_at, pobrany_at) < %s::date + 1")
         parametry.append(do)
+    if kierunek_geo:
+        if kierunek_geo not in KIERUNKI_GEO:
+            raise HTTPException(400, f"nieznany kierunek_geo {kierunek_geo!r}; "
+                                     f"dozwolone: {', '.join(KIERUNKI_GEO)}")
+        # NULL = nikt jeszcze nie liczył (sprzed 0013 / przed backfillem) —
+        # traktowane jak "nieznany", zgodnie z komentarzem w migracji.
+        warunki.append("COALESCE(kierunek_geo, %s) = %s")
+        parametry.append(geo.KIERUNEK_NIEZNANY)
+        parametry.append(kierunek_geo)
 
     # Przy aktywnym `max_km` bierzemy z bazy zapas, bo odsiew dzieje się dopiero
     # po policzeniu geografii — inaczej filtr „do 50 km" przy limicie 50 potrafiłby
@@ -300,6 +329,7 @@ def _sprawdz_migracje(conn) -> None:
         ({"notatka", "cena_koncowa", "status_at"}, "0005_panel.sql"),
         ({"kategoria_ladunku"}, "0010_kategoria_ladunku.sql"),
         ({"kierunek"}, "0011_kierunek.sql"),
+        ({"kierunek_geo"}, "0013_kierunek_geo.sql"),
     ):
         brak = potrzebne - kolumny
         if brak:
