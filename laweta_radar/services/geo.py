@@ -27,10 +27,21 @@ jest gorsza niż jej brak: brak widać, złej liczby nie.
 `zrodlo` W KAŻDYM PUNKCIE JEST CZĘŚCIĄ PRODUKTU, nie diagnostyką. Wartość
 "miasto_niepewne" znaczy „w Polsce jest kilkanaście miejscowości o tej nazwie
 i wybraliśmy największą" — ALBO „kod pocztowy po zdjęciu separatorów pasuje do
-kilku krajów naraz i żaden sygnał go nie rozstrzygnął" (patrz `geokoduj`,
-`_kraje_z_ksztaltu`: polska Skwierzyna „66-449" i czeskie Ostopovice pod Brnem
-„664 49" dają identyczne „66449"). To MUSI trafić do interfejsu: operator ma
-zobaczyć, że lokalizacja jest zgadywana, ZANIM pojedzie 60 km — albo 300.
+kilku krajów, KTÓRE OBA SĄ W BAZIE naraz, i żaden sygnał tego nie rozstrzygnął"
+(patrz `geokoduj`, `_kraje_z_ksztaltu`: polska Dębica „39-200" i niemiecki kod
+spod Magdeburga „39200" dają identyczne „39200"). To MUSI trafić do interfejsu:
+operator ma zobaczyć, że lokalizacja jest zgadywana, ZANIM pojedzie 60 km —
+albo 300.
+
+TO NIE JEST TO SAMO, co kod, którego kształt zapisu WSKAZUJE kraj, a baza pod
+zdartym z separatorów kluczem zna WYŁĄCZNIE inny kraj — polska Skwierzyna
+„66-449" i czeskie Ostopovice pod Brnem „664 49" dają identyczne „66449", ale
+gdy baza NIE MA polskiego wpisu pod tym kluczem (bo Skwierzyna siedzi w pliku
+pod innym kodem), to nie jest kolizja do rozstrzygnięcia — to brak dopasowania
+w kraju, o którym kształt zapisu już powiedział. Tu WYNIK JEST `None`, nie
+niepewny punkt: kod z cudzego kraju jest ZAWSZE błędną odpowiedzią, nawet gdy
+cyfry pasują, i pokazanie go choćby z etykietą „niepewne" nadal wysyła
+kierowcę 300 km pod zły adres z gotową trasą i ceną na ekranie.
 
 ZERO WYWOŁAŃ SIECIOWYCH. Moduł czyta jeden plik CSV przy pierwszym użyciu
 i dalej działa z pamięci. Bazę pobiera osobno `scripts/pobierz_geo.py`.
@@ -82,17 +93,27 @@ class Punkt:
                             co do kraju (kształtem zapisu, miastem albo treścią
                             posta — patrz `geokoduj`), najpewniejsze;
       "miasto"            — nazwa miasta jednoznaczna w bazie (także wtedy, gdy
-                            jednoznaczność dał kraj wyczytany z treści posta);
+                            jednoznaczność dał kraj wyczytany z treści posta,
+                            albo gdy do niej trafiliśmy z kodu, którego kraj był
+                            znany, ale sam kod nie miał w tym kraju dopasowania
+                            — patrz "fallback nazwą" w `geokoduj`);
       "miasto_niepewne"   — DWA przypadki, ta sama etykieta, bo oba znaczą to
                             samo dla operatora („wynik powstał, ale zgadnięty"):
                               • nazwa miejscowości niejednoznaczna — wzięliśmy
                                 największą o tej nazwie;
                               • KOD POCZTOWY po zdjęciu separatorów pasuje do
-                                kilku krajów naraz ("66-449" PL i "664 49" CZ
-                                dają jedno "66449") i ani kształt zapisu, ani
-                                miasto, ani treść posta nie rozstrzygnęły,
-                                o który kraj chodzi.
-                            POKAŻ TO OPERATOROWI;
+                                kilku krajów, KTÓRE OBA SĄ W BAZIE pod tym samym
+                                kluczem ("39-200" PL i "39200" DE dają jedno
+                                "39200", oba realne wpisy) i ani kształt zapisu,
+                                ani miasto, ani treść posta nie rozstrzygnęły,
+                                o który z NICH chodzi.
+                            POKAŻ TO OPERATOROWI. TO NIE obejmuje przypadku, gdy
+                            kształt zapisu wskazuje kraj, a baza pod tym kluczem
+                            zna WYŁĄCZNIE inny kraj (polskie „66-449" i czeskie
+                            „664 49" też dają „66449", ale gdy baza nie ma pod
+                            nim polskiego wpisu) — tam `geokoduj` nie zwraca
+                            PUNKTU w ogóle (`None`), bo kod z cudzego kraju jest
+                            błędną odpowiedzią, nie niepewną;
       "miasto_odmienione" — nazwa z posta była formą odmienioną („Kielc",
                             „Katowic") i dopasowała się dopiero prefiksem.
                             Traktowana jak "miasto_niepewne";
@@ -566,47 +587,79 @@ def geokoduj(kod: str | None, miasto: str | None,
 
     Kolejność prób jest kolejnością PEWNOŚCI:
       1. kod pocztowy — dopasowanie po kluczu bez separatorów, `zrodlo="kod"`.
-         Gdy pod tym kluczem siedzi więcej niż jeden kraj naraz (patrz niżej),
-         rozstrzygamy KSZTAŁTEM zapisu, potem miastem, potem krajem z treści —
-         a gdy i to nie rozstrzygnie, wynik i tak powstaje, ale oznaczony jako
+         Gdy KSZTAŁT zapisu wskazuje kraj jednoznacznie (patrz niżej) i baza
+         pod tym kluczem NIE MA żadnego rekordu z tego kraju, kod traktujemy
+         jak nietrafiony — NIGDY nie oddajemy rekordu z kraju, którego kształt
+         wykluczył — i próba spada do kroku 2, ograniczona do tego samego
+         kraju. Gdy pod kluczem siedzi więcej niż jeden kraj NAPRAWDĘ w bazie,
+         rozstrzygamy miastem, potem krajem z treści — a gdy i to nie
+         rozstrzygnie, wynik i tak powstaje, ale oznaczony jako
          `zrodlo="miasto_niepewne"`, tak samo jak niejednoznaczna nazwa;
       2. nazwa miasta — po normalizacji; forma odmieniona („Kielc", „Katowic")
          łapie się prefiksem i wychodzi jako `zrodlo="miasto_odmienione"`.
-         Przy nazwie z wielu krajów kolejność rozstrzygania:
+         Gdy krok 1 ustalił kraj kształtem zapisu, ale nie miał w nim
+         dopasowania kodu, wyszukiwanie nazwy jest ograniczone do TEGO kraju
+         (fallback: kod „66-449" bez wpisu w PL, ale „Skwierzyna" w treści —
+         nazwa i tak trafia w polską miejscowość). Przy nazwie z wielu krajów
+         (bez takiego ograniczenia) kolejność rozstrzygania:
            a) kraj z kodu pocztowego stojącego w treści posta,
            b) kraj z nazwy kraju w treści („Niemcy", „Deutschland", „Czechy"),
            c) największa populacja — wynik oznaczony `zrodlo="miasto_niepewne"`,
            d) populacje porównywalne -> None;
       3. brak -> None. BEZ ZGADYWANIA: null jest lepszy niż zła współrzędna,
-         bo zła współrzędna wyśle człowieka 80 km w złą stronę.
+         bo zła współrzędna wyśle człowieka 80 km w złą stronę — albo, jak przy
+         kodzie z cudzego kraju pod tym samym kluczem, kilkaset.
     """
     po_kodzie, po_nazwie = _indeksy()
 
     # --- 1. kod pocztowy ---
+    # `wymuszony_kraj` niesie ustalenie z tego kroku do kroku 2, TYLKO gdy krok
+    # 1 nie oddał punktu: kształt zapisu wskazał kraj jednoznacznie, ale kod w
+    # TYM kraju nie istnieje w bazie — więc nazwa miasta (krok 2) ma prawa
+    # szukać WYŁĄCZNIE w nim, nie gdziekolwiek indziej pod tą samą nazwą.
+    wymuszony_kraj: set[str] = set()
     klucz = normalizuj_kod(kod)
-    if klucz and klucz in po_kodzie:
-        trafienia = po_kodzie[klucz]
+    trafienia = po_kodzie.get(klucz) if klucz else None
+    if trafienia:
         # KOLIZJE MIĘDZY KRAJAMI SĄ REALNE, nie teoretyczne — bo klucz w bazie
         # jest kodem BEZ SEPARATORÓW: polska Dębica „39-200" i niemiecki kod
-        # spod Magdeburga „39200" dają jedno „39200" (700 km różnicy); polska
-        # Skwierzyna „66-449" i czeskie Ostopovice pod Brnem „664 49" dają
-        # jedno „66449" (kolejne kilkaset km). Rozstrzygamy w krokach, od
-        # najpewniejszego, ZAWĘŻAJĄC `kandydaci` do kraju, o którym się
-        # dowiemy — `_przefiltruj_krajami` NIGDY nie odrzuca WSZYSTKICH
-        # naraz, bo sygnał, który nie pasuje do żadnego kandydata, o TYM
-        # kodzie nic nie mówi (może dotyczyć drugiego końca trasy):
+        # spod Magdeburga „39200" dają jedno „39200" (700 km różnicy).
         #
-        #   1. KSZTAŁTEM ZAPISU — separator JEST nośnikiem informacji o kraju
-        #      (myślnik po dwóch cyfrach = PL, spacja po trzech = CZ/SK) i
-        #      trzeba go przeczytać z ORYGINALNEGO `kod`, ZANIM `normalizuj_kod`
-        #      go zetrze — to zdarcie separatora miesza kraje w jeden klucz;
-        #   2. nazwą miasta, jeśli przyszła razem z kodem — to ona najlepiej
+        # KSZTAŁT ZAPISU jest INNYM RODZAJEM sygnału niż miasto i treść posta:
+        # miasto/treść mogą mówić o DRUGIM końcu trasy, więc mylny sygnał stamtąd
+        # ignorujemy (`_przefiltruj_krajami` nigdy nie kasuje WSZYSTKICH
+        # kandydatów). Kształt nie ma tej wymówki — mówi WYŁĄCZNIE o kodzie,
+        # który właśnie sprawdzamy (myślnik po dwóch cyfrach = PL, spacja po
+        # trzech = CZ/SK), więc rozstrzyga TWARDO: polska Skwierzyna „66-449" i
+        # czeskie Ostopovice pod Brnem „664 49" dają to samo „66449", ale gdy
+        # baza pod tym kluczem zna WYŁĄCZNIE Ostopovice (bo Skwierzyna w pliku
+        # siedzi pod innym kodem — to REALNY kształt eksportu GeoNames, nie
+        # teoria), czeski rekord NIE JEST odpowiedzią na pytanie o polski kod,
+        # choćby był jedynym trafieniem pod tym kluczem. Traktujemy to jak
+        # `klucz not in po_kodzie` i próbujemy dalej krokiem 2, w kraju, o
+        # którym już wiemy z kształtu.
+        kraj_ksztaltu = _kraje_z_ksztaltu(kod)
+        if kraj_ksztaltu:
+            zgodne_z_ksztaltem = [r for r in trafienia if r["kraj"] in kraj_ksztaltu]
+            if zgodne_z_ksztaltem:
+                trafienia = zgodne_z_ksztaltem
+            else:
+                wymuszony_kraj = kraj_ksztaltu
+                trafienia = None
+
+    if trafienia:
+        # Kraj wciąż niejednoznaczny (kształt gołych cyfr nic nie mówi, albo
+        # kilka krajów naprawdę współdzieli ten klucz) — rozstrzygamy miękko,
+        # od najpewniejszego, ZAWĘŻAJĄC `kandydaci` do kraju, o którym się
+        # dowiemy:
+        #
+        #   1. nazwą miasta, jeśli przyszła razem z kodem — to ona najlepiej
         #      wie, o który kraj chodzi;
-        #   3. nazwą kraju w treści posta („Polen", „Niemcy", „Deutschland");
-        #   4. PL, jeśli WCIĄŻ zostało więcej niż jeden kraj — bo tu jesteśmy
-        #      i taka jest większość postów, ale TYLKO gdy kroki 1-3 tego nie
+        #   2. nazwą kraju w treści posta („Polen", „Niemcy", „Deutschland");
+        #   3. PL, jeśli WCIĄŻ zostało więcej niż jeden kraj — bo tu jesteśmy
+        #      i taka jest większość postów, ale TYLKO gdy kroki 1-2 tego nie
         #      rozstrzygnęły (inaczej to zgadywanie, nie rozstrzygnięcie);
-        #   5. pierwszym pozostałym trafieniem, z tego samego powodu co krok 4.
+        #   4. pierwszym pozostałym trafieniem, z tego samego powodu co krok 3.
         #
         # Gdy PO WSZYSTKICH krokach kandydaci wciąż obejmują więcej niż jeden
         # kraj, NIE zgadujemy: `zrodlo="miasto_niepewne"` — ta sama etykieta co
@@ -617,7 +670,6 @@ def geokoduj(kod: str | None, miasto: str | None,
         kandydaci = trafienia
         szukana = normalizuj_nazwe(miasto or "")
         for kraje in (
-            _kraje_z_ksztaltu(kod),
             {r["kraj"] for r in trafienia
              if szukana and normalizuj_nazwe(r["miejscowosc"]) == szukana},
             _kraje_z_nazw(tresc),
@@ -659,7 +711,18 @@ def geokoduj(kod: str | None, miasto: str | None,
             return None
         odmienione = True
 
-    warianty = _warianty(po_nazwie[nazwa])
+    rekordy_nazwy = po_nazwie[nazwa]
+    if wymuszony_kraj:
+        # Krok 1 już wie z kształtu kodu, o który kraj chodzi — po prostu nie
+        # miał w nim dopasowania. Nazwa musi zostać w TYM SAMYM kraju: bez
+        # tego ograniczenia „66-449 Skwierzyna" mogłoby się dopasować do
+        # jakiejkolwiek innej miejscowości o identycznej nazwie gdzie indziej
+        # w bazie — a to dokładnie ten sam błąd co oddanie cudzego kodu.
+        rekordy_nazwy = [r for r in rekordy_nazwy if r["kraj"] in wymuszony_kraj]
+        if not rekordy_nazwy:
+            return None
+
+    warianty = _warianty(rekordy_nazwy)
     if len(warianty) > 1:
         # Treść posta zawęża warianty krajem — najpierw kodem pocztowym (a),
         # bo to najtwardszy sygnał, potem nazwą kraju (b). Filtr, który
