@@ -272,6 +272,93 @@ def _ostatnie(conn, ile: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# /wyjazdy /przywozy /krajowe /tranzyt — filtr po kierunku geograficznym
+#
+# CZTERY KOMENDY, JEDNA FUNKCJA: kierunek to dana (`KOMENDY_KIERUNKU`), nie seria
+# `elif`-ów — ta sama zasada co przy `AKCJE` dla przycisków. Dopisanie piątego
+# kierunku (gdyby kiedyś powstał) ma być jedną linijką tutaj, nie kolejną kopią
+# funkcji.
+#
+# TO JEST FILTR, NIE BRAMKA: `kierunek_geo` nigdy nie kasuje zlecenia z bazy ani
+# z `/ostatnie` — te komendy tylko ZAWĘŻAJĄ widok do jednego kierunku, dokładnie
+# tak, jak API i pigułki w panelu (patrz `api/routers/zlecenia.py`, migracja
+# 0013_kierunek_geo.sql). NULL (sprzed backfillu) liczy się jako "nieznany",
+# więc nie trafia do żadnej z tych czterech list — zobaczy go tylko /ostatnie.
+DOMYSLNIE_GODZIN_KIERUNKU = 24
+LIMIT_KIERUNKU = 10
+
+KOMENDY_KIERUNKU = {
+    "/wyjazdy": (geo.KIERUNEK_WYJAZD, "🧭 Wyjazdy z Polski"),
+    "/przywozy": (geo.KIERUNEK_PRZYWOZ, "🧭 Przywozy do Polski"),
+    "/krajowe": (geo.KIERUNEK_KRAJOWY, "🧭 Kursy krajowe"),
+    "/tranzyt": (geo.KIERUNEK_TRANZYT, "🧭 Tranzyty (oba końce poza Polską)"),
+}
+
+
+def _lista_kierunku(conn, kierunek: str, tytul: str, godziny: int) -> str:
+    """Do `LIMIT_KIERUNKU` najświeższych zleceń w jednym kierunku geograficznym,
+    z ostatnich `godziny` h. Format jak `/ostatnie`, plus szacunek i link do
+    posta — to lista do dzwonienia, ma starczyć bez otwierania panelu.
+
+    LICZYMY `razem` OSOBNYM ZAPYTANIEM, nie `len(wiersze)` po ucięciu limitem:
+    „plus liczba pominiętych" ma być dokładna, nie zgadywana z tego, ile akurat
+    zmieściło się w limicie.
+    """
+    godziny = max(1, godziny)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM posty
+             WHERE czy_zlecenie
+               AND COALESCE(kierunek_geo, %s) = %s
+               AND COALESCE(opublikowany_at, pobrany_at) > NOW() - make_interval(hours => %s)
+            """, (geo.KIERUNEK_NIEZNANY, kierunek, godziny))
+        (razem,) = cur.fetchone()
+        if not razem:
+            return f"{tytul}: brak w ostatnich {godziny} h."
+
+        cur.execute(
+            """
+            SELECT fb_id, post_url, status,
+                   odbior_kod, odbior_miasto, dostawa_kod, dostawa_miasto, tresc
+              FROM posty
+             WHERE czy_zlecenie
+               AND COALESCE(kierunek_geo, %s) = %s
+               AND COALESCE(opublikowany_at, pobrany_at) > NOW() - make_interval(hours => %s)
+             ORDER BY opublikowany_at DESC NULLS LAST, pobrany_at DESC
+             LIMIT %s
+            """, (geo.KIERUNEK_NIEZNANY, kierunek, godziny, LIMIT_KIERUNKU))
+        wiersze = cur.fetchall()
+
+    znaczniki = {"nowe": "•", "dzwonie": "📞", "wygrane": "✅",
+                 "przegrane": "✖", "smiec": "🗑"}
+    linie = [f"*{tytul} — ostatnie {godziny} h ({razem})*", ""]
+    for fb_id, post_url, status, o_kod, o_miasto, d_kod, d_miasto, tresc_posta in wiersze:
+        pods = geo.podsumowanie(geo.geokoduj(o_kod, o_miasto, tresc=tresc_posta),
+                                geo.geokoduj(d_kod, d_miasto, tresc=tresc_posta),
+                                tresc_posta)
+        trasa = str(o_miasto or o_kod or "?")
+        if d_miasto or d_kod:
+            trasa += f" → {d_miasto or d_kod}"
+        if pods["km_trasy"] is not None:
+            km = f"{round(pods['km_trasy'])} km"
+        elif pods["km_wg_autora"] is not None:
+            km = f"wg autora: {pods['km_wg_autora']} km"
+        else:
+            km = "trasa nieustalona"
+        czesci = [f"{znaczniki.get(status, '•')} {trasa}", km]
+        if pods["szacunek_pln"]:
+            czesci.append(f"~{round(pods['szacunek_pln'])} zł")
+        czesci.append(post_url or "brak linku do posta")
+        linie.append(telegram_notify._escape_md(" · ".join(czesci)))
+
+    pominiete = razem - len(wiersze)
+    if pominiete > 0:
+        linie += ["", f"…i {pominiete} pominiętych (pokazano {len(wiersze)} najnowszych)"]
+    return "\n".join(linie)
+
+
+# ---------------------------------------------------------------------------
 # /limity — stan puli kont Apify na żądanie, zamiast logowania na VPS.
 #
 # TRZY ROZŁĄCZNE STANY KONTA (workers/apify_credits.StanKonta) muszą zostać
@@ -372,6 +459,7 @@ def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
         return ["", "🌐 *Proxy*: nieskonfigurowane — konta wychodzą z IP VPS-a"]
 
     linie = ["", "🌐 *Proxy*"]
+    esc = telegram_notify._escape_md
     w_kwarantannie: set[str] = set()
     if cfg.pool:
         try:
@@ -382,10 +470,22 @@ def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
         linie.append(f"Pula: {len(cfg.pool)} adresów · aktywnych "
                      f"{len(cfg.pool) - len(w_kwarantannie)} · "
                      f"w kwarantannie {len(w_kwarantannie)}")
+        # Darmowa pula (APIFY_PROXY_POOL=1) gnije w GODZINACH (patrz docs/APIFY-PROXY.md)
+        # — bez tej linii operator nie ma jak z Telegrama odróżnić "cron odświeża
+        # normalnie" od "cron padł tydzień temu", tylko po samej liczbie timeoutów
+        # wyżej w wiadomości. To jest dokładnie ten sam powód, dla którego /limity
+        # w ogóle istnieje: informacja bez logowania się na VPS.
+        if cfg.pool_from_file:
+            wiek = ("wiek nieznany" if cfg.pool_age_h is None
+                    else f"odświeżona {cfg.pool_age_h:.1f} h temu")
+            linie.append(esc(f"Darmowa pula: {cfg.pool_from_file} z {len(cfg.pool)} "
+                             f"adresów ({wiek})"))
     else:
         linie.append("Pula: pojedyncze przypisania / brama z sesją (bez APIFY_PROXY_URLS)")
 
-    esc = telegram_notify._escape_md
+    for w in cfg.warnings:
+        linie.append(esc(f"⚠ {w}"))
+
     for i, (token, stan) in enumerate(zip(tokeny, stany), 1):
         etykieta = _etykieta_konta(i, stan)
         try:
@@ -464,6 +564,10 @@ POMOC = """*Laweta Radar — bot*
 
 /dzis — ile zleceń, ile wziętych, ile km
 /ostatnie 10 — ostatnie zlecenia
+/wyjazdy 24 — świeże zlecenia PL → zagranica (ładunek powrotny?)
+/przywozy 24 — świeże zlecenia zagranica → PL
+/krajowe 24 — świeże zlecenia PL → PL
+/tranzyt 24 — świeże zlecenia z oboma końcami poza PL
 /limity — stan puli kont Apify (bez logowania na VPS)
 /stop — pauza powiadomień (fetcher zbiera dalej)
 /start — wznowienie powiadomień
@@ -487,6 +591,13 @@ def obsluz_komende(conn, tekst: str) -> str:
         except ValueError:
             ile = DOMYSLNIE_OSTATNICH
         return _ostatnie(conn, ile)
+    if komenda in KOMENDY_KIERUNKU:
+        try:
+            godziny = int(czesci[1]) if len(czesci) > 1 else DOMYSLNIE_GODZIN_KIERUNKU
+        except ValueError:
+            godziny = DOMYSLNIE_GODZIN_KIERUNKU
+        kierunek, tytul = KOMENDY_KIERUNKU[komenda]
+        return _lista_kierunku(conn, kierunek, tytul, godziny)
     if komenda in ("/limity", "/limityapi"):
         return _limity(conn)
     if komenda == "/stop":
@@ -554,6 +665,10 @@ def _polacz():
 KOMENDY_BOTFATHER = [
     {"command": "dzis", "description": "ile zleceń dzisiaj, ile wziętych, ile km"},
     {"command": "ostatnie", "description": "ostatnie zlecenia"},
+    {"command": "wyjazdy", "description": "świeże zlecenia PL → zagranica"},
+    {"command": "przywozy", "description": "świeże zlecenia zagranica → PL"},
+    {"command": "krajowe", "description": "świeże zlecenia PL → PL"},
+    {"command": "tranzyt", "description": "świeże zlecenia, oba końce poza PL"},
     {"command": "limity", "description": "stan puli kont Apify"},
     {"command": "stop", "description": "pauza powiadomień"},
     {"command": "start", "description": "wznowienie powiadomień"},

@@ -59,7 +59,8 @@ TERAZ = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
 
 MIGRACJE = ("0001_posty.sql", "0002_gate.sql", "0003_fetcher.sql",
             "0004_klasyfikacja.sql", "0005_panel.sql", "0009_werdykt_modelu.sql",
-            "0010_kategoria_ladunku.sql", "0011_kierunek.sql")
+            "0010_kategoria_ladunku.sql", "0011_kierunek.sql",
+            "0013_kierunek_geo.sql")
 
 # Odpowiedź modelu z KOMPLETEM pól — świadomie taka, w której żadne pole nie
 # schodzi na wartość domyślną. Post z samymi domyślnymi przeszedłby ten test
@@ -270,6 +271,48 @@ def test_on_conflict_naprawia_wiersz_z_werdyktem_i_pusta_ekstrakcja():
     assert "RETURNING" in sql, "bez RETURNING nie wiadomo, co się realnie zapisało"
 
 
+def test_insert_wymienia_kolumny_geo():
+    """`odbior_kraj`/`dostawa_kraj`/`kierunek_geo` jadą tym samym INSERT-em co
+    ekstrakcja, osobną listą (`_kolumny_geo`) — patrz `KOLUMNY_GEO`."""
+    sql, _, _, _ = _zapisz(_decyzja_ai())
+    for kolumna in c.KOLUMNY_GEO:
+        assert kolumna in sql, f"INSERT nie wymienia kolumny geo: {kolumna}"
+
+
+def test_parametry_insertu_niosa_wartosci_geo():
+    """Krosno i Rzeszów są oba PL w `data/kody_eu.csv` — kierunek krajowy."""
+    sql, params, _, _ = _zapisz(_decyzja_ai())
+    kolumny = sql.split("INSERT INTO posty (", 1)[1].split(")", 1)[0]
+    nazwy = [k.strip() for k in kolumny.split(",")]
+    wartosci = dict(zip([n for n in nazwy if n not in ("gate_at", "ai_at")], params))
+
+    assert wartosci["odbior_kraj"] == "PL"
+    assert wartosci["dostawa_kraj"] == "PL"
+    assert wartosci["kierunek_geo"] == "krajowy"
+
+
+def test_on_conflict_aktualizuje_kolumny_geo():
+    """Bez tego powtórka posta z gotową klasyfikacją zostawia kraj i kierunek
+    geograficzny puste na zawsze — ta sama pułapka co przy kolumnach ekstrakcji."""
+    sql, _, _, _ = _zapisz(_decyzja_ai())
+    for kolumna in c.KOLUMNY_GEO:
+        assert f"{kolumna} = EXCLUDED.{kolumna}" in sql, (
+            f"ON CONFLICT nie aktualizuje `{kolumna}`")
+
+
+def test_warunek_naprawy_nie_sprawdza_kolumn_geo():
+    """DOKŁADNIE odwrotność testu dla `KOLUMNY_EKSTRAKCJI`: warunek naprawy
+    (`pusta_w_bazie`) MA zostać ślepy na kolumny geo, bo `kierunek_geo` nigdy
+    nie jest NULL-em, gdy klasyfikacja w ogóle zaszła — a warunek, który
+    czekałby na NULL tam, nigdy by się nie spełnił."""
+    sql, _, _, _ = _zapisz(_decyzja_ai())
+    warunek = sql.split("WHERE EXCLUDED.zrodlo_decyzji = 'ai'", 1)[1]
+    for kolumna in c.KOLUMNY_GEO:
+        assert f"posty.{kolumna} IS NULL" not in warunek, (
+            f"warunek naprawy sprawdza `{kolumna}` — ten wiersz nigdy by go "
+            f"nie spełnił, bo `kierunek_geo` nie jest NULL-em")
+
+
 # ---------------------------------------------------------------------------
 # 2. OFFLINE — głośna reakcja na cichą utratę
 # ---------------------------------------------------------------------------
@@ -423,7 +466,7 @@ def polaczenie():
 
 
 def _wiersz_z_bazy(conn, fb_id: str) -> dict:
-    kolumny = (*c.KOLUMNY_EKSTRAKCJI, "zrodlo_decyzji", "czy_zlecenie",
+    kolumny = (*c.KOLUMNY_EKSTRAKCJI, *c.KOLUMNY_GEO, "zrodlo_decyzji", "czy_zlecenie",
                "status", "ai_model", "ai_at")
     with conn.cursor() as cur:
         cur.execute(f"SELECT {', '.join(kolumny)} FROM posty WHERE fb_id = %s",  # noqa: S608
@@ -464,6 +507,10 @@ def test_integracja_komplet_pol_jest_w_bazie_po_zapisie(polaczenie):
     assert w["kontakt_typ"] == "telefon" and w["kontakt_wartosc"] == "600100200"
     assert int(w["pewnosc"]) == 88
     assert float(w["cena_sugerowana"]) == 350.0
+    # Krosno i Rzeszów są oba PL — kierunek krajowy, policzony przy TYM SAMYM
+    # zapisie, z tych samych `odbior_kod`/`dostawa_kod` co wyżej.
+    assert w["odbior_kraj"] == "PL" and w["dostawa_kraj"] == "PL"
+    assert w["kierunek_geo"] == "krajowy"
     assert w["zrodlo_decyzji"] == "ai" and w["czy_zlecenie"] is True
     assert w["ai_model"] and w["ai_at"] is not None
 

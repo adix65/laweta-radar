@@ -566,6 +566,12 @@ def test_kolumna_kierunku_jest_w_insercie():
     assert ("kierunek", "0011_kierunek.sql") in f.KOLUMNY_SWIADKOWIE
 
 
+def test_kolumna_kierunku_geo_jest_swiadkiem_migracji():
+    """Brak 0013_kierunek_geo.sql ma paść RAZ, przed pobieraniem — nie kilkaset
+    razy w środku przebiegu, już po opłaceniu Apify."""
+    assert ("kierunek_geo", "0013_kierunek_geo.sql") in f.KOLUMNY_SWIADKOWIE
+
+
 def test_zwykle_zlecenie_nie_dostaje_kierunku_oferta():
     zlecenie = f.decyzja_o_poscie(
         _post("Potrzebuję lawety z Krosna do Rzeszowa, golf nie odpala"),

@@ -12,6 +12,7 @@ przycisków. Każdy z tych trzech kroków pominięty osobno daje inny, cichy bł
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -267,6 +268,73 @@ def test_ostatnie_pokazuje_odleglosc_autora_gdy_trasy_nie_znamy(geo_pod_krosnem)
     tekst = bot._ostatnie(
         _Polaczenie([_wiersz_ostatnich("z Krosna do Turku, trasa ma okolo 490 km")]), 5)
     assert "wg autora: 490 km" in tekst
+
+
+# ---------------------------------------------------------------------------
+# /wyjazdy /przywozy /krajowe /tranzyt
+# ---------------------------------------------------------------------------
+def test_komendy_kierunku_routing(monkeypatch):
+    """Cztery komendy, jedna funkcja — routing przekazuje właściwy kierunek
+    i domyślną albo podaną liczbę godzin, tak jak `/ostatnie` przekazuje `ile`."""
+    zapamietane = []
+    monkeypatch.setattr(
+        bot, "_lista_kierunku",
+        lambda conn, kierunek, tytul, godziny: zapamietane.append((kierunek, godziny)) or "ok")
+    bot.obsluz_komende(_Polaczenie(), "/wyjazdy")
+    bot.obsluz_komende(_Polaczenie(), "/przywozy 48")
+    bot.obsluz_komende(_Polaczenie(), "/krajowe dużo")   # śmieć -> domyślna
+    bot.obsluz_komende(_Polaczenie(), "/tranzyt@laweta_bot 6")
+    assert zapamietane == [
+        (bot.geo.KIERUNEK_WYJAZD, bot.DOMYSLNIE_GODZIN_KIERUNKU),
+        (bot.geo.KIERUNEK_PRZYWOZ, 48),
+        (bot.geo.KIERUNEK_KRAJOWY, bot.DOMYSLNIE_GODZIN_KIERUNKU),
+        (bot.geo.KIERUNEK_TRANZYT, 6),
+    ]
+
+
+@pytest.fixture
+def geo_pl_de(tmp_path):
+    """Krosno (PL) i Köln (DE) — starcza do policzenia wyjazdu i przywozu."""
+    plik = tmp_path / "kody.csv"
+    plik.write_text(
+        "kraj,kod,miejscowosc,wojewodztwo,lat,lng\n"
+        "PL,38-400,Krosno,podkarpackie,49.6886,21.7706\n"
+        "DE,50667,Koln,Nordrhein-Westfalen,50.9375,6.9603\n",
+        encoding="utf-8")
+    bot.geo.zaladuj(plik)
+    yield
+    bot.geo.zaladuj()
+
+
+def _wiersz_kierunku(fb_id="fb1", post_url="https://fb.com/p/1", status="nowe",
+                     o_kod="38-400", o_miasto="Krosno",
+                     d_kod="50667", d_miasto="Koln", tresc="laweta z Krosna do Kolonii") -> tuple:
+    return (fb_id, post_url, status, o_kod, o_miasto, d_kod, d_miasto, tresc)
+
+
+def test_lista_kierunku_pokazuje_trase_km_cene_i_link(geo_pl_de):
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(1,), _wiersz_kierunku()]), bot.geo.KIERUNEK_WYJAZD,
+        "🧭 Wyjazdy z Polski", 24)
+    assert "Krosno" in tekst and "Koln" in tekst
+    assert "km" in tekst
+    assert "zł" in tekst
+    assert "https://fb.com/p/1" in tekst
+
+
+def test_lista_kierunku_pusta(geo_pl_de):
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(0,)]), bot.geo.KIERUNEK_WYJAZD, "🧭 Wyjazdy z Polski", 24)
+    assert "brak" in tekst.lower()
+
+
+def test_lista_kierunku_liczy_pominiete_dokladnie(geo_pl_de):
+    """`razem` z osobnego COUNT, nie `len(wiersze)` po limicie — inaczej liczba
+    pominiętych zgadywałaby się z tego, co akurat zmieściło się w limicie."""
+    tekst = bot._lista_kierunku(
+        _Polaczenie([(3,), _wiersz_kierunku(fb_id="fb1"), _wiersz_kierunku(fb_id="fb2")]),
+        bot.geo.KIERUNEK_WYJAZD, "🧭 Wyjazdy z Polski", 24)
+    assert "1 pominiętych" in tekst
 
 
 def test_stop_wlacza_pauze():
@@ -533,6 +601,39 @@ def test_limity_sekcja_proxy_oznacza_kwarantanne(monkeypatch):
     tekst = bot._limity(conn)
     assert "w kwarantannie 1" in tekst
     assert "⚠ w kwarantannie" in tekst
+
+
+def test_limity_sekcja_proxy_pokazuje_wiek_darmowej_puli(monkeypatch):
+    """Darmowa pula (APIFY_PROXY_POOL=1) gnije w godzinach — operator sprawdzający
+    z Telegrama musi widzieć jej wiek, nie tylko liczbę adresów i kwarantannę."""
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://u:p@a.example:8000,http://u:p@b.example:8000"})
+    cfg = dataclasses.replace(cfg, pool_from_file=2, pool_age_h=1.5)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "Darmowa pula: 2 z 2 adresów (odświeżona 1.5 h temu)" in tekst
+
+
+def test_limity_sekcja_proxy_pokazuje_ostrzezenia_konfiguracji(monkeypatch):
+    """Ostrzeżenia z `load_proxy_config` (np. stara pula, brak {session}) dotąd
+    lądowały tylko w logu workera — operator na Telegramie ich nie widział."""
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://u:p@a.example:8000,http://u:p@b.example:8000"})
+    cfg = dataclasses.replace(
+        cfg, warnings=("plik puli proxy jest STARY (12.0 h, limit 6 h) — odśwież go "
+                       "po swojej stronie albo wyłącz pulę (APIFY_PROXY_POOL=0)",))
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "⚠ plik puli proxy jest STARY" in tekst
+    assert "APIFY\\_PROXY\\_POOL" in tekst    # underscore uciekniety (legacy Markdown)
 
 
 def test_limity_sekcja_proxy_bez_przypisania_pokazuje_ip_vpsa(monkeypatch):

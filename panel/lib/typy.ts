@@ -46,6 +46,16 @@ export type KategoriaLadunku = "pojazd" | "zwierze" | "inne";
  *  dokładnie jak „zlecenie". */
 export type Kierunek = "zlecenie" | "oferta" | "niejasne";
 
+/** Kierunek trasy względem Polski — z `services/geo.py` (migracja
+ *  0013_kierunek_geo.sql), liczony na żywo z kraju obu końców trasy.
+ *
+ *  „wyjazd" i „przywoz" to DWA RÓŻNE PRODUKTY dla przewoźnika: wyjazd trzeba
+ *  połączyć z ładunkiem powrotnym (pusty powrót zjada marżę), przywóz zwykle
+ *  JEST już główną nogą kursu. `null`/„nieznany" = którykolwiek koniec trasy
+ *  nierozpoznany — WYMIAR DO FILTROWANIA, nigdy powód, żeby zlecenie zniknęło
+ *  z domyślnej listy. */
+export type KierunekGeo = "przywoz" | "wyjazd" | "krajowy" | "tranzyt" | "nieznany";
+
 export interface Zlecenie {
   fb_id: string;
   status: Status;
@@ -83,6 +93,9 @@ export interface Zlecenie {
    *  listą pod mapą, bo pinezka „gdzieś" wygląda tak samo jak pinezka pewna. */
   lat: number | null;
   lng: number | null;
+  /** Liczony na żywo, tym samym kodem co kolumna `kierunek_geo` w bazie —
+   *  patrz `services/geo.podsumowanie`. */
+  kierunek_geo: KierunekGeo | null;
 
   // --- z klasyfikatora (0004_klasyfikacja.sql, nazwy 1:1 z kolumnami) -----
   typ?: string | null;

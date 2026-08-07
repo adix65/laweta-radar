@@ -26,6 +26,15 @@ export default function Lista() {
         return { status: "nowe", max_km: 50 };
       case "dzis":
         return { status: "nowe", od: new Date().toISOString().slice(0, 10) };
+      // Kierunek geograficzny filtrujemy W API (`kierunek_geo` jest kolumną,
+      // nie zależy od konfiguracji operatora jak `max_km`) — w odróżnieniu od
+      // „pilne" niżej, które zostaje po stronie panelu.
+      case "wyjazdy":
+        return { status: "nowe", kierunek_geo: "wyjazd" };
+      case "przywozy":
+        return { status: "nowe", kierunek_geo: "przywoz" };
+      case "krajowe":
+        return { status: "nowe", kierunek_geo: "krajowy" };
       case "pilne":
       case "wszystkie":
       default:

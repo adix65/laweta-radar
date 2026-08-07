@@ -64,6 +64,11 @@ PROMIEN_ZIEMI_KM = 6371.0
 # brak konfiguracji.
 KROSNO = (49.6886, 21.7706)
 
+# Kraj operatora. Stałą, nie polem w .env: cały ten system (stawki w PLN,
+# domyślna baza w Krośnie, treść promptu) zakłada polskiego przewoźnika — gdyby
+# to się zmieniło, zmieniłoby się dużo więcej niż jedna literówka w kodzie kraju.
+KRAJ_BAZY = "PL"
+
 
 @dataclass(frozen=True)
 class Punkt:
@@ -79,12 +84,20 @@ class Punkt:
                             „Katowic") i dopasowała się dopiero prefiksem.
                             Traktowana jak "miasto_niepewne";
       "baza"              — punkt operatora z .env.
+
+    `kraj`: dwuliterowy kod kraju z bazy `kody_eu.csv` (kolumna już tam jest —
+    to odczyt, nie nowa logika). `None` TYLKO gdy punkt powstał bez tej kolumny
+    (stare fixtury testów bez pola `kraj`); przy realnym dopasowaniu z bazy
+    kraj jest ZAWSZE znany, bo to on rozstrzyga między kolizjami kodów i nazw
+    (patrz `geokoduj`). Warstwa wyżej (`kierunek_geo`) czyta to pole wprost,
+    zamiast zgadywać kraj po nazwie miasta.
     """
 
     lat: float
     lng: float
     zrodlo: str
     nazwa: str
+    kraj: str | None = None
 
     @property
     def niepewny(self) -> bool:
@@ -532,6 +545,7 @@ def geokoduj(kod: str | None, miasto: str | None,
             lng=rekord["lng"],
             zrodlo="kod",
             nazwa=f"{rekord['miejscowosc']} {rekord['kod']} ({rekord['kraj']})".strip(),
+            kraj=rekord["kraj"],
         )
 
     # --- 2. nazwa miasta ---
@@ -577,14 +591,18 @@ def geokoduj(kod: str | None, miasto: str | None,
         nazwa=(f"{wybrany['miejscowosc']}{opis_regionu} ({wybrany['kraj']})"
                + ("" if jednoznaczne
                   else f" — {len(warianty)} miejscowości o tej nazwie")),
+        kraj=wybrany["kraj"],
     )
 
 
 def baza() -> Punkt:
     """Punkt operatora z .env. Bez konfiguracji — Krosno, i mówimy o tym w nazwie."""
     if settings.BAZA_LAT and settings.BAZA_LNG:
-        return Punkt(settings.BAZA_LAT, settings.BAZA_LNG, "baza", settings.BAZA_NAZWA)
-    return Punkt(KROSNO[0], KROSNO[1], "baza", f"{settings.BAZA_NAZWA} (domyślne — ustaw BAZA_LAT/BAZA_LNG)")
+        return Punkt(settings.BAZA_LAT, settings.BAZA_LNG, "baza", settings.BAZA_NAZWA,
+                     kraj=KRAJ_BAZY)
+    return Punkt(KROSNO[0], KROSNO[1], "baza",
+                f"{settings.BAZA_NAZWA} (domyślne — ustaw BAZA_LAT/BAZA_LNG)",
+                kraj=KRAJ_BAZY)
 
 
 # ---------------------------------------------------------------------------
@@ -1014,6 +1032,49 @@ def km_wg_autora(tresc: str | None) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# KIERUNEK GEOGRAFICZNY — PL względem obu końców trasy.
+#
+# To jest WYMIAR DO FILTROWANIA ("pokaż wyjazdy z Polski"), nigdy powód
+# odrzucenia zlecenia — zasada naczelna repo obowiązuje tu tak samo, jak przy
+# kilometrach: kierunek nieznany nie chowa posta, tylko nie trafia do żadnej
+# pigułki filtra poza "wszystkie".
+#
+# CZTERY WARTOŚCI ZAMIAST BOOLA "za granicą tak/nie", bo wyjazd i przywóz to
+# dla przewoźnika DWA RÓŻNE PRODUKTY: wyjazd trzeba połączyć z ładunkiem
+# powrotnym (pusty powrót zjada marżę), przywóz zwykle JEST już główną nogą
+# kursu. Tranzyt (oba końce poza PL) to najrzadszy, ale realny przypadek —
+# post widziany w polskiej grupie o trasie Kolonia->Amsterdam.
+# ---------------------------------------------------------------------------
+KIERUNEK_PRZYWOZ = "przywoz"
+KIERUNEK_WYJAZD = "wyjazd"
+KIERUNEK_KRAJOWY = "krajowy"
+KIERUNEK_TRANZYT = "tranzyt"
+KIERUNEK_NIEZNANY = "nieznany"
+
+
+def kierunek_geo(odbior_kraj: str | None, dostawa_kraj: str | None) -> str:
+    """Kraje obu końców trasy -> kierunek względem Polski.
+
+    BEZ ZGADYWANIA, jak w `geokoduj`: brakujący kraj po którejkolwiek stronie
+    (punkt nierozpoznany przez geokoder) daje `KIERUNEK_NIEZNANY`, nie próbę
+    odgadnięcia z tego, co jednak wiadomo o drugim końcu — "trasa do Niemiec"
+    bez rozpoznanego punktu odbioru równie dobrze może zaczynać się w Polsce,
+    co być tranzytem przez nią.
+    """
+    if not odbior_kraj or not dostawa_kraj:
+        return KIERUNEK_NIEZNANY
+    odbior_pl = odbior_kraj == KRAJ_BAZY
+    dostawa_pl = dostawa_kraj == KRAJ_BAZY
+    if odbior_pl and dostawa_pl:
+        return KIERUNEK_KRAJOWY
+    if odbior_pl:
+        return KIERUNEK_WYJAZD
+    if dostawa_pl:
+        return KIERUNEK_PRZYWOZ
+    return KIERUNEK_TRANZYT
+
+
+# ---------------------------------------------------------------------------
 # ZŁOŻENIE DLA WARSTWY WYŻEJ
 # ---------------------------------------------------------------------------
 def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None,
@@ -1037,6 +1098,8 @@ def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None,
     b = baza()
     km_od_bazy = dystans_km(b, odbior) if odbior else None
     km_trasy = dystans_km(odbior, dostawa) if (odbior and dostawa) else None
+    odbior_kraj = odbior.kraj if odbior else None
+    dostawa_kraj = dostawa.kraj if dostawa else None
     return {
         "km_trasy": km_trasy,
         "km_od_bazy": km_od_bazy,
@@ -1046,6 +1109,9 @@ def podsumowanie(odbior: Punkt | None, dostawa: Punkt | None,
         "niepewne": [p.nazwa for p in (odbior, dostawa) if p and p.niepewny],
         "link_trasa": link_do_map(b, odbior, dostawa),
         "link_nawigacja": link_do_nawigacji(odbior) if odbior else "",
+        "odbior_kraj": odbior_kraj,
+        "dostawa_kraj": dostawa_kraj,
+        "kierunek_geo": kierunek_geo(odbior_kraj, dostawa_kraj),
     }
 
 

@@ -444,10 +444,19 @@ curl -s "localhost:8002/zdrowie?glebokie=1"   # dopytuje Apify o saldo (WYMAGA S
 ```
 
 Bot (`workers/bot.py`, osobny proces PM2, long polling) obsługuje przyciski pod
-powiadomieniem i komendy: `/dzis`, `/ostatnie 10`, `/limity` (alias `/limityapi`),
-`/stop`, `/start`. `/stop` wycisza **wyłącznie brzęczenie** — fetcher zbiera dalej
-i wszystko trafia do panelu. Przyjmuje wiadomości **tylko z `TELEGRAM_CHAT_ID`**:
-nazwa bota jest publiczna, a jego komendy zmieniają statusy zleceń.
+powiadomieniem i komendy: `/dzis`, `/ostatnie 10`, `/wyjazdy 24`, `/przywozy 24`,
+`/krajowe 24`, `/tranzyt 24`, `/limity` (alias `/limityapi`), `/stop`, `/start`.
+`/stop` wycisza **wyłącznie brzęczenie** — fetcher zbiera dalej i wszystko trafia
+do panelu. Przyjmuje wiadomości **tylko z `TELEGRAM_CHAT_ID`**: nazwa bota jest
+publiczna, a jego komendy zmieniają statusy zleceń.
+
+`/wyjazdy`, `/przywozy`, `/krajowe` i `/tranzyt` filtrują po **kierunku
+geograficznym trasy** względem Polski (kolumna `kierunek_geo`, migracja
+`0013_kierunek_geo.sql`, liczona z kraju obu końców trasy w `services/geo.py`)
+— do 10 najświeższych zleceń z ostatnich N godzin (domyślnie 24), plus liczba
+pominiętych. Kierunek jest WYMIAREM DO FILTROWANIA, nigdy powodem odrzucenia:
+domyślny widok, alerty i `/ostatnie` obejmują wszystkie kierunki bez zmian.
+Te same wartości filtruje `GET /zlecenia?kierunek_geo=` i pigułki w panelu.
 
 `/limity` pokazuje stan puli kont Apify na żądanie, bez logowania na VPS: saldo
 per konto (rozróżnia „żywe konto bez odczytu salda" od „martwy klucz" — pierwsze
@@ -527,7 +536,8 @@ laweta_radar/
   workers/
     fb_fetcher.py      # CRON: Apify -> bramka -> baza; budżet w postach
     gate.py            # tani filtr słowny PRZED modelem, PL/DE/CS/SK
-    bot.py             # PM2: przyciski pod alertem + /dzis /ostatnie /limity /stop /start
+    bot.py             # PM2: przyciski pod alertem + /dzis /ostatnie /wyjazdy
+                       # /przywozy /krajowe /tranzyt /limity /stop /start
     apify_keys.py      # rotacja puli kluczy + 4-stanowa klasyfikacja błędów,
                        # stan w tabeli `zasoby_apify` (nie plik — przeżywa równoległe runy)
     apify_proxy.py     # przypisanie token->proxy, sesje lepkie, weryfikacja
@@ -573,12 +583,14 @@ laweta_radar/
       0009_werdykt_modelu.sql # jedno źródło werdyktu AI + indeksy na parze kolumn
       0010_kategoria_ladunku.sql # co jedzie: pojazd / zwierzę / inne (NIE filtr)
       0011_kierunek.sql    # kto kogo szuka: zlecenie / oferta / niejasne
+      0013_kierunek_geo.sql # kraj obu końców trasy + kierunek wzgl. Polski (filtr, nie próg)
   scripts/             # env-shell, migrate, start_api, check_setup
     pomiar_actora.py   # JEDNORAZOWA diagnostyka actora — nie część pipeline'u
     znajdz_grupy.py    # RĘCZNIE, raz w miesiącu -> data/kandydaci_grupy.csv
     raport_gate.py     # rozliczenie trybu cienia bramki
     raport_feedback.py # co operator odrzucił i co model o tym sądził
     uzupelnij_klasyfikacje.py # dopisuje ekstrakcję wierszom, które ją zgubiły
+    uzupelnij_kierunek_geo.py # jednorazowy backfill kraju/kierunku dla starych wierszy
     test_llm.py        # jedno wywołanie na providera — czy klucz i model działają
     porownaj_modele.py # wybór modelu na WŁASNYCH danych, nie na benchmarku
     pobierz_geo.py     # jednorazowe pobranie bazy kodów z GeoNames

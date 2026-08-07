@@ -15,12 +15,26 @@
  * w jednym rzędzie i widać po nich stan bez otwierania czegokolwiek.
  */
 
-export type Filtr = "pilne" | "blisko" | "dzis" | "wszystkie";
+export type Filtr =
+  | "pilne"
+  | "blisko"
+  | "dzis"
+  | "wyjazdy"
+  | "przywozy"
+  | "krajowe"
+  | "wszystkie";
 
 export const FILTRY: { id: Filtr; etykieta: string }[] = [
   { id: "pilne", etykieta: "Pilne" },
   { id: "blisko", etykieta: "do 50 km" },
   { id: "dzis", etykieta: "Dziś" },
+  // Kierunek geograficzny — WYMIAR DO FILTROWANIA, nie próg: te same zlecenia
+  // widać pod "Wszystkie", tylko zawężone do jednej strony granicy. "Tranzyt"
+  // celowo nie ma tu pigułki (bot ma /tranzyt) — w tym panelu to najrzadszy
+  // z czterech kierunków i miejsce w jednym rzędzie jest ograniczone.
+  { id: "wyjazdy", etykieta: "Wyjazdy" },
+  { id: "przywozy", etykieta: "Przywozy" },
+  { id: "krajowe", etykieta: "Krajowe" },
   { id: "wszystkie", etykieta: "Wszystkie" },
 ];
 
