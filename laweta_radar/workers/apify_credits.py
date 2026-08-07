@@ -286,7 +286,11 @@ def pula_stanu(tokens: list[str], *, timeout: float = 10.0,
     if not tokens:
         wyniki: list[StanKonta] = []
     else:
-        cfg_wspolny = load_proxy_config(env) if cfg is None else cfg
+        # tokens=tokens włącza wyrównanie PO hashu (patrz
+        # `apify_proxy._wyrownaj_przypisania`) — bez tego `/limity` sprawdzałby
+        # saldo przez surowy rendezvous hashing, czyli czasem innym adresem niż
+        # tym, którym REALNIE wychodzi fetcher (ten liczy cfg tą samą listą kluczy).
+        cfg_wspolny = load_proxy_config(env, tokens=tokens) if cfg is None else cfg
         with ThreadPoolExecutor(max_workers=min(16, len(tokens))) as pool:
             wyniki = list(pool.map(
                 lambda t: stan_konta(t, timeout=timeout, env=env, cfg=cfg_wspolny), tokens))

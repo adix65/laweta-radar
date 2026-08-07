@@ -459,6 +459,7 @@ def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
         return ["", "🌐 *Proxy*: nieskonfigurowane — konta wychodzą z IP VPS-a"]
 
     linie = ["", "🌐 *Proxy*"]
+    esc = telegram_notify._escape_md
     w_kwarantannie: set[str] = set()
     if cfg.pool:
         try:
@@ -469,10 +470,22 @@ def _sekcja_proxy(conn, tokeny: list[str], stany) -> list[str]:
         linie.append(f"Pula: {len(cfg.pool)} adresów · aktywnych "
                      f"{len(cfg.pool) - len(w_kwarantannie)} · "
                      f"w kwarantannie {len(w_kwarantannie)}")
+        # Darmowa pula (APIFY_PROXY_POOL=1) gnije w GODZINACH (patrz docs/APIFY-PROXY.md)
+        # — bez tej linii operator nie ma jak z Telegrama odróżnić "cron odświeża
+        # normalnie" od "cron padł tydzień temu", tylko po samej liczbie timeoutów
+        # wyżej w wiadomości. To jest dokładnie ten sam powód, dla którego /limity
+        # w ogóle istnieje: informacja bez logowania się na VPS.
+        if cfg.pool_from_file:
+            wiek = ("wiek nieznany" if cfg.pool_age_h is None
+                    else f"odświeżona {cfg.pool_age_h:.1f} h temu")
+            linie.append(esc(f"Darmowa pula: {cfg.pool_from_file} z {len(cfg.pool)} "
+                             f"adresów ({wiek})"))
     else:
         linie.append("Pula: pojedyncze przypisania / brama z sesją (bez APIFY_PROXY_URLS)")
 
-    esc = telegram_notify._escape_md
+    for w in cfg.warnings:
+        linie.append(esc(f"⚠ {w}"))
+
     for i, (token, stan) in enumerate(zip(tokeny, stany), 1):
         etykieta = _etykieta_konta(i, stan)
         try:

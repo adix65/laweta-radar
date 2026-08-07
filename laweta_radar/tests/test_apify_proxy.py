@@ -1009,6 +1009,30 @@ def test_wyrownanie_dolozenie_klucza_rusza_najwyzej_garstke_przypisan():
     assert zmienione <= 2
 
 
+def test_main_cli_uzywa_wyrownania_pula_wystarcza_na_16_kluczy(monkeypatch, capsys):
+    """Regresja dokładnie zgłoszonego objawu: pula 48 proxy na 16 kluczy pokazywała
+    w CLI (`python -m laweta_radar.workers.apify_proxy`) tylko 13 różnych adresów,
+    z kolizjami (np. dwa klucze na tym samym IP), mimo że wolnych adresów było pod
+    dostatkiem. Powód: `_main` budował `cfg` PRZED poznaniem listy tokenów, więc
+    `load_proxy_config()` szedł bez `tokens=` i `_wyrownaj_przypisania` nigdy się
+    nie odpalał — podgląd liczył goły rendezvous hashing zamiast wyrównanego
+    przypisania. Po naprawie pula >= liczba kluczy ma dać KAŻDEMU kluczowi WŁASNY
+    adres i NIE odpalać ostrzeżenia 'rozkład po hashu nie jest 1:1'."""
+    for i in range(1, 17):
+        monkeypatch.setenv(f"APIFY_API_TOKEN{i}", f"tok_{i}")
+    pool = ",".join(f"http://u:p@n{i}.example:8000" for i in range(48))
+    monkeypatch.setenv("APIFY_PROXY_URLS", pool)
+
+    rc = ap._main(["apify_proxy"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Różnych proxy w użyciu: 16" in out
+    assert "kont bez proxy: 0" in out
+    assert "Najwięcej kont na jednym proxy: 1" in out
+    assert "nie jest 1:1" not in out
+
+
 # =============================================================================
 # zywe_proxy_w_puli — bezpiecznik przy wyczerpaniu żywych adresów (sekcja 3)
 # =============================================================================

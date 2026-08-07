@@ -128,13 +128,17 @@ APIFY_PROXY_URLS=http://user:haslo@gw.dostawca:10001-10100
 
 (rozwinie się do 100 osobnych proxy).
 
-> Pula rozdziela konta po hashu, więc **nie jest to przydział 1:1**. Nawet mając
-> tyle adresów, ile kont, część adresów obsłuży dwa i więcej kont, a część zostanie
-> nietknięta — tak działa rozrzut losowy. Dla anty-banu to bez znaczenia (2-3 konta
-> na adres nikogo nie zastanawiają), ale jeśli chcesz **ściśle** jeden adres na
-> konto, użyj bramy z `{session}` albo `APIFY_PROXY{N}`.
+> Sam rendezvous hashing rozdziela konta po puli tylko STATYSTYCZNIE równo —
+> zobacz **wyrównanie PO hashu** (punkt 4 wyżej): każde miejsce, które zna
+> PEŁNĄ listę kluczy tego przebiegu (`run()`, `preflight`, `/limity`, CLI
+> `python -m laweta_radar.workers.apify_proxy`), dokłada drugi przebieg i przy
+> puli ≥ liczba kluczy każde konto kończy z WŁASNYM, niedzielonym adresem —
+> bez tego byłby to zwykły rozrzut losowy (część adresów po dwa-trzy konta,
+> część nietkniętych). Gdyby mimo to trzeba było wyjść poza pulę (mniej
+> adresów niż kluczy) albo chcesz przypisania niezależnego od reszty zestawu
+> kluczy, użyj bramy z `{session}` albo `APIFY_PROXY{N}`.
 > `python -m laweta_radar.workers.apify_proxy` pokazuje realny rozkład
-> („Najwięcej kont na jednym proxy").
+> („Najwięcej kont na jednym proxy") — liczony już PO wyrównaniu.
 
 ### 3. Proxy przypisane wprost do klucza
 

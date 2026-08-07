@@ -1199,12 +1199,6 @@ def _main(argv: list[str]) -> int:
 
     from laweta_radar.workers.apify_keys import load_apify_tokens  # noqa: PLC0415
 
-    try:
-        cfg = load_proxy_config()
-    except ApifyProxyError as e:
-        print(f"BŁĄD KONFIGURACJI: {e}")
-        return 2
-
     # Sprawdzamy WSZYSTKIE klucze z env, nie tylko te widoczne dla rotatora: przy
     # dziurze w numeracji (jest ...TOKEN40 i ...TOKEN42, brakuje 41) rotator urywa
     # na 40 — a dziura to literówka, którą ktoś kiedyś naprawi. Weryfikacja tylko
@@ -1216,6 +1210,17 @@ def _main(argv: list[str]) -> int:
         print(f"UWAGA: {hidden} kluczy jest niewidocznych dla rotatora (dziura w "
               f"numeracji APIFY_API_TOKEN{{N}}) — sprawdzam je razem z resztą, bo po "
               f"naprawie numeracji zaczną być używane.")
+
+    try:
+        # tokens=tokens_all włącza wyrównanie PO hashu (patrz `_wyrownaj_przypisania`)
+        # — liczone TU, przed samym `describe`/podglądem, żeby podgląd pokazywał
+        # DOKŁADNIE to przypisanie, które dostanie run z tym samym zestawem kluczy.
+        # Budowanie cfg bez tokenów (jak poprzednio) liczyło gołe rendezvous
+        # hashing i pokazywało gorszy rozkład niż to, co realnie dostaje produkcja.
+        cfg = load_proxy_config(tokens=tokens_all)
+    except ApifyProxyError as e:
+        print(f"BŁĄD KONFIGURACJI: {e}")
+        return 2
 
     print(describe(cfg))
     for w in cfg.warnings:

@@ -12,6 +12,7 @@ przycisków. Każdy z tych trzech kroków pominięty osobno daje inny, cichy bł
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -600,6 +601,39 @@ def test_limity_sekcja_proxy_oznacza_kwarantanne(monkeypatch):
     tekst = bot._limity(conn)
     assert "w kwarantannie 1" in tekst
     assert "⚠ w kwarantannie" in tekst
+
+
+def test_limity_sekcja_proxy_pokazuje_wiek_darmowej_puli(monkeypatch):
+    """Darmowa pula (APIFY_PROXY_POOL=1) gnije w godzinach — operator sprawdzający
+    z Telegrama musi widzieć jej wiek, nie tylko liczbę adresów i kwarantannę."""
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://u:p@a.example:8000,http://u:p@b.example:8000"})
+    cfg = dataclasses.replace(cfg, pool_from_file=2, pool_age_h=1.5)
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "Darmowa pula: 2 z 2 adresów (odświeżona 1.5 h temu)" in tekst
+
+
+def test_limity_sekcja_proxy_pokazuje_ostrzezenia_konfiguracji(monkeypatch):
+    """Ostrzeżenia z `load_proxy_config` (np. stara pula, brak {session}) dotąd
+    lądowały tylko w logu workera — operator na Telegramie ich nie widział."""
+    monkeypatch.setattr(bot, "load_apify_tokens", lambda: ["tok_a"])
+    monkeypatch.setattr(bot.apify_credits, "pula_stanu", lambda tokens, **k: [_konto_ok()])
+    cfg = bot.apify_proxy.load_proxy_config(
+        {"APIFY_PROXY_URLS": "http://u:p@a.example:8000,http://u:p@b.example:8000"})
+    cfg = dataclasses.replace(
+        cfg, warnings=("plik puli proxy jest STARY (12.0 h, limit 6 h) — odśwież go "
+                       "po swojej stronie albo wyłącz pulę (APIFY_PROXY_POOL=0)",))
+    monkeypatch.setattr(bot.apify_proxy, "load_proxy_config", lambda **k: cfg)
+    monkeypatch.setattr(bot.apify_proxy, "wczytaj_stan_proxy", lambda conn, urls: {})
+    conn = _Polaczenie([(0, None), (0,)])
+    tekst = bot._limity(conn)
+    assert "⚠ plik puli proxy jest STARY" in tekst
+    assert "APIFY\\_PROXY\\_POOL" in tekst    # underscore uciekniety (legacy Markdown)
 
 
 def test_limity_sekcja_proxy_bez_przypisania_pokazuje_ip_vpsa(monkeypatch):
